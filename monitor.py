@@ -154,7 +154,7 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             # Use /sys/class/thermal/thermal_zone*/temp for CPU temp (multiple zones)
             # Use /proc/net/dev for per-interface network byte counters
             shell_cmd = (
-                "nvidia-smi '--query-gpu=name,memory.used,memory.total,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown' '--format=csv,noheader,nounits' 2>/dev/null || true; "
+                "nvidia-smi '--query-gpu=name,memory.used,memory.total,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake_slowdown' '--format=csv,noheader,nounits' 2>/dev/null || true; "
                 "echo '===APPS==='; "
                 "nvidia-smi '--query-compute-apps=used_memory,name' '--format=csv,noheader,nounits' 2>/dev/null || true; "
                 "echo '===MEMINFO==='; "
@@ -179,37 +179,37 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                 ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", ssh_prefix, shell_cmd]
                 combined_out = subprocess.check_output(ssh_cmd, stderr=subprocess.DEVNULL, timeout=3).decode('utf-8')
                 
-                sections = combined_out.split('===')
-                gpu_out = sections[0].strip()
-                apps_out = ""
-                meminfo_out = ""
-                ps_out = ""
-                cpu_out = ""
-                cpu_info = ""
-                temp_out = ""
-                
-                for s in sections[1:]:
-                    s = s.strip()
-                    if s.startswith('APPS'):
-                        apps_out = s[4:].strip()
-                    elif s.startswith('MEMINFO'):
-                        meminfo_out = s[7:].strip()
-                    elif s.startswith('PS'):
-                        ps_out = s[2:].strip()
-                    elif s.startswith('CPUSTAT'):
-                        cpu_stat_out = s[7:].strip()
-                    elif s.startswith('CPUINFO'):
-                        cpu_info = s[7:].strip()
-                    elif s.startswith('CPU'):
-                        cpu_out = s[3:].strip()
-                    elif s.startswith('TEMP'):
-                        temp_out = s[4:].strip()
-                    elif s.startswith('NETDEV'):
-                        netdev_out = s[6:].strip()
+                # Parse sections by looking for ===MARKER=== lines in the output.
+                # The echo '===MARKER===' lines contain only the marker, and the
+                # command output follows until the next marker. Splitting on '==='
+                # breaks markers and data into separate elements, so we parse line-by-line.
+                section_lines = {}
+                current_section = "gpu"  # data before first marker is GPU output
+                for line in combined_out.split('\n'):
+                    stripped = line.strip()
+                    if stripped.startswith('===') and stripped.endswith('==='):
+                        section_name = stripped.strip('=')
+                        current_section = section_name
+                        if section_name not in section_lines:
+                            section_lines[section_name] = []
+                    else:
+                        if current_section not in section_lines:
+                            section_lines[current_section] = []
+                        section_lines[current_section].append(line)
+
+                gpu_out = '\n'.join(section_lines.get('gpu', [])).strip()
+                apps_out = '\n'.join(section_lines.get('APPS', [])).strip()
+                meminfo_out = '\n'.join(section_lines.get('MEMINFO', [])).strip()
+                ps_out = '\n'.join(section_lines.get('PS', [])).strip()
+                cpu_out = '\n'.join(section_lines.get('CPU', [])).strip()
+                cpu_stat_out = '\n'.join(section_lines.get('CPUSTAT', [])).strip()
+                cpu_info = '\n'.join(section_lines.get('CPUINFO', [])).strip()
+                temp_out = '\n'.join(section_lines.get('TEMP', [])).strip()
+                netdev_out = '\n'.join(section_lines.get('NETDEV', [])).strip()
             except Exception:
                 # Fail fast and return empty / offline indicators, with error flag
                 return {
-                    "gpu_name": "Offline", "gpu_throttle": False,
+                    "gpu_name": "Offline", "gpu_throttle": False, "throttle_reasons": [],
                     "vram_used": 0, "vram_total": 1, "process_vram": 0,
                     "gpu_pwr": 0, "gpu_temp": 0, "gpu_util": 0,
                     "ram_used": 0, "ram_total": 1, "process_ram": 0,
@@ -227,7 +227,7 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             temp_out = ""
             
             try:
-                gpu_out = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown", "--format=csv,noheader,nounits"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8').strip()
+                gpu_out = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake_slowdown", "--format=csv,noheader,nounits"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8').strip()
             except Exception as e:
                 nvidia_smi_error = True
             
@@ -242,6 +242,11 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 cpu_out = subprocess.check_output(["top", "-bn1"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
             except Exception: pass
+            
+            try:
+                cpu_stat_out = open('/proc/stat').read()
+            except Exception:
+                cpu_stat_out = ""
             
             try:
                 cpu_info = subprocess.check_output(["cat", "/proc/cpuinfo"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
@@ -283,9 +288,21 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             gpu_pwr = float(parts[3].strip() if parts[3].strip() != '[Not Supported]' else 0)
             gpu_temp = int(parts[4].strip())
             gpu_util = int(parts[5].strip())
-            gpu_throttle = 'Active' in parts[6] or 'Active' in parts[7]
+            # Granular throttle reasons: positions 6-9 in the query
+            throttle_fields = [
+                'hw_thermal_slowdown',
+                'sw_thermal_slowdown',
+                'sw_power_cap',
+                'hw_power_brake_slowdown'
+            ]
+            throttle_reasons = []
+            for i, field in enumerate(throttle_fields):
+                if i < len(parts) and 'Active' in parts[i + 6]:
+                    throttle_reasons.append(field)
+            gpu_throttle = len(throttle_reasons) > 0
         except Exception as e:
             gpu_name, vram_used, vram_total, gpu_pwr, gpu_temp, gpu_util, gpu_throttle = "Unknown", 0, 1, 0, 0, 0, False
+            throttle_reasons = []
 
         # Process VRAM Metrics
         # Match: llama-server (master), ggml-rpc-server (worker), or any line containing 'llama'/'ggml-rpc'
@@ -324,15 +341,45 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
 
         # CPU Metrics — try top first, fall back to /proc/stat delta
         cpu_util = 0.0
+        cpu_parse_method = "none"
         try:
-            cpu_line = [l for l in cpu_out.split('\n') if "Cpu(s)" in l][0]
-            idle = float(cpu_line.split(',')[3].split('id')[0].strip())
-            cpu_util = 100.0 - idle
-        except Exception:
-            # Fallback: parse /proc/stat first two samples 0.1s apart
+            # Handle both "Cpu(s)" and "%Cpu(s)" formats across top versions
+            cpu_line_candidates = [l for l in cpu_out.split('\n') if "Cpu(s)" in l or "%Cpu(s)" in l]
+            if cpu_line_candidates:
+                cpu_line = cpu_line_candidates[0]
+                # Parse idle value: handle both comma-separated and space-separated formats
+                # Typical: "Cpu(s):  2.5%us,  1.0%sy,  0.0%ni, 95.0%id,  0.0%wa,  0.0%hi,  0.0%si,  1.5%st"
+                # Or:      "%Cpu0:  2.5 us,  1.0 sy,  0.0 ni, 95.0 id,  0.0 wa,  0.0 hi,  0.0 si,  1.5 st"
+                idle_str = None
+                parts_list = [p.strip().rstrip('%') for p in cpu_line.split(',')]
+                # Find the "id" field by position (4th field after Cpu(s): us, sy, ni, id)
+                for p in parts_list:
+                    if 'id' in p:
+                        # Extract the number before "id"
+                        idle_str = p.split('id')[0].strip()
+                        break
+                if idle_str:
+                    idle = float(idle_str)
+                    cpu_util = 100.0 - idle
+                    cpu_parse_method = "top"
+                else:
+                    print(f"[monitor] CPU top parse: no idle field in: {cpu_line!r}")
+            else:
+                print(f"[monitor] CPU top parse: no Cpu(s) line found in top output")
+        except Exception as e:
+            print(f"[monitor] CPU top parse error: {e} — falling back to /proc/stat")
+            cpu_parse_method = "fallback"
+        if cpu_parse_method != "top":
+            # Fallback: parse /proc/stat cumulative stats
             try:
-                cpu_util = _parse_cpu_util_from_stat(cpu_stat_out if ssh_prefix else "")
-            except Exception:
+                if cpu_stat_out:
+                    cpu_util = _parse_cpu_util_from_stat(cpu_stat_out)
+                    cpu_parse_method = "proc_stat" if not ssh_prefix else "proc_stat_remote"
+                else:
+                    print("[monitor] CPU fallback: no /proc/stat data available")
+                    cpu_util = 0.0
+            except Exception as e:
+                print(f"[monitor] CPU /proc/stat fallback error: {e}")
                 cpu_util = 0.0
 
         try:
@@ -364,7 +411,7 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             net_bytes = get_net_bytes()
 
         return {
-            "gpu_name": gpu_name, "gpu_throttle": gpu_throttle,
+            "gpu_name": gpu_name, "gpu_throttle": gpu_throttle, "throttle_reasons": throttle_reasons,
             "vram_used": vram_used, "vram_total": vram_total, "process_vram": process_vram,
             "gpu_pwr": gpu_pwr, "gpu_temp": gpu_temp, "gpu_util": gpu_util,
             "ram_used": ram_used, "ram_total": ram_total, "process_ram": process_ram,
