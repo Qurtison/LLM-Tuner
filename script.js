@@ -192,6 +192,9 @@ let cpuTempChart = createDualLineChart('cpuTempChart');
 
 let tempHistory = []; let pwrHistory = []; let cpuHistory = [];
 let gpuUtilHistory = []; let cpuTempHistory = [];
+// Full histories for expand modals (net/tps are single-line charts)
+let netHistoryFull = []; // {time, value}
+let tpsHistoryFull = []; // {time, value}
 
 // UI Listeners for Transport and Tensor Split
 document.getElementById('transport-type').addEventListener('change', (e) => {
@@ -1349,6 +1352,9 @@ async function pollTelemetry() {
                 sessionData.netThroughput = mbs.toFixed(1); // logs peak or last
                 netHistory.push({ time: Date.now(), mbps: mbs }); if(netHistory.length > 30) netHistory.shift();
                 netChart.data.labels = netHistory.map(h => h.time); netChart.data.datasets[0].data = netHistory.map(h => h.mbps); netChart.update('none');
+                // Full history for expand modal
+                netHistoryFull.push({ time: new Date().toLocaleTimeString(), value: mbs });
+                if (netHistoryFull.length > 200) netHistoryFull.shift();
             }
             if (isNum(currentBytes)) lastNetBytes = currentBytes;
         }
@@ -1888,12 +1894,23 @@ window.expandChart = function(chartId, title) {
     let fullLabels = [];
     let fullData0 = [];
     let fullData1 = [];
+    let isSingleLine = false;
+    let singleColor = null;
+    let singleLabel = '';
     
     if (chartId === 'tempChart') { fullLabels = tempHistory.map(h=>h.time); fullData0 = tempHistory.map(h=>h.master); fullData1 = tempHistory.map(h=>h.worker); }
     else if (chartId === 'pwrChart') { fullLabels = pwrHistory.map(h=>h.time); fullData0 = pwrHistory.map(h=>h.master); fullData1 = pwrHistory.map(h=>h.worker); }
     else if (chartId === 'cpuChart') { fullLabels = cpuHistory.map(h=>h.time); fullData0 = cpuHistory.map(h=>h.master); fullData1 = cpuHistory.map(h=>h.worker); }
     else if (chartId === 'gpuUtilChart') { fullLabels = gpuUtilHistory.map(h=>h.time); fullData0 = gpuUtilHistory.map(h=>h.master); fullData1 = gpuUtilHistory.map(h=>h.worker); }
     else if (chartId === 'cpuTempChart') { fullLabels = cpuTempHistory.map(h=>h.time); fullData0 = cpuTempHistory.map(h=>h.master); fullData1 = cpuTempHistory.map(h=>h.worker); }
+    else if (chartId === 'netChart') {
+        fullLabels = netHistoryFull.map(h=>h.time); fullData0 = netHistoryFull.map(h=>h.value);
+        isSingleLine = true; singleColor = 'rgba(96, 165, 250, 1)'; singleLabel = 'Net MB/s';
+    }
+    else if (chartId === 'tpsChart') {
+        fullLabels = tpsHistory.map(h=>h.time); fullData0 = tpsHistory.map(h=>h.tps);
+        isSingleLine = true; singleColor = 'rgba(74, 222, 128, 1)'; singleLabel = 'Tokens/sec';
+    }
     else return;
 
     setTimeout(() => {
@@ -1926,40 +1943,46 @@ window.expandChart = function(chartId, title) {
             }
         };
 
-        expandedChartInst = new Chart(canvas.getContext('2d'), {
-            type: 'line',
-            plugins: [verticalLinePlugin],
-            data: {
-                labels: fullLabels,
-                datasets: [
-                    {
-                        label: 'Master',
+        if (isSingleLine) {
+            expandedChartInst = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                plugins: [verticalLinePlugin],
+                data: {
+                    labels: fullLabels,
+                    datasets: [{
+                        label: singleLabel,
                         data: fullData0,
-                        borderColor: 'rgba(250, 204, 21, 1)',
-                        backgroundColor: 'rgba(250, 204, 21, 0.1)',
+                        borderColor: singleColor,
+                        backgroundColor: singleColor.replace('1)', '0.1)'),
                         fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2
-                    },
-                    {
-                        label: 'Worker',
-                        data: fullData1,
-                        borderColor: 'rgba(248, 113, 113, 1)',
-                        backgroundColor: 'rgba(248, 113, 113, 0.1)',
-                        fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                animation: { duration: 0 },
-                interaction: { intersect: false, mode: 'index' },
-                plugins: { legend: { display: true, labels: { color: '#9ca3af' } } },
-                scales: {
-                    x: { display: false },
-                    y: { grid: { color: 'rgba(55, 65, 81, 0.5)' }, ticks: { color: '#9ca3af' } }
+                    }]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: { legend: { display: true, labels: { color: '#9ca3af' } } },
+                    scales: { x: { display: false }, y: { grid: { color: 'rgba(55, 65, 81, 0.5)' }, ticks: { color: '#9ca3af' } } }
                 }
-            }
-        });
+            });
+        } else {
+            expandedChartInst = new Chart(canvas.getContext('2d'), {
+                type: 'line',
+                plugins: [verticalLinePlugin],
+                data: {
+                    labels: fullLabels,
+                    datasets: [
+                        { label: 'Master', data: fullData0, borderColor: 'rgba(250, 204, 21, 1)', backgroundColor: 'rgba(250, 204, 21, 0.1)', fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2 },
+                        { label: 'Worker', data: fullData1, borderColor: 'rgba(248, 113, 113, 1)', backgroundColor: 'rgba(248, 113, 113, 0.1)', fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.2 }
+                    ]
+                },
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: { legend: { display: true, labels: { color: '#9ca3af' } } },
+                    scales: { x: { display: false }, y: { grid: { color: 'rgba(55, 65, 81, 0.5)' }, ticks: { color: '#9ca3af' } } }
+                }
+            });
+        }
     }, 50);
 };
 
