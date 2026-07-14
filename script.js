@@ -1457,6 +1457,7 @@ async function pollTelemetry() {
         }
         
         // Render throttle badges in #throttle-badges
+        // Deduplicate per-source so the same reason doesn't render twice
         const badgeContainer = document.getElementById('throttle-badges');
         const throttleLabels = {
             'hw_thermal_slowdown': 'HW Thermal',
@@ -1465,14 +1466,20 @@ async function pollTelemetry() {
             'hw_power_brake_slowdown': 'HW Power Brake'
         };
         let badgeHTML = '';
-        // Master badges (yellow)
+        // Master badges (yellow) — deduplicate
+        const seenMaster = new Set();
         for (const r of mReasons) {
+            if (seenMaster.has(r)) continue;
+            seenMaster.add(r);
             const label = throttleLabels[r] || r;
             const isThermal = thermalReasons.has(r);
             badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="Master: ${label}">${label}</span>`;
         }
-        // Worker badges (red)
+        // Worker badges (red) — deduplicate
+        const seenWorker = new Set();
         for (const r of wReasons) {
+            if (seenWorker.has(r)) continue;
+            seenWorker.add(r);
             const label = throttleLabels[r] || r;
             const isThermal = thermalReasons.has(r);
             badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/60 text-red-200 border border-red-400' : 'bg-red-900/30 text-red-300 border border-red-600/50'}" title="Worker: ${label}">${label}</span>`;
