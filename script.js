@@ -66,13 +66,12 @@ function resetRunningAverages() {
     document.getElementById('metric-gen-avg').innerText = '0.0 t/s';
 }
 
-// Load averages from localStorage
+// Item 4: Do NOT restore avg speed from localStorage on page load.
+// Averages should start fresh each session to avoid stale cross-session data.
+// (They are still saved during a session so refresh during a run doesn't lose them,
+// but we clear the stored value on load so a cold start begins at 0.)
 try {
-    const savedAverages = localStorage.getItem('cluster_averages');
-    if (savedAverages) {
-        runningAverages = JSON.parse(savedAverages);
-        setTimeout(updateAverageUI, 100);
-    }
+    localStorage.removeItem('cluster_averages');
 } catch (e) {}
 
 function saveMetricsToAverages(prefillSpeed, genSpeed) {
@@ -398,23 +397,63 @@ eventSource.onmessage = (e) => {
     } else if (data.state === 'starting' || data.state === 'loading') {
         setHardwareConfigLocked(true);
 
+        // Item 4: Reset avg speed at boot time so each new run starts fresh
+        resetRunningAverages();
+
         badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-yellow-900/20 border border-yellow-800 text-yellow-400 text-xs font-semibold';
         badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> ${data.state === 'loading' ? 'LOADING MODEL' : 'BOOTING...'}`;
         document.getElementById('btn-start-server').classList.add('hidden'); 
         document.getElementById('btn-stop-server').classList.remove('hidden');
 
+
     // } else if (!isModelLoaded) { 
+    // note: this part fixed by kyle.
     } else if (data.state === 'ready') {
         isModelLoaded = true; 
         // Capture real load time from server (fixes Item 15a: was always "N/A")
         if (data.finalLoadTime) currentLoadTime = data.finalLoadTime;
         setTimeout(() => { masterBaseVram = currentVramSnapshot; }, 2000); 
 
+        // to test:
+        // remove 'disabled' from the #user-prompt and the #submit-btn
+        document.querySelector('#user-prompt').disabled = false;
+        document.querySelector('#submit-btn').disabled = false;
+
+
+        // Identify and remove existing Tailwind classes that might clash
+        const clashingClasses = Array.from(badge.classList).filter(cls => 
+            cls.startsWith('bg-') || 
+            cls.startsWith('text-') || 
+            cls.startsWith('border-')
+
+            && !cls.includes('green')
+            // this 'green' exclusion isn't working, so this runs over and over again. not a significant bug, but annoying.
+        );
+        
+        console.log("removing clashing classes:", clashingClasses);
+        if (clashingClasses.length > 0) {
+            badge.classList.remove(...clashingClasses);
+        }
+
+        // Apply new green theme classes
+        // bg-green-100: background
+        // text-green-800: text color
+        // border-green-600: trim/border color
+        // border: enables the border
+        badge.classList.add(
+            'bg-green-100',
+            'text-green-800',
+            'border',
+            'border-green-600'
+        );
+
         // BUG FIX: Hide boot overlay when model is fully loaded
         if (uiTimerInterval) { clearInterval(uiTimerInterval); uiTimerInterval = null; }
         bootProgressFill.style.width = '100%';
+        
         bootStatusText.innerText = 'Model Loaded!';
-        badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span> ${data.state === 'ready' ? 'READY' : 'BOOTING...'}`;
+        // todo: the badge outline and background and text colors are still red
+        badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span> ${data.state === 'ready' ? 'RUNNING' : 'BOOTING...'}`;
         setTimeout(() => {
             bootOverlay.classList.add('hidden');
             bootOverlay.classList.remove('flex');
