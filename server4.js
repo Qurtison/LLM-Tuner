@@ -266,6 +266,60 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // --- LOGS SUMMARY (Item 15b) ---
+        // Returns aggregate stats from the benchmarks CSV so the UI can
+        // display "Best Gen Speed", "Avg Prefill", etc. without parsing
+        // CSV on the client side.
+        else if (req.url === '/api/logs/summary' && req.method === 'GET') {
+            try {
+                const csv = await fs.readFile(CSV_FILE, 'utf-8');
+                const lines = csv.trim().split('\n').slice(1); // skip header
+                if (lines.length <= 1) {
+                    // empty or header-only
+                    return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ count: 0 }));
+                }
+                // CSV columns (0-indexed):
+                //  9=promptTps, 10=genTps, 11=promptLatency, 12=masterGpuUtil,
+                //  13=masterGpuPwr, 26=genTokens, 27=reasonTokens, 28=wallTime, 29=loadTime
+                let n = 0, sumPromptTps = 0, sumGenTps = 0, sumPromptLat = 0, sumWallTime = 0, sumLoadTime = 0;
+                let bestPromptTps = 0, bestGenTps = 0, bestPromptLat = Infinity, bestWallTime = Infinity, bestLoadTime = Infinity;
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    const cols = line.split(',');
+                    if (cols.length < 30) continue;
+                    const pTps = parseFloat(cols[9]);
+                    const gTps = parseFloat(cols[10]);
+                    const pLat = parseFloat(cols[11]);
+                    const wTime = parseFloat(cols[28]);
+                    const lTime = parseFloat(cols[29]);
+                    if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; }
+                    if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; }
+                    if (Number.isFinite(pLat))  { sumPromptLat += pLat; if (pLat < bestPromptLat)   bestPromptLat = pLat; }
+                    if (Number.isFinite(wTime)) { sumWallTime += wTime; if (wTime < bestWallTime)   bestWallTime = wTime; }
+                    if (Number.isFinite(lTime)) { sumLoadTime += lTime; if (lTime < bestLoadTime)   bestLoadTime = lTime; }
+                    n++;
+                }
+                const avg = (v, c) => c > 0 ? (v / c) : 0;
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({
+                    count: n,
+                    avgPromptTps: avg(sumPromptTps, n),
+                    avgGenTps: avg(sumGenTps, n),
+                    avgPromptLatency: avg(sumPromptLat, n),
+                    avgWallTime: avg(sumWallTime, n),
+                    avgLoadTime: avg(sumLoadTime, n),
+                    bestPromptTps: bestPromptTps || 0,
+                    bestGenTps: bestGenTps || 0,
+                    bestPromptLatency: isFinite(bestPromptLat) ? bestPromptLat : 0,
+                    bestWallTime: isFinite(bestWallTime) ? bestWallTime : 0,
+                    bestLoadTime: isFinite(bestLoadTime) ? bestLoadTime : 0,
+                }));
+            } catch {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ count: 0 }));
+            }
+        }
+
         // --- START SERVER ---
         else if (req.url === '/api/start' && req.method === 'POST') {
             let body;

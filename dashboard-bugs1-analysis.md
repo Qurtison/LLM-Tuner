@@ -287,3 +287,16 @@ The CSV already has every column needed for grouping: `Model` (`config.model`, n
 1. Add a new read-only endpoint, e.g. `GET /api/logs/summary`, in `server4.js` (alongside the existing `/api/logs/csv` handler at `server4.js:229-238`). It should read `CSV_FILE`, parse rows, group by `(Model, RPC, Transport)`, and compute average and median of the `Load Time`, `Prompt Tok/s`, and `Gen Tok/s` columns per group — filter out rows where `Load Time` is `N/A` (pre-fix rows, and any row where the run was aborted before load finished).
 2. On the client, when a model + RPC + transport combination is selected in the launch config UI (`#model-select`, `#rpc-toggle`, `#transport-type`), fetch this summary and show the matching group's numbers somewhere near the boot button — e.g. "Expected load: ~42s (median of 6 runs) · ~85 t/s gen" — so the user has a baseline before clicking "Boot Cluster."
 3. Keep this additive: if no historical rows match the current combination (new model, or a transport never tried before), show nothing/"No history yet" rather than a misleading zero or average-of-nothing.
+
+---
+
+July 14, updated notes on what I see:
+
+- 8b: master logs should fade at top, not bottom, like thinking does.
+- 8b: when scrolled to the bottom, it should stay locked to the bottom scroll (so you can see as new messages appear continuously)
+- 9: the gpu throttle tags duplicate. I see two copies of hw thermal and sw thermal for the worker. also, the power throttle badges should show up in the power graph, and that graph should also pulse red when there's a live throttle happening for them. 
+- other: the model names for both graphics and cpu are truncated with ellipses even when I've made the screen large enough to show them.
+- 3: those new "expandable charts" just make the full screen modal, but don't populate that modal with a bigger graph with more historical data.
+- 7: I don't see any loading bar showing up.
+- 10: working!
+- 11: I don't see a per-response graph at all now...

@@ -240,6 +240,32 @@ async function fetchModels() {
 }
 fetchModels();
 
+// --- Item 15c: Load historical stats summary from server ---
+async function loadHistoricalStats() {
+    const el = document.getElementById('historical-stats');
+    try {
+        const res = await fetch('/api/logs/summary');
+        const data = await res.json();
+        if (!data || data.runs === 0) {
+            el.classList.add('hidden');
+            el.innerHTML = '';
+            return;
+        }
+        const avgLoad = data.avgLoadTime != null ? `${data.avgLoadTime}s` : 'N/A';
+        const avgGen = data.avgGenTps != null ? `${data.avgGenTps} t/s` : 'N/A';
+        const avgPrompt = data.avgPromptTps != null ? `${data.avgPromptTps} t/s` : 'N/A';
+        const lastModel = data.lastModel ? data.lastModel.replace(/^.*\//, '') : 'N/A';
+        el.innerHTML = `
+            <div>Runs: <span class="text-gray-300">${data.runs}</span> | Last: <span class="text-gray-300">${lastModel}</span></div>
+            <div>Avg Load: <span class="text-gray-300">${avgLoad}</span> | Avg Prefill: <span class="text-gray-300">${avgPrompt}</span> | Avg Gen: <span class="text-gray-300">${avgGen}</span></div>
+        `;
+        el.classList.remove('hidden');
+    } catch {
+        el.classList.add('hidden');
+    }
+}
+loadHistoricalStats();
+
 // --- Server SSE State ---
 let eventSource = new EventSource('/api/status');
 window.addEventListener('beforeunload', () => eventSource.close());
@@ -344,6 +370,8 @@ eventSource.onmessage = (e) => {
         document.getElementById('status-indicator').innerText = 'Generating...';
         // Reset running averages when engine is stopped (model change boundary)
         resetRunningAverages();
+        // Item 15c: Refresh historical stats after each run
+        loadHistoricalStats();
     
     } else if (data.state === 'starting' || data.state === 'loading') {
         setHardwareConfigLocked(true);
@@ -356,6 +384,8 @@ eventSource.onmessage = (e) => {
     // } else if (!isModelLoaded) { 
     } else if (data.state === 'ready') {
         isModelLoaded = true; 
+        // Capture real load time from server (fixes Item 15a: was always "N/A")
+        if (data.finalLoadTime) currentLoadTime = data.finalLoadTime;
         setTimeout(() => { masterBaseVram = currentVramSnapshot; }, 2000); 
 
         // BUG FIX: Hide boot overlay when model is fully loaded
