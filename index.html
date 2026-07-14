@@ -184,26 +184,6 @@
                             <button id="btn-worker-start" class="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-medium transition-colors">Start Worker</button>
                             <button id="btn-worker-stop" class="flex-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] font-medium transition-colors">Stop</button>
                         </div>
-                        <div class="space-y-1">
-                            <button id="btn-worker-logs-toggle" class="w-full flex justify-between items-center text-[10px] text-gray-400 hover:text-white pt-1">
-                                <span>Worker Logs</span>
-                                <span id="worker-logs-icon" class="text-[8px] transition-transform">▶</span>
-                            </button>
-                            <div id="worker-logs-pre" class="hidden w-full bg-gray-950 p-2 rounded border border-gray-800 text-[9px] font-mono text-gray-400 max-h-32 overflow-y-auto whitespace-pre-wrap select-text">
-                                No logs fetched yet.
-                            </div>
-                        </div>
-
-                        <div class="space-y-1 mt-2">
-                            <button id="btn-master-logs-toggle" class="w-full flex justify-between items-center text-[10px] text-gray-400 hover:text-white pt-1">
-                                <span>Master Logs</span>
-                                <span id="master-logs-icon" class="text-[8px] transition-transform">▶</span>
-                            </button>
-                            <div id="master-logs-pre" class="hidden w-full bg-gray-950 p-2 rounded border border-gray-800 text-[9px] font-mono text-gray-400 max-h-32 overflow-y-auto whitespace-pre-wrap select-text">
-                                No logs fetched yet.
-                            </div>
-                        </div>
-                    </div>
                         <div id="tensor-split-container" class="hidden pt-2 border-t border-gray-700/50 mt-2">
                             <div class="flex justify-between text-[10px] text-gray-400 mb-1">
                                 <span>Tensor Split (Master/Worker)</span>
@@ -218,6 +198,35 @@
                         <button id="btn-start-server" class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors">Boot Cluster</button>
                     </div>
                     <div id="boot-timer" class="text-[10px] text-gray-500 text-center font-mono hidden mt-1">Boot Time: 0.0s</div>
+                </div>
+            </div>
+
+            <!-- Log Panels (moved out of RPC section, item 8b) -->
+            <div class="space-y-2">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xs font-bold tracking-wider text-gray-500 uppercase">Server Logs</h2>
+                </div>
+
+                <!-- Master Logs -->
+                <div class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
+                    <button id="btn-master-logs-toggle" class="w-full flex justify-between items-center px-3 py-2 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
+                        <span class="flex items-center gap-2"><span class="text-yellow-400">●</span> Master Logs</span>
+                        <span id="master-logs-icon" class="text-[9px] transition-transform">&#9654;</span>
+                    </button>
+                    <div id="master-logs-body" class="max-h-0 overflow-hidden transition-[max-height] duration-300">
+                        <pre id="master-logs-pre" class="px-3 py-2 pb-16 text-[9px] font-mono text-gray-400 max-h-80 overflow-y-auto whitespace-pre-wrap select-text bg-gray-950/50" style="mask-image: linear-gradient(to bottom, black 40%, transparent 100%);">No logs fetched yet.</pre>
+                    </div>
+                </div>
+
+                <!-- Worker Logs -->
+                <div class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
+                    <button id="btn-worker-logs-toggle" class="w-full flex justify-between items-center px-3 py-2 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
+                        <span class="flex items-center gap-2"><span class="text-red-400">●</span> Worker Logs</span>
+                        <span id="worker-logs-icon" class="text-[9px] transition-transform">&#9654;</span>
+                    </button>
+                    <div id="worker-logs-body" class="max-h-0 overflow-hidden transition-[max-height] duration-300">
+                        <pre id="worker-logs-pre" class="px-3 py-2 pb-16 text-[9px] font-mono text-gray-400 max-h-80 overflow-y-auto whitespace-pre-wrap select-text bg-gray-950/50" style="mask-image: linear-gradient(to bottom, black 40%, transparent 100%);">No logs fetched yet.</pre>
+                    </div>
                 </div>
             </div>
 

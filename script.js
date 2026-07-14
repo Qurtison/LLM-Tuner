@@ -1079,16 +1079,16 @@ document.getElementById('btn-worker-stop').addEventListener('click', async () =>
 
 document.getElementById('btn-worker-logs-toggle').addEventListener('click', () => {
     showWorkerLogs = !showWorkerLogs;
-    const container = document.getElementById('worker-logs-pre');
+    const body = document.getElementById('worker-logs-body');
     const icon = document.getElementById('worker-logs-icon');
     if (showWorkerLogs) {
-        container.classList.remove('hidden');
-        icon.innerText = '▼';
+        body.style.maxHeight = '40rem';
+        icon.innerHTML = '&#9660;';
         fetchWorkerLogs();
         workerLogsInterval = setInterval(fetchWorkerLogs, 3000);
     } else {
-        container.classList.add('hidden');
-        icon.innerText = '▶';
+        body.style.maxHeight = '0';
+        icon.innerHTML = '&#9654;';
         clearInterval(workerLogsInterval);
     }
 });
@@ -1110,16 +1110,16 @@ async function fetchMasterLogs() {
 
 document.getElementById('btn-master-logs-toggle').addEventListener('click', () => {
     showMasterLogs = !showMasterLogs;
-    const container = document.getElementById('master-logs-pre');
+    const body = document.getElementById('master-logs-body');
     const icon = document.getElementById('master-logs-icon');
     if (showMasterLogs) {
-        container.classList.remove('hidden');
-        icon.innerText = '▼';
+        body.style.maxHeight = '40rem';
+        icon.innerHTML = '&#9660;';
         fetchMasterLogs();
         masterLogsInterval = setInterval(fetchMasterLogs, 3000);
     } else {
-        container.classList.add('hidden');
-        icon.innerText = '▶';
+        body.style.maxHeight = '0';
+        icon.innerHTML = '&#9654;';
         clearInterval(masterLogsInterval);
     }
 });
