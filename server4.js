@@ -297,8 +297,15 @@ const server = http.createServer(async (req, res) => {
                     broadcastState();
                 }
                 else if (text.includes('prompt processing, n_tokens =')) {
-                    const match = text.match(/progress = (0\.\d+|1\.00)/);
-                    if (match) broadcastState(`PREFILL_PROGRESS:${match[1]}`);
+                    // Parse: prompt processing, n_tokens =  8192, progress = 0.66, t =  3.61 s / 2272.33 tokens per second
+                    const nTokensMatch = text.match(/n_tokens =\s*(\d+)/);
+                    const progressMatch = text.match(/progress = (0\.\d+|1\.00)/);
+                    const tpsMatch = text.match(/(\d+\.?\d*)\s*tokens per second/);
+                    if (progressMatch) {
+                        const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
+                        const tps = tpsMatch ? tpsMatch[1] : '0';
+                        broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
+                    }
                 }
                 else if (text.includes('abort') || text.toLowerCase().includes('error:') || text.includes('failed to fit params to free device memory')) {
                     serverState = 'stopped';

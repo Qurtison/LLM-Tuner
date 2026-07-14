@@ -288,10 +288,11 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             gpu_name, vram_used, vram_total, gpu_pwr, gpu_temp, gpu_util, gpu_throttle = "Unknown", 0, 1, 0, 0, 0, False
 
         # Process VRAM Metrics
+        # Match: llama-server (master), ggml-rpc-server (worker), or any line containing 'llama'/'ggml-rpc'
         process_vram = 0
         try:
             for line in apps_out.split('\n'):
-                if 'llama-server' in line or 'llama' in line:
+                if ('llama-server' in line or 'ggml-rpc-server' in line or 'llama' in line or 'ggml-rpc' in line):
                     parts = line.strip().split(',')
                     if len(parts) >= 2:
                         process_vram += int(float(parts[0]))
@@ -308,13 +309,13 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         if ram_used < 0:
             ram_used = 0
 
-        # Process RAM Metrics — sum of RSS (from `ps`) for llama-server processes.
+        # Process RAM Metrics — sum of RSS (from `ps`) for llama-server / ggml-rpc-server processes.
         # This is correct as-is; RSS includes file-backed mmap pages which is
         # the behavior we want to measure here.
         process_ram = 0
         try:
             for line in ps_out.split('\n'):
-                if 'llama-server' in line:
+                if 'llama-server' in line or 'ggml-rpc-server' in line:
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         process_ram += int(parts[0]) // 1024
