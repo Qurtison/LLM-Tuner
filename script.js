@@ -544,6 +544,8 @@ let responseMetrics = [];
 let hwChartInst = null;
 let hwChartContainer = null;
 let hwChartCanvas = null;
+// Track current phase for dynamic t/s line color: 'prefill' | 'think' | 'answer'
+let currentResponsePhase = 'prefill';
 
 async function submitPrompt() {
     const inputEl = document.getElementById('user-prompt');
@@ -604,7 +606,7 @@ async function submitPrompt() {
                         <div class="prefill-bar-fill bg-gradient-to-r from-yellow-600 to-yellow-400 h-full rounded-full transition-all duration-150 ease-out" style="width: 0%"></div>
                     </div>
                 </div>
-                <div class="hw-chart-container hidden mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-2" style="height:100px">
+                <div class="hw-chart-container hidden mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-2 cursor-pointer" style="height:140px" onclick="expandHwChart()">
                     <canvas class="hw-chart-canvas"></canvas>
                 </div>
             </div>
@@ -769,6 +771,8 @@ async function submitPrompt() {
                 timeToFirstToken = (Date.now() - startTime) / 1000; // in seconds
                 sessionData.promptLatency = timeToFirstToken.toFixed(2);
                 
+                // Phase transition: prefill → think
+                currentResponsePhase = 'think';
                 // Hide the prefill loading bar now that prompt processing is done
                 hidePrefillLoadingBar();
                 
@@ -854,6 +858,8 @@ async function submitPrompt() {
                             }
                             if (delta.content) {
                                 if (timeToFirstContent === 0) {
+                                    // Phase transition: think → answer
+                                    currentResponsePhase = 'answer';
                                     timeToFirstContent = ((Date.now() - startTime) / 1000) - timeToFirstToken;
                                     timelineEls.aLbl.classList.remove('hidden');
                                     
@@ -1384,6 +1390,9 @@ async function pollTelemetry() {
         }
         // --- Feed active response hw chart ---
         if (typeof responseMetrics !== 'undefined' && hwChartCanvas) {
+            // Capture current generation t/s from the live sidebar metric
+            const genTpsText = document.getElementById('metric-gen').innerText;
+            const genTpsVal = parseFloat(genTpsText) || 0;
             const snap = {
                 t: Date.now(),
                 masterPwr: stats.master ? stats.master.gpu_pwr : 0,
@@ -1392,9 +1401,15 @@ async function pollTelemetry() {
                 masterCpuUtil: stats.master ? stats.master.cpu_util : 0,
                 workerPwr: workerReporting ? stats.worker.gpu_pwr : 0,
                 workerTemp: workerReporting ? stats.worker.gpu_temp : 0,
-                netMbps: parseFloat(sessionData.netThroughput) || 0
+                netMbps: parseFloat(sessionData.netThroughput) || 0,
+                genTps: genTpsVal
             };
             responseMetrics.push(snap);
+
+            // Phase-dependent color for the Tokens/Sec line
+            const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
+            const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
+
             if (hwChartInst) {
                 const labels = responseMetrics.map((_, i) => i);
                 hwChartInst.data.labels = labels;
@@ -1403,6 +1418,11 @@ async function pollTelemetry() {
                 hwChartInst.data.datasets[2].data = responseMetrics.map(s => s.masterTemp);
                 hwChartInst.data.datasets[3].data = responseMetrics.map(s => s.masterGpuUtil);
                 hwChartInst.data.datasets[4].data = responseMetrics.map(s => s.netMbps);
+                // Tokens/Sec line (dataset 5) — update color to match current phase
+                hwChartInst.data.datasets[5].data = responseMetrics.map(s => s.genTps);
+                hwChartInst.data.datasets[5].borderColor = tpsLineColor;
+                // CPU Util line (dataset 6)
+                hwChartInst.data.datasets[6].data = responseMetrics.map(s => s.masterCpuUtil);
                 hwChartInst.update('none');
             } else if (responseMetrics.length >= 2 && hwChartContainer) {
                 hwChartContainer.classList.remove('hidden');
@@ -1415,7 +1435,11 @@ async function pollTelemetry() {
                             { label: 'W-GPU W', data: responseMetrics.map(s => s.workerPwr), borderColor: 'rgba(248,113,113,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
                             { label: 'M-Temp °C', data: responseMetrics.map(s => s.masterTemp), borderColor: 'rgba(251,146,60,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
                             { label: 'GPU Util %', data: responseMetrics.map(s => s.masterGpuUtil), borderColor: 'rgba(167,139,250,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                            { label: 'Net MB/s', data: responseMetrics.map(s => s.netMbps), borderColor: 'rgba(52,211,153,0.8)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' }
+                            { label: 'Net MB/s', data: responseMetrics.map(s => s.netMbps), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
+                            // New: Tokens/Sec with dynamic phase color on y2 (0-100 range shared with GPU util)
+                            { label: 'Tok/s', data: responseMetrics.map(s => s.genTps), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y2' },
+                            // New: CPU Util % on y2
+                            { label: 'CPU %', data: responseMetrics.map(s => s.masterCpuUtil), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
                         ]
                     },
                     options: {
