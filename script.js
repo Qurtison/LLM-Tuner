@@ -1296,19 +1296,43 @@ async function pollTelemetry() {
         document.querySelectorAll('.master-cpu-model').forEach(el => el.innerText = `(${mCpu})`);
         document.querySelectorAll('.worker-cpu-model').forEach(el => el.innerText = `(${wCpu})`);
         
-        // GPU Throttling UI Indicator
-        if (stats.master.gpu_throttle) {
-            document.getElementById('card-gpu-temp').classList.add('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
-            document.getElementById('card-gpu-temp').classList.remove('bg-gray-800/50', 'border-gray-700/50');
+        // GPU Throttling UI Indicator — Item 9: granular throttle_reasons
+        // Thermal reasons → red pulse. Non-thermal (power cap, power brake) → informational only.
+        const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
+        const mReasons = stats.master.throttle_reasons || [];
+        const wReasons = (stats.worker && stats.worker.throttle_reasons) || [];
+        const hasThermal = [...mReasons, ...wReasons].some(r => thermalReasons.has(r));
+        const tempCard = document.getElementById('card-gpu-temp');
+        if (hasThermal) {
+            tempCard.classList.add('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
+            tempCard.classList.remove('bg-gray-800/50', 'border-gray-700/50');
         } else {
-            document.getElementById('card-gpu-temp').classList.remove('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
-            document.getElementById('card-gpu-temp').classList.add('bg-gray-800/50', 'border-gray-700/50');
+            tempCard.classList.remove('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
+            tempCard.classList.add('bg-gray-800/50', 'border-gray-700/50');
         }
         
-        if (stats.worker && stats.worker.gpu_throttle) {
-            document.getElementById('card-gpu-temp').classList.add('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
-            document.getElementById('card-gpu-temp').classList.remove('bg-gray-800/50', 'border-gray-700/50');
+        // Render throttle badges in #throttle-badges
+        const badgeContainer = document.getElementById('throttle-badges');
+        const throttleLabels = {
+            'hw_thermal_slowdown': 'HW Thermal',
+            'sw_thermal_slowdown': 'SW Thermal',
+            'sw_power_cap': 'SW Power Cap',
+            'hw_power_brake_slowdown': 'HW Power Brake'
+        };
+        let badgeHTML = '';
+        // Master badges (yellow)
+        for (const r of mReasons) {
+            const label = throttleLabels[r] || r;
+            const isThermal = thermalReasons.has(r);
+            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="Master: ${label}">${label}</span>`;
         }
+        // Worker badges (red)
+        for (const r of wReasons) {
+            const label = throttleLabels[r] || r;
+            const isThermal = thermalReasons.has(r);
+            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/60 text-red-200 border border-red-400' : 'bg-red-900/30 text-red-300 border border-red-600/50'}" title="Worker: ${label}">${label}</span>`;
+        }
+        badgeContainer.innerHTML = badgeHTML;
         
         if (workerReporting) {
             document.getElementById('current-temp').innerHTML = `<span class="text-yellow-400">${fmtUnit(masterTemp, '°C')}</span> <span class="text-gray-500">/</span> <span class="text-red-400">${fmtUnit(workerTemp, '°C')}</span>`;
