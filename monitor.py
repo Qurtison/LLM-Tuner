@@ -6,6 +6,23 @@ import time
 
 PORT = 8081
 
+def get_meminfo_usage():
+    """Read /proc/meminfo and return (total_kb, used_kb) where used = Total - Available.
+    This is the standard Linux 'true used' figure that always >= any single process's RSS."""
+    try:
+        with open('/proc/meminfo') as f:
+            values = {}
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(':')
+                    values[key] = int(parts[1])  # in kB
+        total = values.get('MemTotal', 0)
+        available = values.get('MemAvailable', 0)
+        return total, max(total - available, 0)
+    except Exception:
+        return 0, 0
+
 def get_net_bytes():
     try:
         with open('/proc/net/dev') as f:
@@ -44,14 +61,16 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(json.dumps(stats).encode())
 
     def get_stats(self, ssh_prefix=""):
+        meminfo_out = ""  # For SSH remote meminfo data; empty for local (uses /proc/meminfo directly)
+
         if ssh_prefix:
             # Combined SSH command to avoid multiple connection overheads
             shell_cmd = (
                 "nvidia-smi '--query-gpu=name,memory.used,memory.total,power.draw,temperature.gpu,utilization.gpu,clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal' '--format=csv,noheader,nounits' 2>/dev/null || true; "
                 "echo '===APPS==='; "
                 "nvidia-smi '--query-compute-apps=used_memory,name' '--format=csv,noheader,nounits' 2>/dev/null || true; "
-                "echo '===RAM==='; "
-                "free -m 2>/dev/null || true; "
+                "echo '===MEMINFO==='; "
+                "cat /proc/meminfo 2>/dev/null || true; "
                 "echo '===PS==='; "
                 "ps ax -o rss,comm 2>/dev/null || true; "
                 "echo '===CPU==='; "
@@ -68,7 +87,7 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                 sections = combined_out.split('===')
                 gpu_out = sections[0].strip()
                 apps_out = ""
-                ram_out = ""
+                meminfo_out = ""
                 ps_out = ""
                 cpu_out = ""
                 cpu_info = ""
@@ -78,8 +97,8 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                     s = s.strip()
                     if s.startswith('APPS'):
                         apps_out = s[4:].strip()
-                    elif s.startswith('RAM'):
-                        ram_out = s[3:].strip()
+                    elif s.startswith('MEMINFO'):
+                        meminfo_out = s[7:].strip()
                     elif s.startswith('PS'):
                         ps_out = s[2:].strip()
                     elif s.startswith('CPUINFO'):
@@ -102,7 +121,6 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             # Local stats (run natively, fast, no network latency)
             gpu_out = ""
             apps_out = ""
-            ram_out = ""
             ps_out = ""
             cpu_out = ""
             cpu_info = ""
@@ -114,10 +132,6 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             
             try:
                 apps_out = subprocess.check_output(["nvidia-smi", "--query-compute-apps=used_memory,name", "--format=csv,noheader,nounits"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
-            except Exception: pass
-            
-            try:
-                ram_out = subprocess.check_output(["free", "-m"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
             except Exception: pass
             
             try:
@@ -135,6 +149,25 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 temp_out = subprocess.check_output(["cat", "/sys/class/thermal/thermal_zone0/temp"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8').strip()
             except Exception: pass
+
+        # Helper to parse /proc/meminfo output (works for both local and SSH-remote data)
+        def parse_meminfo(data):
+            """Parse /proc/meminfo text and return (total_kb, used_kb)."""
+            values = {}
+            for line in data.split('\n'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(':')
+                    values[key] = int(parts[1])
+            total = values.get('MemTotal', 0)
+            available = values.get('MemAvailable', 0)
+            return total, max(total - available, 0)
+
+        # Use meminfo_out for remote (SSH), fall back to local /proc/meminfo for local
+        if meminfo_out:
+            mem_total_kb, mem_used_kb = parse_meminfo(meminfo_out)
+        else:
+            mem_total_kb, mem_used_kb = get_meminfo_usage()
 
         # PARSING DATA (Same for both local and remote)
         # GPU Metrics
@@ -160,14 +193,19 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             process_vram = 0
 
-        # RAM Metrics
-        try:
-            mem_line = [l for l in ram_out.split('\n') if l.startswith('Mem:')][0]
-            ram_total, ram_used = int(mem_line.split()[1]), int(mem_line.split()[2])
-        except Exception:
-            ram_used, ram_total = 0, 1
+        # RAM Metrics — already computed above from /proc/meminfo (Total - Available)
+        # so the figure always >= any single process's RSS, avoiding the inverted /
+        # garbage "Sys = used - Llama" display when mmap'd model pages inflate RSS.
+        ram_total = mem_total_kb // 1024  # convert kB → MB for UI
+        ram_used = mem_used_kb // 1024
+        if ram_total == 0:
+            ram_total = 1
+        if ram_used < 0:
+            ram_used = 0
 
-        # Process RAM Metrics
+        # Process RAM Metrics — sum of RSS (from `ps`) for llama-server processes.
+        # This is correct as-is; RSS includes file-backed mmap pages which is
+        # the behavior we want to measure here.
         process_ram = 0
         try:
             for line in ps_out.split('\n'):

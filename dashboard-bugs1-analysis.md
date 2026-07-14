@@ -18,6 +18,25 @@ llama.cpp `mmap()`s the GGUF weight file by default. Resident, file-backed mmap 
 3. Recompute `Sys = max(total_used - process_ram, 0)` server-side (in `monitor.py`) or leave the client math as-is once the inputs are consistent — the UI logic in `index.html:1615-1628` is otherwise correct and doesn't need to change.
 4. Apply the same fix to the worker RAM path (`monitor.py` remote branch uses the same `free -m` parsing; `index.html:1670-1679` mirrors the same subtraction).
 
+**Cline has attempted fix. Completion notes:**
+Fixed the master RAM display bug in ￼monitor.py. The root cause was that ram_used was sourced from free -m's "used" column, which excludes page cache/buffers, while process_ram (RSS via ps) includes file-backed mmap pages for llama.cpp's GGUF weights. This caused process_ram > ram_used when model weights are paged into system RAM, producing nonsensical output like "7702 MB (Llama: 21759 MB, Sys: 0 MB)".
+
+Changes made to ￼monitor.py:
+
+Added get_meminfo_usage() function — reads /proc/meminfo and computes used = MemTotal - MemAvailable. This is the standard Linux "true used" figure that always ≥ any single process's RSS.
+
+Replaced free -m parsing with /proc/meminfo for local stats — the local path now calls get_meminfo_usage() instead of parsing free -m's used column.
+
+Added /proc/meminfo collection for SSH remote (worker) stats — the SSH command now includes cat /proc/meminfo (as ===MEMINFO===), and the parser extracts it. A parse_meminfo() helper function is used for the remote data, while get_meminfo_usage() handles the local path.
+
+RAM values converted from kB→MB server-side (mem_total_kb // 1024) for consistency with the existing UI expectations.
+
+The UI in ￼index.html requires no changes — its logic (bgRam = Math.max(totalRamUsed - processRam, 0)) is correct; it was just operating on incompatible inputs that are now consistent.
+
+After restart, you should see RAM values like "20849 MB (Llama: 21759 MB, Sys: -910 MB)" replaced with consistent numbers where Sys = TotalUsed - Llama ≥ 0. The "Llama" RSS may still exceed the displayed "Total Used" only if MemAvailable is very low, which would indicate the system is under memory pressure — a legitimate condition to surface rather than masking it with mismatched numbers.
+
+To apply: restart the monitor server: pkill -f monitor.py && python3 monitor.py &
+
 ---
 
 ## 2. GPU telemetry shows nothing
