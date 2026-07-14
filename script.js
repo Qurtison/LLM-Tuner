@@ -837,6 +837,9 @@ async function submitPrompt() {
         
         tpsHistory.push({ time: Math.floor((Date.now()-startTime)/1000), tps });
         if(tpsHistory.length > 30) tpsHistory.shift();
+        // Full history for expand modal
+        tpsHistoryFull.push({ time: new Date().toLocaleTimeString(), tps });
+        if (tpsHistoryFull.length > 200) tpsHistoryFull.shift();
         
         tpsChart.data.labels = tpsHistory.map(h => h.time); 
         tpsChart.data.datasets[0].data = tpsHistory.map(h => null);
@@ -1914,7 +1917,7 @@ window.expandChart = function(chartId, title) {
         isSingleLine = true; singleColor = 'rgba(96, 165, 250, 1)'; singleLabel = 'Net MB/s';
     }
     else if (chartId === 'tpsChart') {
-        fullLabels = tpsHistory.map(h=>h.time); fullData0 = tpsHistory.map(h=>h.tps);
+        fullLabels = tpsHistoryFull.map(h=>h.time); fullData0 = tpsHistoryFull.map(h=>h.tps);
         isSingleLine = true; singleColor = 'rgba(74, 222, 128, 1)'; singleLabel = 'Tokens/sec';
     }
     else return;

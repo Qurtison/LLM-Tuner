@@ -290,13 +290,23 @@ The CSV already has every column needed for grouping: `Model` (`config.model`, n
 
 ---
 
-July 14, updated notes on what I see:
+July 14, updated notes on what I see after your recent edits:
 
+- 3: those new "expandable charts" just make the full screen modal, but don't populate that modal with a bigger graph with more historical data.
+- 6: there's no gui added for these features yet...
+- 7: I don't see any loading bar showing up.
 - 8b: master logs should fade at top, not bottom, like thinking does.
 - 8b: when scrolled to the bottom, it should stay locked to the bottom scroll (so you can see as new messages appear continuously)
 - 9: the gpu throttle tags duplicate. I see two copies of hw thermal and sw thermal for the worker. also, the power throttle badges should show up in the power graph, and that graph should also pulse red when there's a live throttle happening for them. 
+- 9: the tags should show up when the tags are active, and should disappear when the throttling is no longer happening
+- 9: if throttling isn't active, the graph should cease to be red
+- other: CPU throttling should also be indicated with flags in the same manner, and also cause red pulsing when throttling is active.
 - other: the model names for both graphics and cpu are truncated with ellipses even when I've made the screen large enough to show them.
-- 3: those new "expandable charts" just make the full screen modal, but don't populate that modal with a bigger graph with more historical data.
-- 7: I don't see any loading bar showing up.
+**- NEW: you fixed the truncation by just removing them. That was a fucking terrible choice. Add them back, just... only have ellipses truncation RESPONSIVELY, WHEN THE VIEW IS TOO NARROW TO SHOW THE FULL NAME, as opposed to just a hardcoded arbitrary width.**
 - 10: working!
 - 11: I don't see a per-response graph at all now...
+- other: when I refresh the page, the telemetry doesn't re-connect to the existing server. It shows 'ready' and 'running' for the master and worker on the left, it picks up the logs, but the telemetric graphs on the right are all empty unless I restart the server.
+
+---
+
+NOTE: YOU SHOULD UPDATE THIS DOCUMENT WITH COMPLETION SUMMARIES EVERY TIME YOU FINISH A TASK.

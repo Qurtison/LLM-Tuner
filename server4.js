@@ -367,6 +367,18 @@ const server = http.createServer(async (req, res) => {
             if (config.reasoningPreserve) {
                 args.push('--reasoning-preserve');
             }
+            // Item 6: pass-through raw arg string (takes priority when provided)
+            if (config.argString && config.argString.trim().length > 0) {
+                const rawTokens = config.argString.trim().split(/\s+/);
+                for (let i = 0; i < rawTokens.length; i++) {
+                    const t = rawTokens[i];
+                    if (t === '-m' && i + 1 < rawTokens.length) {
+                        args.push('-m', toContainerPath(rawTokens[++i]));
+                    } else {
+                        args.push(t);
+                    }
+                }
+            }
 
             llamaProcess = spawn('docker', args, { cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
             // Stable reference for this process's own handlers below. `llamaProcess`
