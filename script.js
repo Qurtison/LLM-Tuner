@@ -52,6 +52,20 @@ function updateAverageUI() {
     }
 }
 
+function resetRunningAverages() {
+    runningAverages = {
+        prefillSpeedSum: 0,
+        prefillSpeedCount: 0,
+        genSpeedSum: 0,
+        genSpeedCount: 0
+    };
+    try {
+        localStorage.removeItem('cluster_averages');
+    } catch (e) {}
+    document.getElementById('metric-prefill-avg').innerText = '0.0 t/s';
+    document.getElementById('metric-gen-avg').innerText = '0.0 t/s';
+}
+
 // Load averages from localStorage
 try {
     const savedAverages = localStorage.getItem('cluster_averages');
@@ -79,7 +93,7 @@ function saveMetricsToAverages(prefillSpeed, genSpeed) {
 }
 
 function updateContextUI(currentUsed, limit) {
-    const limitVal = parseInt(limit) || 32768;
+    const limitVal = parseInt(limit) || 110000;
     document.getElementById('context-tokens-text').innerText = `${currentUsed.toLocaleString()} / ${limitVal.toLocaleString()}`;
     document.getElementById('context-limit-text').innerText = `Limit: ${limitVal.toLocaleString()}`;
     const pct = Math.min((currentUsed / limitVal) * 100, 100);
@@ -327,8 +341,9 @@ eventSource.onmessage = (e) => {
         document.getElementById('metric-gen').innerText = '0.0 t/s';
         document.getElementById('metric-gen-tokens').innerText = '0 tokens';
         document.getElementById('current-tps').innerText = '0.0';
-        document.getElementById('metric-gen-avg').innerText = '0.0 t/s';
         document.getElementById('status-indicator').innerText = 'Generating...';
+        // Reset running averages when engine is stopped (model change boundary)
+        resetRunningAverages();
     
     } else if (data.state === 'starting' || data.state === 'loading') {
         setHardwareConfigLocked(true);
@@ -337,7 +352,9 @@ eventSource.onmessage = (e) => {
         badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> ${data.state === 'loading' ? 'LOADING MODEL' : 'BOOTING...'}`;
         document.getElementById('btn-start-server').classList.add('hidden'); 
         document.getElementById('btn-stop-server').classList.remove('hidden');
-    } else if (!isModelLoaded) { 
+
+    // } else if (!isModelLoaded) { 
+    } else if (data.state === 'ready') {
         isModelLoaded = true; 
         setTimeout(() => { masterBaseVram = currentVramSnapshot; }, 2000); 
 
@@ -345,6 +362,7 @@ eventSource.onmessage = (e) => {
         if (uiTimerInterval) { clearInterval(uiTimerInterval); uiTimerInterval = null; }
         bootProgressFill.style.width = '100%';
         bootStatusText.innerText = 'Model Loaded!';
+        badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-green-500 animate-pulse"></span> ${data.state === 'ready' ? 'READY' : 'BOOTING...'}`;
         setTimeout(() => {
             bootOverlay.classList.add('hidden');
             bootOverlay.classList.remove('flex');
@@ -669,7 +687,7 @@ async function submitPrompt() {
     document.getElementById('metric-gen-tokens').innerText = '0 tokens';
 
     // Calculate context limit and estimate prompt tokens
-    currentContextLimit = parseInt(document.getElementById('server-ctx').value) || 32768;
+    currentContextLimit = parseInt(document.getElementById('server-ctx').value) || 110000;
     const estimatedPromptTokens = Math.ceil((text.length + 100) / 4) + currentContextTokens;
     updateContextUI(estimatedPromptTokens, currentContextLimit);
 
@@ -924,7 +942,7 @@ document.getElementById('user-prompt').addEventListener('input', (e) => {
 // --- Initialize Context UI ---
 updateContextUI(0, document.getElementById('server-ctx').value);
 document.getElementById('server-ctx').addEventListener('input', (e) => {
-    currentContextLimit = parseInt(e.target.value) || 32768;
+    currentContextLimit = parseInt(e.target.value) || 110000;
     updateContextUI(currentContextTokens, currentContextLimit);
 });
 
