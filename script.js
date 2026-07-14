@@ -1227,7 +1227,13 @@ async function fetchMasterLogs() {
     try {
         const res = await fetch('/api/master/logs');
         const data = await res.json();
-        document.getElementById('master-logs-pre').innerText = data.logs || 'No logs returned.';
+        const preEl = document.getElementById('master-logs-pre');
+        const wasAtBottom = (preEl.scrollHeight - preEl.scrollTop - preEl.clientHeight) < 80;
+        preEl.innerText = data.logs || 'No logs returned.';
+        // Auto-scroll to bottom if user was near bottom, or on first load
+        if (wasAtBottom || data.logs.includes('No logs')) {
+            preEl.scrollTop = preEl.scrollHeight;
+        }
     } catch (e) {
         document.getElementById('master-logs-pre').innerText = `Failed to fetch logs: ${e.message}`;
     }
