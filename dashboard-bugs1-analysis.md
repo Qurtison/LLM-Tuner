@@ -66,6 +66,9 @@ It's invisible in the UI because the failure is swallowed twice: `monitor.py`'s 
 3. Re-run the query above after the fix to confirm it returns a CSV row instead of an error.
 4. Regardless of this specific fix, harden against the next typo: have `get_stats()` include an `"error"` string in the returned dict when the primary `nvidia-smi` call's exit code is non-zero, and surface that in the UI instead of showing zeros indistinguishable from "GPU idle." Add `console.error(e)` in the `catch` block at `index.html:1826` too — right now any thrown error in `pollTelemetry()` just flips a badge to `"ERROR"` with zero diagnostic trail.
 
+
+** COMPLETED **
+
 ---
 
 ## 3. Net throughput graph and tokens/sec graph aren't expandable
@@ -84,7 +87,7 @@ The `expandChart()` function itself already exists and works (it's driving the o
 
 **Why it happens:** There is no reset path at all — it was never built. `runningAverages` (`index.html:531-536`) accumulates `prefillSpeedSum`/`genSpeedSum` and their counts forever, is persisted to `localStorage['cluster_averages']` on every response (`index.html:570`), and is reloaded on every page load (`index.html:550-556`). No function clears it and no button calls one — grep for "reset" in this area turns up nothing.
 
-**Action plan:** Add a small reset control (button near `metric-prefill-avg`/`metric-gen-avg`) wired to a new function that zeroes `runningAverages`, calls `updateAverageUI()`, and either clears or overwrites `localStorage['cluster_averages']`. Decide whether reset should be manual-only or also auto-reset on model switch/new chat session — worth a quick product decision before building.
+**Action plan:** The other prefil and generation t/s numbers do have code that resets them. It was just a simple omission to not have this one included. Just make sure this one gets reset at the same time, on page load, and on server kill.
 
 ---
 
@@ -115,3 +118,24 @@ Not a bug, but flagging the current shape so the rebuild is scoped correctly. To
 3. **Storage:** `localStorage`, keyed per model (e.g. `arg_configs[modelPath] = [{ name, argString, lastUsed }]`). Saving a config prompts for (or reuses) a name and stamps `lastUsed = Date.now()`.
 4. **Picker modal:** Scrollable list, sourced from `arg_configs[currentModel]`, sorted by `lastUsed` descending. Selecting one populates the textarea and bumps `lastUsed` on next launch.
 5. This directly resolves the `todo.md` complaint about hardcoded `if (fa)/if (cache)/if (rpc)/if (mtp)` growth — once launch is just "pass this string through," new llama.cpp flags need zero server-side changes.
+
+## 7. feature request: loading bar during prompt processing phase
+1.24.434.469 I slot      release: id  3 | task 0 | stop processing: n_tokens = 379, truncated = 0
+8.43.985.467 I slot get_availabl: id  2 | task -1 | selected slot by LRU, t_last = -1
+8.43.985.616 I slot launch_slot_: id  2 | task 370 | processing task, is_child = 0
+8.47.746.587 I slot print_timing: id  2 | task 370 | prompt processing, n_tokens =   8192, progress = 0.66, t =   3.61 s / 2272.33 tokens per second
+8.48.681.387 I slot print_timing: id  2 | task 370 | prompt processing, n_tokens =  10240, progress = 0.83, t =   4.54 s / 2255.55 tokens per second
+8.49.163.652 I slot print_timing: id  2 | task 370 | prompt processing, n_tokens =  11203, progress = 0.90, t =   5.02 s / 2230.70 tokens per second
+8.49.816.261 I slot print_timing: id  2 | task 370 | prompt processing, n_tokens =  11868, progress = 0.96, t =   5.67 s / 2091.36 tokens per second
+8.50.058.267 I slot print_timing: id  2 | task 370 | prompt processing, n_tokens =  12380, progress = 1.00, t =   5.92 s / 2092.35 tokens per second
+8.53.255.797 I slot print_timing: id  2 | task 370 | n_decoded =    183, tg =  60.91 t/s, tg_3s =  60.91 t/s
+8.54.127.909 I slot print_timing: id  2 | task 370 | prompt eval time =    6109.94 ms / 12384 tokens (    0.49 ms per token,  2026.86 tokens per second)
+8.54.127.913 I slot print_timing: id  2 | task 370 |        eval time =    3876.48 ms /   238 tokens (   16.29 ms per token,    61.40 tokens per second)
+8.54.127.914 I slot print_timing: id  2 | task 370 |       total time =    9986.42 ms / 12622 tokens
+8.54.127.915 I slot print_timing: id  2 | task 370 |    graphs reused =        599
+8.54.128.487 I slot      release: id  2 | task 370 | stop processing: n_tokens = 12621, truncated = 0
+
+^^the server reports this output.
+
+In the GUI, when we wait for the prompt thinking to start, we could easily update it to parse the process = x values to fill up a loading bar, and to be printing the number of tokens, the tokens a second, etc.
+

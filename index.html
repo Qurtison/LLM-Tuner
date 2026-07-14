@@ -1824,8 +1824,10 @@
                     }
                 }
             } catch (e) {
+                console.error('pollTelemetry error:', e);
                 document.getElementById('worker-status-badge').innerText = 'ERROR';
                 document.getElementById('worker-status-badge').className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-red-900/50 text-red-400';
+                document.getElementById('worker-status-badge').title = 'Telemetry polling error: ' + (e.message || String(e));
             }
         }
         
