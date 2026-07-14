@@ -359,6 +359,25 @@ eventSource.onmessage = (e) => {
             if (document.getElementById('empty-state')) document.getElementById('empty-state').classList.add('hidden');
             chatBox.innerHTML += `<div class="msg-wrapper p-4 rounded-xl border border-red-900/50 bg-red-900/10 max-w-4xl mx-auto shadow-sm w-full mb-4 text-red-400 text-sm font-semibold">${escapeHtml(data.error)}</div>`;
             chatBox.scrollTop = chatBox.scrollHeight;
+            // Item 8c: Highlight log panels red on crash
+            const mlc = document.getElementById('master-logs-container');
+            if (mlc) {
+                mlc.className = 'bg-red-950/30 rounded-lg border-2 border-red-600 overflow-hidden';
+            }
+            const wlc = document.getElementById('worker-logs-container');
+            if (wlc) {
+                wlc.className = 'bg-red-950/20 rounded-lg border border-red-800/50 overflow-hidden';
+            }
+        } else {
+            // Reset log panels to normal when no error
+            const mlc = document.getElementById('master-logs-container');
+            if (mlc) {
+                mlc.className = 'bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden';
+            }
+            const wlc = document.getElementById('worker-logs-container');
+            if (wlc) {
+                wlc.className = 'bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden';
+            }
         }
         
         // Reset Telemetry

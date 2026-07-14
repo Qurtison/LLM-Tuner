@@ -158,6 +158,18 @@
                             <label class="block text-[10px] text-gray-400 mb-1">Verbosity (-lv)</label>
                             <input type="number" id="server-verbosity" value="0" min="0" max="5" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
                         </div>
+                        <!-- Item 6: Raw extra args + saved configs -->
+                        <div class="pt-2 border-t border-gray-700/40 space-y-2">
+                            <div class="flex justify-between items-center">
+                                <label class="block text-[10px] text-gray-400">Extra llama-server args <span class="text-indigo-400 cursor-help" title="Raw arguments appended verbatim (space-separated). -m paths are auto-mapped.">?</span></label>
+                                <div class="flex gap-1">
+                                    <button type="button" id="btn-save-config" class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Save</button>
+                                    <button type="button" id="btn-load-configs" class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Load</button>
+                                </div>
+                            </div>
+                            <textarea id="extra-args" rows="2" placeholder="e.g. --ctx-cache-type k8 --flash-attn-offload" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] font-mono text-gray-200 resize-y"></textarea>
+                            <div id="saved-configs-list" class="hidden flex flex-wrap gap-1 max-h-20 overflow-y-auto"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -210,7 +222,7 @@
                 </div>
 
                 <!-- Master Logs -->
-                <div class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
+                <div id="master-logs-container" class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
                     <button id="btn-master-logs-toggle" class="w-full flex justify-between items-center px-3 py-2 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
                         <span class="flex items-center gap-2"><span class="text-yellow-400">●</span> Master Logs</span>
                         <span id="master-logs-icon" class="text-[9px] transition-transform">&#9654;</span>
@@ -221,7 +233,7 @@
                 </div>
 
                 <!-- Worker Logs -->
-                <div class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
+                <div id="worker-logs-container" class="bg-gray-800/50 rounded-lg border border-gray-700/50 overflow-hidden">
                     <button id="btn-worker-logs-toggle" class="w-full flex justify-between items-center px-3 py-2 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
                         <span class="flex items-center gap-2"><span class="text-red-400">●</span> Worker Logs</span>
                         <span id="worker-logs-icon" class="text-[9px] transition-transform">&#9654;</span>
