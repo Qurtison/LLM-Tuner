@@ -1152,9 +1152,17 @@ updateWorkerStatus();
 let workerBaseVram = 0;
 let telemetryInterval = null;
 let workerStatsMissingSince = null;
+// Item 14: Telemetry fetch backoff + failure tracking
+let telemetryConsecutiveFailures = 0;
+const TELEMETRY_BASE_INTERVAL = 1000;
+const TELEMETRY_MAX_BACKOFF = 10000; // cap at 10s
 
 async function pollTelemetry() {
     try {
+        // Reset consecutive failure counter on success
+        telemetryConsecutiveFailures = 0;
+        const banner = document.getElementById('telemetry-failure-banner');
+        if (banner) banner.style.display = 'none';
         const rpcEnabled = document.getElementById('rpc-toggle').checked;
         const workerSsh = rpcEnabled ? document.getElementById('worker-ssh').value : '';
         const res = await fetch('http://localhost:8081/stats', {
@@ -1457,9 +1465,21 @@ async function pollTelemetry() {
         }
     } catch (e) {
         console.error('pollTelemetry error:', e);
+        telemetryConsecutiveFailures++;
         document.getElementById('worker-status-badge').innerText = 'ERROR';
         document.getElementById('worker-status-badge').className = 'px-2 py-0.5 rounded text-[10px] font-bold bg-red-900/50 text-red-400';
         document.getElementById('worker-status-badge').title = 'Telemetry polling error: ' + (e.message || String(e));
+        // Update failure banner after 3+ consecutive failures
+        const banner = document.getElementById('telemetry-failure-banner');
+        if (banner) {
+            if (telemetryConsecutiveFailures >= 3) {
+                banner.style.display = 'flex';
+                document.getElementById('telemetry-failure-count').textContent = telemetryConsecutiveFailures;
+            }
+            // Backoff: double interval up to cap
+            const backoffInterval = Math.min(TELEMETRY_BASE_INTERVAL * (2 ** Math.min(telemetryConsecutiveFailures - 1, 4)), TELEMETRY_MAX_BACKOFF);
+            setTelemetryInterval(backoffInterval);
+        }
     }
 }
 

@@ -325,7 +325,13 @@
                 <option value="2000">Slow (2s)</option>
             </select>
         </div>
-        
+
+        <!-- Item 14: Telemetry failure banner (hidden by default, shown after 3+ consecutive fetch failures) -->
+        <div id="telemetry-failure-banner" class="hidden flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-900/20 border border-orange-700/50 text-orange-300 text-xs font-mono" style="display:none;">
+            <span class="h-2 w-2 rounded-full bg-orange-400 animate-pulse"></span>
+            <span>Telemetry polling failed (<span id="telemetry-failure-count">0</span> consecutive errors). Backing off...</span>
+        </div>
+
         <!-- Prefill Speed Card -->
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50 space-y-2">
             <div class="flex justify-between items-center">
