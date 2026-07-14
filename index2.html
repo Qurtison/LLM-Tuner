@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cluster Command Center</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{gray:{850:'#1f2937',900:'#111827',950:'#030712'}}}}}</script>
+    <style>
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #111827; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+        .prose pre { background-color: #111827 !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; border: 1px solid #374151; }
+        .prose code { color: #e5e7eb; font-family: monospace; font-size: 0.875em; }
+        
+        /* CSS for the Fading Reasoning Box */
+        .fade-bottom {
+            mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 font-sans h-screen flex flex-col md:flex-row overflow-hidden">
+
+    <aside class="w-full md:w-80 bg-gray-900 border-r border-gray-800 flex flex-col overflow-y-auto">
+        <div class="p-5 border-b border-gray-800 bg-gray-900/90 sticky top-0 z-10 backdrop-blur">
+            <h1 class="text-lg font-bold text-white tracking-tight flex items-center gap-2 mb-3">
+                <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                Cluster Control
+            </h1>
+            <div id="engine-status" class="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-900/20 border border-red-800 text-red-400 text-xs font-semibold">
+                <span class="h-2 w-2 rounded-full bg-red-500"></span> ENGINE STOPPED
+            </div>
+        </div>
+
+        <div class="p-5 space-y-5">
+            <div class="space-y-3">
+                <h2 class="text-xs font-bold tracking-wider text-gray-500 uppercase">Hardware Config</h2>
+                <select id="model-select" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:ring-1 focus:ring-indigo-500">
+                    <option>Loading models...</option>
+                </select>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Context</label>
+                        <input type="number" id="server-ctx" value="32768" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">GPU Layers</label>
+                        <input type="number" id="server-ngl" value="999" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    </div>
+                </div>
+                <div class="p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-indigo-400 mb-2">
+                        <input type="checkbox" id="rpc-toggle" checked class="accent-indigo-500 rounded">
+                        Enable Networked RPC Worker
+                    </label>
+                    <input type="text" id="worker-ssh" value="kyle4090@192.168.1.125" class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-200">
+                </div>
+                <div class="flex gap-2">
+                    <button id="btn-start-server" class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors">Boot Cluster</button>
+                    <button id="btn-stop-server" class="hidden px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md text-sm font-medium transition-colors">Kill</button>
+                </div>
+            </div>
+
+            <hr class="border-gray-800">
+
+            <div class="space-y-2 flex-1 min-h-[150px]">
+                <h2 class="text-xs font-bold tracking-wider text-gray-500 uppercase">Chat History</h2>
+                <div id="history-list" class="space-y-1 overflow-y-auto max-h-48 pr-2 text-xs text-gray-400">
+                    <div class="italic text-gray-600">No prompts yet.</div>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <main class="flex-1 flex flex-col min-w-0 bg-gray-950 relative">
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
+            <div class="flex flex-col items-center justify-center h-full text-gray-600 text-sm" id="empty-state">
+                <svg class="w-12 h-12 mb-3 opacity-20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>
+                Cluster Offline. Boot the server to begin.
+            </div>
+        </div>
+
+        <div class="bg-gray-900 border-t border-gray-800 p-4">
+            <div class="relative flex flex-col gap-2">
+                <div class="flex justify-between items-center px-1">
+                    <span class="text-xs text-gray-500">System Prompt:</span>
+                    <input type="text" id="system-prompt" class="flex-1 ml-2 bg-transparent border-b border-gray-700 focus:border-indigo-500 text-xs text-gray-300 px-1 py-0.5 focus:outline-none" placeholder="Optional. e.g., You are a senior Python engineer...">
+                </div>
+                <textarea id="user-prompt" rows="3" disabled class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-100 disabled:opacity-50 resize-none shadow-sm placeholder-gray-500" placeholder="Waiting for server..."></textarea>
+                <div class="flex justify-between items-center">
+                    <span id="input-token-count" class="text-xs text-gray-500">~0 tokens</span>
+                    <div class="flex-1 flex justify-center">
+                        <span id="status-indicator" class="text-xs text-indigo-400 hidden animate-pulse">Generating...</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="abort-btn" class="hidden px-4 py-1.5 bg-red-900/30 text-red-400 rounded-lg text-sm font-medium hover:bg-red-900/50">Stop</button>
+                        <button id="submit-btn" disabled class="px-6 py-1.5 bg-indigo-600 disabled:bg-gray-700 text-white rounded-lg text-sm font-medium shadow-sm transition-colors hover:bg-indigo-700">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <aside class="w-full md:w-80 bg-gray-900 border-l border-gray-800 p-6 flex flex-col gap-6 hidden md:flex overflow-y-auto">
+        <h2 class="text-sm font-bold tracking-wider text-gray-400 uppercase">Telemetry</h2>
+        <div class="bg-gray-800/50 p-4 rounded-xl border border-gray-700/50">
+            <div class="flex justify-between text-xs mb-1">
+                <span class="text-gray-300">Context Window Used</span>
+                <span id="context-val" class="text-indigo-400 font-mono">0 / 0</span>
+            </div>
+            <div class="w-full bg-gray-900 rounded-full h-2 mt-2">
+                <div id="context-bar" class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+        </div>
+        <div class="bg-gray-800/50 p-4 rounded-xl border border-gray-700/50">
+            <div class="flex justify-between items-end mb-2">
+                <span class="text-xs text-gray-300">Generation Speed</span>
+                <span id="current-tps" class="text-xl font-bold text-green-400 font-mono">0.0<span class="text-xs text-gray-500 ml-1">t/s</span></span>
+            </div>
+            <div class="h-32 w-full"><canvas id="tpsChart"></canvas></div>
+        </div>
+        <div class="flex-1 space-y-4">
+            <h3 class="text-xs font-medium text-gray-300 mb-2">3080 Master Node</h3>
+            <div class="mb-2"><div class="flex justify-between text-[10px] text-gray-400 mb-1"><span>VRAM</span><span id="master-vram-text">--</span></div><div class="w-full bg-gray-900 rounded-full h-1.5"><div id="master-vram-bar" class="bg-green-500 h-1.5 rounded-full" style="width: 0%"></div></div></div>
+            <h3 class="text-xs font-medium text-gray-300 mb-2 mt-4">4090 Worker Node</h3>
+            <div class="mb-2"><div class="flex justify-between text-[10px] text-gray-400 mb-1"><span>VRAM</span><span id="worker-vram-text">--</span></div><div class="w-full bg-gray-900 rounded-full h-1.5"><div id="worker-vram-bar" class="bg-green-500 h-1.5 rounded-full" style="width: 0%"></div></div></div>
+        </div>
+    </aside>
+
+    <script>
+        // --- Globals & Utils ---
+        let abortController = null;
+        let tpsHistory = [];
+        let tpsChart = null;
+        let tpsInterval = null;
+        let msgCounter = 0;
+        const escapeHtml = (unsafe) => unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+
+        // --- Init Chart.js ---
+        function initChart() {
+            const ctx = document.getElementById('tpsChart').getContext('2d');
+            tpsChart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#4ade80', borderWidth: 2, fill: true, backgroundColor: 'rgba(74, 222, 128, 0.1)', tension: 0.3, pointRadius: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { display: true, beginAtZero: true, grid: { color: '#1f2937' }, ticks: { color: '#6b7280', font: {size: 10} } } }, plugins: { legend: { display: false } } }
+            });
+        }
+        initChart();
+
+        // --- Input Token Estimator ---
+        document.getElementById('user-prompt').addEventListener('input', (e) => {
+            const count = Math.ceil(e.target.value.length / 4);
+            document.getElementById('input-token-count').innerText = `~${count} tokens`;
+        });
+
+        // --- Fetch Models ---
+        async function fetchModels() {
+            try {
+                const res = await fetch('/api/models');
+                const models = await res.json();
+                const select = document.getElementById('model-select');
+                select.innerHTML = '';
+                models.forEach(m => { const opt = document.createElement('option'); opt.value = m; opt.textContent = m; select.appendChild(opt); });
+            } catch (e) { document.getElementById('model-select').innerHTML = '<option>Error loading models</option>'; }
+        }
+        fetchModels();
+
+        // --- Server SSE State ---
+        let eventSource = new EventSource('/api/status');
+        window.addEventListener('beforeunload', () => eventSource.close());
+
+        eventSource.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            const badge = document.getElementById('engine-status');
+            const input = document.getElementById('user-prompt');
+            const btn = document.getElementById('submit-btn');
+
+            if (data.state === 'stopped') {
+                badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-red-900/20 border border-red-800 text-red-400 text-xs font-semibold';
+                badge.innerHTML = '<span class="h-2 w-2 rounded-full bg-red-500"></span> ENGINE STOPPED';
+                document.getElementById('btn-start-server').classList.remove('hidden');
+                document.getElementById('btn-stop-server').classList.add('hidden');
+                input.disabled = true; input.placeholder = 'Cluster Offline. Boot the server to begin.'; btn.disabled = true;
+            } else if (data.state === 'starting' || data.state === 'loading') {
+                badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-yellow-900/20 border border-yellow-800 text-yellow-400 text-xs font-semibold';
+                badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> ${data.state === 'loading' ? 'LOADING MODEL' : 'BOOTING...'}`;
+                document.getElementById('btn-start-server').classList.add('hidden');
+                document.getElementById('btn-stop-server').classList.remove('hidden');
+            } else if (data.state === 'ready') {
+                badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-green-900/20 border border-green-800 text-green-400 text-xs font-semibold';
+                badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-green-500"></span> SERVER READY`;
+                input.disabled = false; input.placeholder = 'Type your prompt here (Cmd/Ctrl + Enter to send)...'; btn.disabled = false;
+                document.getElementById('empty-state').classList.add('hidden');
+            }
+        };
+
+        // --- Server Controls ---
+        document.getElementById('btn-start-server').addEventListener('click', async () => {
+            await fetch('/api/start', { method: 'POST', body: JSON.stringify({
+                model: document.getElementById('model-select').value,
+                ctx: parseInt(document.getElementById('server-ctx').value),
+                ngl: parseInt(document.getElementById('server-ngl').value),
+                rpcTarget: document.getElementById('rpc-toggle').checked ? document.getElementById('worker-ssh').value.trim() : null
+            })});
+        });
+        document.getElementById('btn-stop-server').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+
+        // --- Chat Logic ---
+        function toggleRaw(btnEl, isMarkdown) {
+            const contentDiv = btnEl.closest('.msg-wrapper').querySelector('.msg-content');
+            const rawText = btnEl.dataset.raw;
+            if (btnEl.dataset.mode === 'raw') {
+                contentDiv.innerHTML = isMarkdown ? marked.parse(rawText) : escapeHtml(rawText);
+                contentDiv.className = isMarkdown ? 'msg-content prose prose-invert max-w-none text-sm mt-2' : 'msg-content text-gray-100 text-sm mt-2 whitespace-pre-wrap';
+                btnEl.dataset.mode = 'rendered';
+                btnEl.innerText = 'View Raw';
+            } else {
+                contentDiv.innerHTML = `<pre class="text-xs text-gray-300 overflow-x-auto p-3 bg-gray-950 rounded border border-gray-800">${escapeHtml(rawText)}</pre>`;
+                contentDiv.className = 'msg-content mt-2';
+                btnEl.dataset.mode = 'raw';
+                btnEl.innerText = 'View Rendered';
+            }
+        }
+
+        function toggleReasoning(headerEl) {
+            const body = headerEl.nextElementSibling;
+            const icon = headerEl.querySelector('.r-icon');
+            if (body.style.maxHeight) {
+                body.style.maxHeight = null;
+                body.classList.remove('fade-bottom');
+                icon.innerText = '▲';
+            } else {
+                body.style.maxHeight = '4.5rem';
+                body.classList.add('fade-bottom');
+                icon.innerText = '▼';
+            }
+        }
+
+        async function submitPrompt() {
+            const inputEl = document.getElementById('user-prompt');
+            const text = inputEl.value.trim();
+            if (!text) return;
+
+            // Setup UI for generation
+            inputEl.disabled = true;
+            document.getElementById('submit-btn').disabled = true;
+            document.getElementById('status-indicator').classList.remove('hidden');
+            document.getElementById('abort-btn').classList.remove('hidden');
+            document.getElementById('input-token-count').innerText = '~0 tokens';
+
+            msgCounter++;
+            const msgId = `msg-${msgCounter}`;
+            
+            // Add to Sidebar History
+            const historyList = document.getElementById('history-list');
+            if(historyList.innerHTML.includes('No prompts yet')) historyList.innerHTML = '';
+            const histItem = document.createElement('div');
+            histItem.className = 'cursor-pointer hover:text-indigo-400 truncate py-1 border-l-2 border-transparent hover:border-indigo-500 pl-2 transition-colors';
+            histItem.innerText = text;
+            histItem.onclick = () => document.getElementById(msgId).scrollIntoView({behavior: 'smooth'});
+            historyList.appendChild(histItem);
+
+            // Append User Message
+            const chatBox = document.getElementById('chat-container');
+            const userMsg = document.createElement('div');
+            userMsg.id = msgId;
+            userMsg.className = 'msg-wrapper p-4 rounded-xl border border-gray-700 bg-gray-800 max-w-4xl mx-auto shadow-sm w-full';
+            userMsg.innerHTML = `
+                <div class="flex justify-between items-center border-b border-gray-700/50 pb-2 mb-2">
+                    <span class="font-semibold text-gray-300 text-xs uppercase tracking-wider">User</span>
+                    <button class="text-[10px] text-gray-500 hover:text-gray-300 transition-colors" data-mode="rendered" onclick="toggleRaw(this, false)">View Raw</button>
+                </div>
+                <div class="msg-content text-gray-100 text-sm whitespace-pre-wrap"></div>
+            `;
+            userMsg.querySelector('.msg-content').innerText = text;
+            userMsg.querySelector('button').dataset.raw = text; // store raw text
+            chatBox.appendChild(userMsg);
+            inputEl.value = '';
+
+            // Append Assistant Skeleton
+            const astMsg = document.createElement('div');
+            astMsg.className = 'msg-wrapper p-5 rounded-xl border border-indigo-900/30 bg-gray-900 max-w-4xl mx-auto shadow-sm w-full';
+            astMsg.innerHTML = `
+                <div class="flex justify-between items-center mb-2">
+                    <span class="font-semibold text-indigo-400 text-xs uppercase tracking-wider">Assistant</span>
+                    <div class="flex items-center gap-3">
+                        <span class="ctx-badge text-[10px] text-gray-500 bg-gray-800 px-2 py-0.5 rounded hidden">0 ctx</span>
+                        <button class="raw-btn text-[10px] text-gray-500 hover:text-gray-300 transition-colors" data-mode="rendered" onclick="toggleRaw(this, true)">View Raw</button>
+                    </div>
+                </div>
+                <div class="reasoning-container hidden border border-gray-800 rounded-lg bg-gray-950/50 mb-3">
+                    <div class="flex justify-between px-3 py-1.5 bg-gray-800/30 text-[10px] text-gray-400 border-b border-gray-800 cursor-pointer hover:bg-gray-800/50 transition-colors" onclick="toggleReasoning(this)">
+                        <span>🧠 Reasoning Trace <span class="r-tokens text-gray-500 ml-1">(~0 tokens)</span></span>
+                        <span class="r-icon">▼</span>
+                    </div>
+                    <div class="reasoning-body text-xs text-gray-500 font-mono p-3 overflow-hidden relative cursor-pointer fade-bottom" style="max-height: 4.5rem;" onclick="toggleReasoning(this.previousElementSibling)"></div>
+                </div>
+                <div class="msg-content prose prose-invert max-w-none text-sm"></div>
+            `;
+            chatBox.appendChild(astMsg);
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            const reasoningBox = astMsg.querySelector('.reasoning-container');
+            const reasoningBody = astMsg.querySelector('.reasoning-body');
+            const reasoningTokens = astMsg.querySelector('.r-tokens');
+            const contentBody = astMsg.querySelector('.msg-content');
+            const rawBtn = astMsg.querySelector('.raw-btn');
+            const ctxBadge = astMsg.querySelector('.ctx-badge');
+
+            abortController = new AbortController();
+            let tokenCount = 0; let lastTokenCount = 0; let tpsSecs = 0;
+            tpsHistory = []; tpsChart.data.labels = []; tpsChart.data.datasets[0].data = [];
+            
+            tpsInterval = setInterval(() => {
+                const tps = tokenCount - lastTokenCount;
+                lastTokenCount = tokenCount;
+                document.getElementById('current-tps').innerText = tps.toFixed(1);
+                tpsHistory.push({ time: tpsSecs++, tps });
+                if(tpsHistory.length > 30) tpsHistory.shift();
+                tpsChart.data.labels = tpsHistory.map(h => h.time);
+                tpsChart.data.datasets[0].data = tpsHistory.map(h => h.tps);
+                tpsChart.update('none');
+            }, 1000);
+
+            try {
+                const sysPrompt = document.getElementById('system-prompt').value.trim();
+                const msgs = sysPrompt ? [{role: 'system', content: sysPrompt}, {role: 'user', content: text}] : [{role: 'user', content: text}];
+                
+                const response = await fetch('http://localhost:8080/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        model: document.getElementById('model-select').value,
+                        messages: msgs,
+                        stream: true,
+                        stream_options: { include_usage: true }
+                    }),
+                    signal: abortController.signal
+                });
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let fullContent = ""; let fullReasoning = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                
+                                if (data.usage) {
+                                    const used = data.usage.prompt_tokens + data.usage.completion_tokens;
+                                    const max = parseInt(document.getElementById('server-ctx').value);
+                                    document.getElementById('context-val').innerText = `${used} / ${max}`;
+                                    document.getElementById('context-bar').style.width = `${Math.min((used/max)*100, 100)}%`;
+                                    ctxBadge.innerText = `${used} ctx`;
+                                    ctxBadge.classList.remove('hidden');
+                                }
+
+                                if (data.choices && data.choices.length > 0) {
+                                    tokenCount++;
+                                    const delta = data.choices[0].delta;
+                                    
+                                    if (delta.reasoning_content) {
+                                        fullReasoning += delta.reasoning_content;
+                                        reasoningBox.classList.remove('hidden');
+                                        reasoningBody.innerText = fullReasoning;
+                                        reasoningTokens.innerText = `(~${Math.ceil(fullReasoning.length/4)} tokens)`;
+                                    }
+                                    if (delta.content) {
+                                        fullContent += delta.content;
+                                        if (rawBtn.dataset.mode === 'rendered') {
+                                            contentBody.innerHTML = marked.parse(fullContent);
+                                        } else {
+                                            contentBody.innerHTML = `<pre class="text-xs text-gray-300 overflow-x-auto p-3 bg-gray-950 rounded border border-gray-800">${escapeHtml(fullContent)}</pre>`;
+                                        }
+                                        rawBtn.dataset.raw = fullContent;
+                                    }
+                                    // Auto scroll only if close to bottom
+                                    if(chatBox.scrollHeight - chatBox.scrollTop < chatBox.clientHeight + 100) {
+                                        chatBox.scrollTop = chatBox.scrollHeight;
+                                    }
+                                }
+                            } catch (e) { /* skip malformed */ }
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err.name !== 'AbortError') contentBody.innerHTML += `<br><span class="text-red-400">Error: ${err.message}</span>`;
+            } finally {
+                clearInterval(tpsInterval);
+                abortController = null;
+                inputEl.disabled = false; inputEl.focus();
+                document.getElementById('submit-btn').disabled = false;
+                document.getElementById('status-indicator').classList.add('hidden');
+                document.getElementById('abort-btn').classList.add('hidden');
+            }
+        }
+
+        document.getElementById('submit-btn').addEventListener('click', submitPrompt);
+        document.getElementById('abort-btn').addEventListener('click', () => { if(abortController) abortController.abort(); });
+        document.getElementById('user-prompt').addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); submitPrompt(); }});
+
+        // --- Hardware Polling ---
+        setInterval(async () => {
+            try {
+                const res = await fetch('http://localhost:8081/stats', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ worker_ssh: document.getElementById('worker-ssh').value.trim() })
+                });
+                const stats = await res.json();
+                
+                if (stats.master) {
+                    document.getElementById('master-vram-text').innerText = `${stats.master.vram_used} / ${stats.master.vram_total} MB`;
+                    document.getElementById('master-vram-bar').style.width = `${(stats.master.vram_used / stats.master.vram_total) * 100}%`;
+                }
+                if (stats.worker) {
+                    document.getElementById('worker-vram-text').innerText = `${stats.worker.vram_used} / ${stats.worker.vram_total} MB`;
+                    document.getElementById('worker-vram-bar').style.width = `${(stats.worker.vram_used / stats.worker.vram_total) * 100}%`;
+                }
+            } catch (e) { /* silent fail for polling */ }
+        }, 2000);
+    </script>
+</body>
+</html>

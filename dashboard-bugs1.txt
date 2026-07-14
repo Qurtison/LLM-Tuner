@@ -1,0 +1,51 @@
+I think the restart fixed it. Booting with the wire connected seemed to wake the kernel up properly. Both show a wired connection, and I was able to ssh from one to the other.
+
+
+
+Was able to get the worker running from the dashboard, too. 
+
+
+
+One of the few telemetrics that is broken but sort of working is master ram usage... I saw a huge throughput on the entwork for a while while loading, then that stopped. however, the "master ram" seems on only show llama's usage, not the system usage... but while I think mislabelled, I watched that bar crawl up. I think it might suggest that 7.7GB of the 35b model is being stored in system (non V) ram...
+
+
+
+My telemetrics have mostly broken, annoyingly. I don't know what has gone wrong. 
+
+
+
+the ram says, for example, 
+
+7702 MB (Llama: 21759 MB, Sys: 0 MB)
+
+
+
+likely it should be 21759 for the whole number on the left, 7702 for the llama number, and the subtraction for the sys number.
+
+
+
+things just seem slightly off everywhere.
+
+
+
+None of the gpu telemetrics show anymore.
+
+
+
+The net throughput graph isn't expandable, nor is the tokens/sec. and the avg speed in the t/s graphs both don't get reset.
+
+
+
+The master logs don't show.
+
+
+
+I need an update to the server and gui so that instead of checkboxes an dropdowns for the arguments/params, we just get a textbox to manually enter argument strings, that saves each string to local storage per-model, and also saves a name for each argument set, and has an interface (a modal that pops up with a scrollable list would work) for selecting  from previously saved configs. It should be auto-ordered by last date used.
+
+
+
+---
+
+
+
+please produce a list of why the bugs exist, and a clear action plan for me to hand off for fixing these issues.

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distributed AI Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Add Chart.js for real-time graphing -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gray: { 850: '#1f2937', 900: '#111827', 950: '#030712' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #111827; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #4B5563; }
+        .prose pre { background-color: #111827 !important; padding: 1rem; border-radius: 0.5rem; overflow-x: auto; border: 1px solid #374151; }
+        .prose code { color: #e5e7eb; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.875em; }
+        .prose p { margin-bottom: 1rem; line-height: 1.6; }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 font-sans h-screen flex flex-col md:flex-row overflow-hidden">
+
+    <!-- Column 1: Settings Sidebar -->
+    <aside class="w-full md:w-80 bg-gray-900 border-r border-gray-800 p-6 flex flex-col gap-6 overflow-y-auto">
+        <div>
+            <h1 class="text-xl font-bold text-white tracking-tight flex items-center gap-2">
+                <svg class="w-6 h-6 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                RPC Cluster UI
+            </h1>
+            <p class="text-xs text-green-400 mt-1 flex items-center gap-1">
+                <span class="relative flex h-2 w-2"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span></span>
+                API: localhost:8080
+            </p>
+        </div>
+
+        <div class="space-y-4">
+            <!-- Worker SSH String -->
+            <div class="p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg">
+                <label class="block text-xs font-semibold text-indigo-400 mb-1">RPC Worker Node (SSH)</label>
+                <input type="text" id="worker-ssh" placeholder="e.g. kyle4090@192.168.1.125" class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-200 focus:outline-none focus:border-indigo-500">
+                <p class="text-[10px] text-gray-500 mt-1">Leave blank for single-machine setups.</p>
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Model Name</label>
+                <input type="text" id="model-name" value="Qwen3.6-35B-A3B" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            </div>
+
+            <div>
+                <label class="flex justify-between text-xs font-medium text-gray-400 mb-1">
+                    <span>Temperature</span><span id="temp-val">0.2</span>
+                </label>
+                <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.2" class="w-full accent-indigo-500" oninput="document.getElementById('temp-val').innerText = this.value">
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">Max Tokens</label>
+                <input type="number" id="max-tokens" value="8192" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500">
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-gray-400 mb-1">System Prompt</label>
+                <textarea id="system-prompt" rows="3" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-indigo-500 resize-none"></textarea>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Column 2: Chat Area -->
+    <main class="flex-1 flex flex-col min-w-0 bg-gray-950">
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-6">
+            <div class="flex items-center justify-center h-full text-gray-500 text-sm" id="empty-state">
+                System online. Waiting for prompt...
+            </div>
+        </div>
+
+        <div class="bg-gray-900 border-t border-gray-800 p-4">
+            <div class="relative flex flex-col gap-3">
+                <textarea id="user-prompt" rows="3" class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-100 focus:outline-none focus:border-indigo-500 resize-none shadow-sm placeholder-gray-500" placeholder="Type your prompt here (Cmd/Ctrl + Enter to send)..."></textarea>
+                <div class="flex justify-between items-center">
+                    <span id="status-indicator" class="text-xs text-indigo-400 hidden animate-pulse">Generating tokens...</span>
+                    <div class="flex-1"></div>
+                    <button id="abort-btn" class="hidden mr-3 px-4 py-2 bg-red-900/30 text-red-400 border border-red-800/50 hover:bg-red-900/50 rounded-lg text-sm font-medium transition-colors">Stop</button>
+                    <button id="submit-btn" class="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium shadow-sm transition-colors focus:outline-none">Send Prompt</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Column 3: Metrics & Telemetry -->
+    <aside class="w-full md:w-80 bg-gray-900 border-l border-gray-800 p-6 flex flex-col gap-6 overflow-y-auto hidden md:flex">
+        <h2 class="text-sm font-bold tracking-wider text-gray-400 uppercase">Telemetry</h2>
+
+        <!-- Context Utilization -->
+        <div class="bg-gray-800/50 p-4 rounded-xl border border-gray-700/50">
+            <div class="flex justify-between text-xs mb-1">
+                <span class="text-gray-300">Context Window Used</span>
+                <span id="context-val" class="text-indigo-400 font-mono">0 / 0</span>
+            </div>
+            <div class="w-full bg-gray-900 rounded-full h-2 mt-2">
+                <div id="context-bar" class="bg-indigo-500 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+            </div>
+        </div>
+
+        <!-- Token Speed Graph -->
+        <div class="bg-gray-800/50 p-4 rounded-xl border border-gray-700/50">
+            <div class="flex justify-between items-end mb-2">
+                <span class="text-xs text-gray-300">Generation Speed</span>
+                <span id="current-tps" class="text-xl font-bold text-green-400 font-mono">0.0<span class="text-xs text-gray-500 ml-1">t/s</span></span>
+            </div>
+            <div class="h-32 w-full">
+                <canvas id="tpsChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Hardware Monitors -->
+        <div class="flex-1 space-y-4">
+            <div class="flex justify-between items-center border-b border-gray-800 pb-2">
+                <span class="text-xs font-semibold text-gray-400">Hardware Monitor</span>
+                <span id="hw-status" class="text-[10px] text-red-400 bg-red-900/20 px-2 py-1 rounded">Offline (Port 8081)</span>
+            </div>
+
+            <!-- Master Node -->
+            <div>
+                <h3 class="text-xs font-medium text-gray-300 mb-2">3080 Master Node</h3>
+                <div class="mb-2">
+                    <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+                        <span>VRAM</span><span id="master-vram-text">-- / -- MB</span>
+                    </div>
+                    <div class="w-full bg-gray-900 rounded-full h-1.5"><div id="master-vram-bar" class="bg-green-500 h-1.5 rounded-full transition-all" style="width: 0%"></div></div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+                        <span>System RAM</span><span id="master-ram-text">-- / -- MB</span>
+                    </div>
+                    <div class="w-full bg-gray-900 rounded-full h-1.5"><div id="master-ram-bar" class="bg-blue-500 h-1.5 rounded-full transition-all" style="width: 0%"></div></div>
+                </div>
+            </div>
+
+            <!-- Worker Node -->
+            <div id="worker-stats-container" class="opacity-30 transition-opacity">
+                <h3 class="text-xs font-medium text-gray-300 mb-2">4090 Worker Node</h3>
+                <div class="mb-2">
+                    <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+                        <span>VRAM</span><span id="worker-vram-text">-- / -- MB</span>
+                    </div>
+                    <div class="w-full bg-gray-900 rounded-full h-1.5"><div id="worker-vram-bar" class="bg-green-500 h-1.5 rounded-full transition-all" style="width: 0%"></div></div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+                        <span>System RAM</span><span id="worker-ram-text">-- / -- MB</span>
+                    </div>
+                    <div class="w-full bg-gray-900 rounded-full h-1.5"><div id="worker-ram-bar" class="bg-blue-500 h-1.5 rounded-full transition-all" style="width: 0%"></div></div>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <script>
+        // --- TPS Chart Initialization ---
+        const ctx = document.getElementById('tpsChart').getContext('2d');
+        const tpsChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [{
+                    label: 'Tokens / Sec',
+                    data: [],
+                    borderColor: '#4ade80', // Tailwind green-400
+                    backgroundColor: 'rgba(74, 222, 128, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: { duration: 0 },
+                scales: {
+                    x: { display: false },
+                    y: { 
+                        display: true, 
+                        beginAtZero: true, 
+                        grid: { color: '#1f2937' },
+                        ticks: { color: '#6b7280', font: {size: 10} }
+                    }
+                },
+                plugins: { legend: { display: false } }
+            }
+        });
+
+        let abortController = null;
+        let tokenCount = 0;
+        let lastTokenCount = 0;
+        let tpsInterval = null;
+
+        const chatContainer = document.getElementById('chat-container');
+        const submitBtn = document.getElementById('submit-btn');
+        const abortBtn = document.getElementById('abort-btn');
+
+        document.getElementById('user-prompt').addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                submitPrompt();
+            }
+        });
+
+        submitBtn.addEventListener('click', submitPrompt);
+        abortBtn.addEventListener('click', () => {
+            if (abortController) {
+                abortController.abort();
+                stopTpsTracker();
+                resetUI();
+            }
+        });
+
+        function startTpsTracker() {
+            tokenCount = 0;
+            lastTokenCount = 0;
+            tpsChart.data.labels = [];
+            tpsChart.data.datasets[0].data = [];
+            tpsChart.update();
+            let seconds = 0;
+
+            tpsInterval = setInterval(() => {
+                const tps = tokenCount - lastTokenCount;
+                lastTokenCount = tokenCount;
+                
+                document.getElementById('current-tps').innerText = tps.toFixed(1);
+                
+                tpsChart.data.labels.push(seconds++);
+                tpsChart.data.datasets[0].data.push(tps);
+                
+                // Keep only last 30 seconds on graph to avoid crowding
+                if(tpsChart.data.labels.length > 30) {
+                    tpsChart.data.labels.shift();
+                    tpsChart.data.datasets[0].data.shift();
+                }
+                tpsChart.update();
+            }, 1000);
+        }
+
+        function stopTpsTracker() {
+            if (tpsInterval) clearInterval(tpsInterval);
+            document.getElementById('current-tps').innerText = '0.0';
+        }
+
+        async function submitPrompt() {
+            const userPrompt = document.getElementById('user-prompt').value.trim();
+            const systemPrompt = document.getElementById('system-prompt').value.trim();
+            if (!userPrompt) return;
+
+            document.getElementById('empty-state').classList.add('hidden');
+            submitBtn.disabled = true;
+            submitBtn.classList.add('opacity-50');
+            abortBtn.classList.remove('hidden');
+            document.getElementById('status-indicator').classList.remove('hidden');
+
+            appendMessage('User', userPrompt, 'bg-gray-800 border-gray-700');
+            document.getElementById('user-prompt').value = '';
+
+            const responseWrapper = document.createElement('div');
+            responseWrapper.className = 'p-5 rounded-xl border bg-gray-900 border-indigo-900/30 max-w-4xl mx-auto shadow-sm';
+            responseWrapper.innerHTML = '<div class="font-semibold text-indigo-400 mb-3 text-sm">Assistant</div>';
+            
+            const details = document.createElement('details');
+            details.className = 'mb-4 text-sm group hidden';
+            details.innerHTML = '<summary class="cursor-pointer text-gray-400 hover:text-gray-200 font-medium select-none">🧠 View Reasoning Trace</summary>';
+            const reasoningBody = document.createElement('div');
+            reasoningBody.className = 'mt-2 p-3 bg-gray-950/50 rounded-lg border border-gray-800 text-gray-400 italic whitespace-pre-wrap font-mono text-xs';
+            details.appendChild(reasoningBody);
+            responseWrapper.appendChild(details);
+
+            const contentBody = document.createElement('div');
+            contentBody.className = 'prose prose-invert max-w-none';
+            responseWrapper.appendChild(contentBody);
+            chatContainer.appendChild(responseWrapper);
+            scrollToBottom();
+
+            const payload = {
+                model: document.getElementById('model-name').value.trim(),
+                messages: systemPrompt ? [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }] : [{ role: 'user', content: userPrompt }],
+                temperature: parseFloat(document.getElementById('temperature').value),
+                max_tokens: parseInt(document.getElementById('max-tokens').value),
+                stream: true,
+                stream_options: { include_usage: true } // Crucial for getting context used!
+            };
+
+            abortController = new AbortController();
+            startTpsTracker();
+
+            try {
+                const response = await fetch('http://localhost:8080/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal
+                });
+
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let fullContent = "";
+                let fullReasoning = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                            try {
+                                const data = JSON.parse(line.slice(6));
+                                
+                                // Handle Context Usage stats when they arrive at the end
+                                if (data.usage) {
+                                    const used = data.usage.prompt_tokens + data.usage.completion_tokens;
+                                    const max = parseInt(document.getElementById('max-tokens').value);
+                                    const pct = Math.min((used / max) * 100, 100);
+                                    document.getElementById('context-val').innerText = `${used} / ${max}`;
+                                    document.getElementById('context-bar').style.width = `${pct}%`;
+                                    
+                                    // Change color if approaching limits
+                                    document.getElementById('context-bar').className = `h-2 rounded-full transition-all duration-500 ${pct > 85 ? 'bg-red-500' : 'bg-indigo-500'}`;
+                                }
+
+                                if (data.choices && data.choices.length > 0) {
+                                    tokenCount++; // Increment token counter for TPS graph
+                                    const delta = data.choices[0].delta;
+                                    if (delta.reasoning_content) {
+                                        fullReasoning += delta.reasoning_content;
+                                        details.classList.remove('hidden');
+                                        reasoningBody.innerText = fullReasoning;
+                                    }
+                                    if (delta.content) {
+                                        fullContent += delta.content;
+                                        contentBody.innerHTML = marked.parse(fullContent);
+                                    }
+                                    scrollToBottom();
+                                }
+                            } catch (e) { }
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    contentBody.innerHTML += `<br><span class="text-red-400">Error: ${err.message}</span>`;
+                }
+            } finally {
+                stopTpsTracker();
+                resetUI();
+            }
+        }
+
+        function appendMessage(role, text, styleClasses) {
+            const wrapper = document.createElement('div');
+            wrapper.className = `p-5 rounded-xl border max-w-4xl mx-auto shadow-sm ${styleClasses}`;
+            wrapper.innerHTML = `<div class="font-semibold text-gray-300 mb-2 text-sm">${role}</div><div class="text-gray-100 whitespace-pre-wrap text-sm">${text}</div>`;
+            chatContainer.appendChild(wrapper);
+        }
+
+        function scrollToBottom() { chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' }); }
+
+        function resetUI() {
+            submitBtn.disabled = false;
+            submitBtn.classList.remove('opacity-50');
+            abortBtn.classList.add('hidden');
+            document.getElementById('status-indicator').classList.add('hidden');
+            abortController = null;
+        }
+
+        // --- Hardware Polling Loop ---
+        setInterval(async () => {
+            const workerSsh = document.getElementById('worker-ssh').value.trim();
+            const statusBadge = document.getElementById('hw-status');
+            
+            try {
+                const res = await fetch('http://localhost:8081/stats', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ worker_ssh: workerSsh })
+                });
+                if (!res.ok) throw new Error("Offline");
+                const stats = await res.json();
+                
+                statusBadge.innerText = 'Online';
+                statusBadge.className = 'text-[10px] text-green-400 bg-green-900/20 px-2 py-1 rounded';
+
+                // Update Master (3080)
+                if (stats.master) {
+                    const vPct = (stats.master.vram_used / stats.master.vram_total) * 100;
+                    const rPct = (stats.master.ram_used / stats.master.ram_total) * 100;
+                    document.getElementById('master-vram-text').innerText = `${stats.master.vram_used} / ${stats.master.vram_total} MB`;
+                    document.getElementById('master-vram-bar').style.width = `${vPct}%`;
+                    document.getElementById('master-ram-text').innerText = `${stats.master.ram_used} / ${stats.master.ram_total} MB`;
+                    document.getElementById('master-ram-bar').style.width = `${rPct}%`;
+                }
+
+                // Update Worker (4090)
+                const workerContainer = document.getElementById('worker-stats-container');
+                if (stats.worker) {
+                    workerContainer.classList.remove('opacity-30');
+                    const vPct = (stats.worker.vram_used / stats.worker.vram_total) * 100;
+                    const rPct = (stats.worker.ram_used / stats.worker.ram_total) * 100;
+                    document.getElementById('worker-vram-text').innerText = `${stats.worker.vram_used} / ${stats.worker.vram_total} MB`;
+                    document.getElementById('worker-vram-bar').style.width = `${vPct}%`;
+                    document.getElementById('worker-ram-text').innerText = `${stats.worker.ram_used} / ${stats.worker.ram_total} MB`;
+                    document.getElementById('worker-ram-bar').style.width = `${rPct}%`;
+                } else {
+                    workerContainer.classList.add('opacity-30');
+                }
+
+            } catch (e) {
+                statusBadge.innerText = 'Offline (Port 8081)';
+                statusBadge.className = 'text-[10px] text-red-400 bg-red-900/20 px-2 py-1 rounded';
+            }
+        }, 2000); // Poll every 2 seconds
+    </script>
+</body>
+</html>
