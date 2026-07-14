@@ -94,7 +94,7 @@
                 <div class="grid grid-cols-2 gap-3">
                     <div>
                         <label class="block text-[10px] text-gray-400 mb-1">Context</label>
-                        <input type="number" id="server-ctx" value="32768" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        <input type="number" id="server-ctx" value="110000" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
                     </div>
                     <div>
                         <label class="block text-[10px] text-gray-400 mb-1">GPU Layers</label>
@@ -418,7 +418,7 @@
                 <span class="text-xs text-gray-300">Net Throughput <span class="text-gray-500 cursor-help ml-1" title="Network bandwidth primarily used by RPC sync">?</span></span>
                 <span id="current-net" class="text-sm font-bold text-blue-400 font-mono">0.0<span class="text-[10px] text-gray-500 ml-1">MB/s</span></span>
             </div>
-            <div class="h-20 w-full"><canvas id="netChart"></canvas></div>
+            <div class="h-20 w-full cursor-pointer" onclick="expandChart('netChart', 'Net Throughput (MB/s)')"><canvas id="netChart"></canvas></div>
         </div>
 
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50">
@@ -426,7 +426,7 @@
                 <span class="text-xs text-gray-300">Tokens / Sec</span>
                 <span id="current-tps" class="text-sm font-bold text-green-400 font-mono">0.0</span>
             </div>
-            <div class="h-20 w-full"><canvas id="tpsChart"></canvas></div>
+            <div class="h-20 w-full cursor-pointer" onclick="expandChart('tpsChart', 'Tokens/sec')"><canvas id="tpsChart"></canvas></div>
         </div>
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50" id="card-gpu-temp">
             <div class="flex justify-between items-start mb-1">
@@ -540,7 +540,7 @@
         </div>
     </div>
 
-    <script src="/script.js"></script>
+    <script src="./script.js"></script>
 </body>
 </html>
 
