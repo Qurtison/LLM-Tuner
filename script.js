@@ -418,10 +418,77 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
         specType: mtpEnabled ? 'draft-mtp' : null,
         specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
-        verbosity: Number.isFinite(verbosityVal) ? verbosityVal : null
+        verbosity: Number.isFinite(verbosityVal) ? verbosityVal : null,
+        argString: document.getElementById('extra-args').value.trim() || null
     };
     fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
 });
+
+// --- Item 6: Saved Configs (localStorage) ---
+function getArgConfigs() {
+    try { return JSON.parse(localStorage.getItem('arg_configs') || '{}'); } catch { return {}; }
+}
+function saveArgConfigs(cfg) { localStorage.setItem('arg_configs', JSON.stringify(cfg)); }
+
+function saveCurrentConfig() {
+    const modelPath = document.getElementById('model-select').value;
+    const argString = document.getElementById('extra-args').value.trim();
+    if (!argString) { alert('Nothing to save — enter args first.'); return; }
+    const name = prompt('Config name:', 'default');
+    if (!name) return;
+    const cfgs = getArgConfigs();
+    if (!cfgs[modelPath]) cfgs[modelPath] = [];
+    // Replace existing entry with same name
+    const existing = cfgs[modelPath].find(c => c.name === name);
+    if (existing) { existing.argString = argString; existing.lastUsed = Date.now(); }
+    else { cfgs[modelPath].push({ name, argString, lastUsed: Date.now() }); }
+    saveArgConfigs(cfgs);
+    renderSavedConfigs();
+}
+
+function loadConfigEntry(modelPath, entry) {
+    document.getElementById('extra-args').value = entry.argString;
+    const cfgs = getArgConfigs();
+    if (cfgs[modelPath]) {
+        const e = cfgs[modelPath].find(c => c.name === entry.name);
+        if (e) e.lastUsed = Date.now();
+        saveArgConfigs(cfgs);
+    }
+    renderSavedConfigs();
+}
+
+function deleteConfigEntry(modelPath, name) {
+    const cfgs = getArgConfigs();
+    if (cfgs[modelPath]) {
+        cfgs[modelPath] = cfgs[modelPath].filter(c => c.name !== name);
+        saveArgConfigs(cfgs);
+        renderSavedConfigs();
+    }
+}
+
+function renderSavedConfigs() {
+    const modelPath = document.getElementById('model-select').value;
+    const list = document.getElementById('saved-configs-list');
+    const cfgs = getArgConfigs();
+    const entries = (cfgs[modelPath] || []).sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+    if (entries.length === 0) { list.classList.add('hidden'); list.innerHTML = ''; return; }
+    list.classList.remove('hidden');
+    list.innerHTML = entries.map(e => `
+        <span class="inline-flex items-center gap-1">
+            <button onclick='loadConfigEntry(${JSON.stringify(modelPath)}, ${JSON.stringify(e)})' 
+                class="px-1.5 py-0.5 bg-indigo-900/40 hover:bg-indigo-800/60 border border-indigo-700/50 rounded text-[9px] text-indigo-300 cursor-pointer">
+                ${e.name}
+            </button>
+            <button onclick='deleteConfigEntry(${JSON.stringify(modelPath)}, ${JSON.stringify(e.name)})' 
+                class="px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 border border-red-800/40 rounded text-[9px] text-red-400 cursor-pointer" title="Delete">×</button>
+        </span>
+    `).join('');
+}
+
+document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
+document.getElementById('btn-load-configs').addEventListener('click', renderSavedConfigs);
+// Re-render saved configs when model changes
+document.getElementById('model-select').addEventListener('change', () => { renderSavedConfigs(); });
 document.getElementById('btn-stop-server').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
 
 // --- HF Modal Logic ---
