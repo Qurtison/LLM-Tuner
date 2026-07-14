@@ -20,6 +20,10 @@ let isRpc = false;
 let clients = [];
 let loadStartTime = 0;
 let finalLoadTime = 0;
+// In-memory ring buffer for master logs (last 500 lines) — sidesteps the
+// docker compose run --rm one-off container issue (see dashboard-bugs1-analysis.md item 5)
+let masterLogBuffer = [];
+const MASTER_LOG_BUFFER_SIZE = 500;
 
 // --- PATH HELPERS ---
 const LOCAL_MODELS_DIR = path.join(ROOT_DIR, 'models');
@@ -209,6 +213,31 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify(uniqueModels));
         }
 
+        else if (req.url.match(/^\/[\w.-]+\.(js|css|map|ico|png|svg)$/)) {
+            const filePath = path.join(__dirname, req.url);
+            // Prevent path traversal — ensure resolved path stays in __dirname
+            if (!filePath.startsWith(__dirname)) {
+                res.writeHead(403);
+                return res.end('Forbidden');
+            }
+            const types = {
+                '.js': 'application/javascript',
+                '.css': 'text/css',
+                '.map': 'application/json',
+                '.ico': 'image/x-icon',
+                '.png': 'image/png',
+                '.svg': 'image/svg+xml'
+            };
+            try {
+                const content = await fs.readFile(filePath);
+                res.writeHead(200, { 'Content-Type': types[path.extname(filePath)] || 'application/octet-stream' });
+                return res.end(content);
+            } catch (err) {
+                res.writeHead(404);
+                return res.end('Not found');
+            }
+        }
+
         // --- BENCHMARK LOG ---
         else if (req.url === '/api/log' && req.method === 'POST') {
             let body;
@@ -250,6 +279,8 @@ const server = http.createServer(async (req, res) => {
             serverState = 'starting';
             loadStartTime = Date.now();
             finalLoadTime = 0;
+            // Clear log buffer for fresh run (see dashboard-bugs1-analysis.md item 5)
+            masterLogBuffer = [];
             broadcastState();
 
             await runDockerCompose('down --remove-orphans');
@@ -270,6 +301,7 @@ const server = http.createServer(async (req, res) => {
             if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
             if (config.preserveThinking) {
                 args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
+                args.push('--reasoning-preserve');
             }
             if (isRpc) {
                 args.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`);
@@ -278,17 +310,36 @@ const server = http.createServer(async (req, res) => {
                     args.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
                 }
             }
+            if (config.reasoningPreserve) {
+                args.push('--reasoning-preserve');
+            }
 
             llamaProcess = spawn('docker', args, { cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+            // Stable reference for this process's own handlers below. `llamaProcess`
+            // (the shared/mutable var) can get reassigned or nulled by /api/stop or the
+            // error-branch in handleLogs() before this process's 'close' event actually
+            // fires -- closing over `proc` instead avoids dereferencing a null.
+            const proc = llamaProcess;
 
             const handleLogs = (d) => {
                 const text = d.toString();
                 process.stdout.write(text);
+                // Append to in-memory ring buffer for /api/master/logs (item 5)
+                const lines = text.split('\n');
+                for (const line of lines) {
+                    if (line.length > 0) {
+                        masterLogBuffer.push(line);
+                        if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
+                            masterLogBuffer.shift();
+                        }
+                    }
+                }
                 if (text.includes('load_model: loading model')) {
                     serverState = 'loading';
                     broadcastState();
                 }
-                else if (text.includes('llama_server: listening on')) {
+                else if (text.includes('llama_server: model loaded')) {
+                    console.log("MODEL LOADED! READY!")
                     serverState = 'ready';
                     if (loadStartTime > 0) {
                         finalLoadTime = ((Date.now() - loadStartTime) / 1000).toFixed(1);
@@ -308,12 +359,12 @@ const server = http.createServer(async (req, res) => {
                     }
                 }
                 else if (text.includes('abort') || text.toLowerCase().includes('error:') || text.includes('failed to fit params to free device memory')) {
+                    // Don't null the shared `llamaProcess` here -- just request the kill.
+                    // The 'close' handler below is now the single place that clears shared
+                    // state, and only once this specific process has actually exited.
                     serverState = 'stopped';
-                    if (llamaProcess) {
-                        llamaProcess.kill();
-                        llamaProcess = null;
-                        runDockerCompose('down --remove-orphans').catch(() => { });
-                    }
+                    proc.kill();
+                    runDockerCompose('down --remove-orphans').catch(() => { });
                     const errMsg = text.includes('failed to fit params')
                         ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
                         : 'Process error: ' + text.trim().slice(-200);
@@ -321,23 +372,36 @@ const server = http.createServer(async (req, res) => {
                 }
             };
 
-            llamaProcess.stdout.on('data', handleLogs);
-            llamaProcess.stderr.on('data', handleLogs);
+            proc.stdout.on('data', handleLogs);
+            proc.stderr.on('data', handleLogs);
 
-            llamaProcess.on('close', () => {
-                if (llamaProcess.stdout) llamaProcess.stdout.removeAllListeners('data');
-                if (llamaProcess.stderr) llamaProcess.stderr.removeAllListeners('data');
-                llamaProcess = null;
-                serverState = 'stopped';
-                currentModel = '';
-                isRpc = false;
-                broadcastState();
+            // Single source of truth for tearing down shared state: fires exactly once
+            // per spawned process, after it has actually closed -- never dereferences a
+            // null `llamaProcess` (previously this crashed the whole Node process whenever
+            // /api/stop or the error-branch above had already nulled it first). `code`/
+            // `signal` are captured here as the hook point for distinguishing a crash from
+            // a clean stop (see dashboard-bugs1-analysis.md item 8c), not yet used below.
+            proc.on('close', (code, signal) => {
+                proc.stdout.removeAllListeners('data');
+                proc.stderr.removeAllListeners('data');
+                // Only clear shared state if nothing newer has replaced this process
+                // in the meantime (e.g. a fresh /api/start after a fast stop/restart).
+                if (llamaProcess === proc) {
+                    llamaProcess = null;
+                    serverState = 'stopped';
+                    currentModel = '';
+                    isRpc = false;
+                    broadcastState();
+                }
             });
 
-            llamaProcess.on('error', (err) => {
+            proc.on('error', (err) => {
                 console.error('Llama process error:', err);
-                serverState = 'stopped';
-                broadcastState('', 'Failed to start process: ' + err.message);
+                if (llamaProcess === proc) {
+                    llamaProcess = null;
+                    serverState = 'stopped';
+                    broadcastState('', 'Failed to start process: ' + err.message);
+                }
             });
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -349,9 +413,13 @@ const server = http.createServer(async (req, res) => {
             serverState = 'stopping';
             broadcastState();
             await runDockerCompose('down --remove-orphans');
+            // Request the kill but don't null `llamaProcess` here -- the process's own
+            // 'close' handler (registered at spawn time) is now the single place that
+            // clears shared state, once the process has actually exited. Nulling it here
+            // first was the other half of the race that used to crash the whole process
+            // (see dashboard-bugs1-analysis.md item 13).
             if (llamaProcess) {
                 llamaProcess.kill();
-                llamaProcess = null;
             }
             serverState = 'stopped';
             currentModel = '';
@@ -427,14 +495,13 @@ const server = http.createServer(async (req, res) => {
 
         // --- MASTER LOGS ---
         else if (req.url === '/api/master/logs' && req.method === 'GET') {
-            try {
-                const { stdout, stderr } = await runDockerCompose('logs --tail=50 master-node 2>&1');
-                res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ logs: stdout || stderr || 'No logs available.' }));
-            } catch (err) {
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ logs: `Failed to fetch logs: ${err.message}` }));
-            }
+            // Serve from in-memory ring buffer instead of shelling out to docker compose logs,
+            // which cannot see one-off run --rm containers (see dashboard-bugs1-analysis.md item 5)
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            const logs = masterLogBuffer.length > 0
+                ? masterLogBuffer.join('\n')
+                : 'No logs available. Start the server first.';
+            return res.end(JSON.stringify({ logs }));
         }
 
         // --- 404 ---
