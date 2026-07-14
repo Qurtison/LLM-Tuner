@@ -321,54 +321,70 @@ const server = http.createServer(async (req, res) => {
             // fires -- closing over `proc` instead avoids dereferencing a null.
             const proc = llamaProcess;
 
+            // Line-buffering for handleLogs to prevent regex misses when stdout chunks
+            // split a single log line across multiple 'data' events (item 7)
+            let logLineBuffer = '';
+
             const handleLogs = (d) => {
                 const text = d.toString();
                 process.stdout.write(text);
+
                 // Append to in-memory ring buffer for /api/master/logs (item 5)
-                const lines = text.split('\n');
-                for (const line of lines) {
-                    if (line.length > 0) {
-                        masterLogBuffer.push(line);
+                const rawLines = text.split('\n');
+                for (const l of rawLines) {
+                    if (l.length > 0) {
+                        masterLogBuffer.push(l);
                         if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
                             masterLogBuffer.shift();
                         }
                     }
                 }
-                if (text.includes('load_model: loading model')) {
-                    serverState = 'loading';
-                    broadcastState();
-                }
-                else if (text.includes('llama_server: model loaded')) {
-                    console.log("MODEL LOADED! READY!")
-                    serverState = 'ready';
-                    if (loadStartTime > 0) {
-                        finalLoadTime = ((Date.now() - loadStartTime) / 1000).toFixed(1);
-                        loadStartTime = 0;
+
+                // Buffer partial lines to handle chunk boundaries (item 7)
+                logLineBuffer += text;
+                const bufferedLines = logLineBuffer.split('\n');
+                // Keep the last (potentially incomplete) fragment in the buffer
+                logLineBuffer = bufferedLines.pop() || '';
+
+                // Process all complete lines using buffered (reassembled) lines
+                // so regex matches aren't missed when stdout splits mid-line
+                for (const line of bufferedLines) {
+                    if (line.includes('load_model: loading model')) {
+                        serverState = 'loading';
+                        broadcastState();
                     }
-                    broadcastState();
-                }
-                else if (text.includes('prompt processing, n_tokens =')) {
-                    // Parse: prompt processing, n_tokens =  8192, progress = 0.66, t =  3.61 s / 2272.33 tokens per second
-                    const nTokensMatch = text.match(/n_tokens =\s*(\d+)/);
-                    const progressMatch = text.match(/progress = (0\.\d+|1\.00)/);
-                    const tpsMatch = text.match(/(\d+\.?\d*)\s*tokens per second/);
-                    if (progressMatch) {
-                        const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
-                        const tps = tpsMatch ? tpsMatch[1] : '0';
-                        broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
+                    else if (line.includes('llama_server: model loaded')) {
+                        console.log("MODEL LOADED! READY!");
+                        serverState = 'ready';
+                        if (loadStartTime > 0) {
+                            finalLoadTime = ((Date.now() - loadStartTime) / 1000).toFixed(1);
+                            loadStartTime = 0;
+                        }
+                        broadcastState();
                     }
-                }
-                else if (text.includes('abort') || text.toLowerCase().includes('error:') || text.includes('failed to fit params to free device memory')) {
-                    // Don't null the shared `llamaProcess` here -- just request the kill.
-                    // The 'close' handler below is now the single place that clears shared
-                    // state, and only once this specific process has actually exited.
-                    serverState = 'stopped';
-                    proc.kill();
-                    runDockerCompose('down --remove-orphans').catch(() => { });
-                    const errMsg = text.includes('failed to fit params')
-                        ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
-                        : 'Process error: ' + text.trim().slice(-200);
-                    broadcastState('', errMsg);
+                    else if (line.includes('prompt processing, n_tokens =')) {
+                        // Parse: prompt processing, n_tokens =  8192, progress = 0.66, t =  3.61 s / 2272.33 tokens per second
+                        const nTokensMatch = line.match(/n_tokens =\s*(\d+)/);
+                        const progressMatch = line.match(/progress = (0\.\d+|1\.00)/);
+                        const tpsMatch = line.match(/(\d+\.?\d*)\s*tokens per second/);
+                        if (progressMatch) {
+                            const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
+                            const tps = tpsMatch ? tpsMatch[1] : '0';
+                            broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
+                        }
+                    }
+                    else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
+                        // Don't null the shared `llamaProcess` here -- just request the kill.
+                        // The 'close' handler below is now the single place that clears shared
+                        // state, and only once this specific process has actually exited.
+                        serverState = 'stopped';
+                        proc.kill();
+                        runDockerCompose('down --remove-orphans').catch(() => { });
+                        const errMsg = line.includes('failed to fit params')
+                            ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
+                            : 'Process error: ' + line.trim().slice(-200);
+                        broadcastState('', errMsg);
+                    }
                 }
             };
 
