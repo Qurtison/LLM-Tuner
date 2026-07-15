@@ -2,7 +2,9 @@ import http.server
 import socketserver
 import json
 import subprocess
+import sys
 import time
+import traceback
 
 PORT = 8081
 
@@ -121,28 +123,76 @@ def _identify_interface_by_subnet(iface_bytes, subnet_prefix):
     return first[0] if first else None, first[1] if first else {}
 
 class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
+    """HTTP handler for hardware telemetry. Wraps all request methods in
+    try/except to prevent client disconnections (ConnectionResetError,
+    BrokenPipeError, etc.) from crashing the entire monitor server.
+    (Item 19: monitor.py dies on page refresh)"""
+
+    # Suppress default stderr access logs — telemetry polls every 0.5-2s
+    # produce very noisy logs and the frontend has its own error tracking.
+    def log_message(self, format, *args):
+        pass  # silence per-request logs; errors are logged via log_error
+
+    def log_error(self, format, *args):
+        # Log errors to stderr so they appear in server4.js console output
+        sys.stderr.write(f"[monitor] ERROR {format % args}\n")
+        sys.stderr.flush()
+
     def do_OPTIONS(self):
-        self.send_response(200, "ok")
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
+        try:
+            self.send_response(200, "ok")
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+        except (ConnectionResetError, BrokenPipeError, OSError):
+            # Client disconnected while sending response — safe to ignore
+            pass
 
     def do_POST(self):
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
-        req = json.loads(post_data.decode('utf-8'))
-        
-        stats = {"master": self.get_stats()}
-        worker_ssh = req.get('worker_ssh', '').strip()
-        if worker_ssh:
-            stats['worker'] = self.get_stats(worker_ssh)
-            
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
-        self.wfile.write(json.dumps(stats).encode())
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+            req = json.loads(post_data.decode('utf-8'))
+
+            stats = {"master": self.get_stats()}
+            worker_ssh = req.get('worker_ssh', '').strip()
+            if worker_ssh:
+                stats['worker'] = self.get_stats(worker_ssh)
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(stats).encode())
+        except (ConnectionResetError, BrokenPipeError):
+            # Client disconnected during request (e.g., page refresh, tab close).
+            # This is normal — don't crash, just silently finish.
+            pass
+        except json.JSONDecodeError:
+            # Malformed request body — return 400 but don't crash
+            try:
+                self.send_response(400)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
+        except Exception as e:
+            # Catch-all: log full traceback so silent crashes are visible,
+            # then return 500 — do NOT let the exception escape since that
+            # would terminate the serving thread and kill the entire process.
+            sys.stderr.write(f"[monitor] Unhandled error in do_POST:\n{traceback.format_exc()}\n")
+            sys.stderr.flush()
+            try:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
 
     def get_stats(self, ssh_prefix=""):
         meminfo_out = ""  # For SSH remote meminfo data; empty for local (uses /proc/meminfo directly)
