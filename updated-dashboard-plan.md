@@ -33,6 +33,8 @@
 | #7 Prefill Progress Bar | ✅ COMPLETED | — | Line buffering verified: logLineBuffer at spawn, chunk splitting prevents regex misses |
 | #19 Monitor.py crash resilience | ✅ COMPLETED | — | Full try/except wrapping, ConnectionResetError/BrokenPipeError handling in all handlers |
 | #9 GPU Throttle granularity | ✅ COMPLETED (backend) | — | Granular throttle reasons queried, parsed, returned in JSON. Frontend color-coding still pending. |
+| #14 Telemetry backoff | ✅ COMPLETED | — | Exponential backoff, failure banner, recovery notification all implemented in script.js |
+| #5 Load Time | ✅ COMPLETED | — | `currentLoadTime` assigned from `data.finalLoadTime` in SSE handler, sent to `/api/log` |
 | #20 iGPU | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Requires intel_gpu_top installation on system. Low priority, hardware-specific. |
 | #23 Gantt chart | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on #9 and #7. Requires bottleneck detection algorithm design. |
 | #25 Stacked area graphs | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on per-process per-component telemetry changes in monitor.py. |
@@ -94,9 +96,14 @@ When the killed process *does* actually terminate, Node fires the `'close'` even
 
 ## 14. Telemetry Fetch Cascade on Network Change (`ERR_NETWORK_CHANGED`)
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (verified 2026-07-14 in script.js)
 
-**Confidence:** Confirmed
+**Completion Notes:** All 3 Action Plan steps already implemented in script.js:
+- Step 1: Consecutive failure counter (`telemetryConsecutiveFailures`) with visible banner (`#telemetry-failure-banner`) after 3+ failures showing failure count
+- Step 2: Exponential backoff (double interval, cap at `TELEMETRY_MAX_BACKOFF`), resets on success via `setTelemetryInterval()`
+- Step 3: Recovery notification via `wasFailing` flag shows brief "recovered" banner message
+
+**Confidence:** Confirmed via code inspection
 
 ### Root Cause
 
@@ -206,7 +213,11 @@ Depends on Section A being resolved first.
 
 ## 5. Load Time Not Recorded in CSV
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (verified 2026-07-14 in script.js)
+
+**Completion Notes:** Fix already implemented in script.js:
+- `currentLoadTime` initialized at "N/A" then assigned from `data.finalLoadTime` in the SSE handler when state is 'ready'
+- `currentLoadTime` used in the `/api/log` payload via `loadTime: currentLoadTime` in chatContext
 
 **Blocks:** Item 15 (Historical CSV), Item 12 (Continuous Telemetry)
 
