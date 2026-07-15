@@ -29,9 +29,9 @@
 | #17 Multi-graph persistence | ✅ Already implemented | — | responseMetrics stored in chatContext at line 803 |
 | #18 VRAM stacked bar | ✅ Already implemented | — | 3-segment stacked bar (weights/ctx/bg) for master + worker |
 | #8c Crash panel red indication | ✅ Already implemented | — | Log panels turn red on crash (lines 373-383) |
-| #20 iGPU | 🔶 DEFERRED | — | Requires intel_gpu_top install, low priority |
-| #23 Gantt chart | 🔶 DEFERRED | — | Advanced feature, depends on throttle data pipeline |
-| #25 Stacked area graphs | 🔶 DEFERRED | — | Advanced feature, depends on per-component telemetry |
+| #20 iGPU | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Requires intel_gpu_top installation on system. Low priority, hardware-specific. Cannot proceed without confirming tool availability. |
+| #23 Gantt chart | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Advanced visualization feature. Depends on #9 (granular throttle data) and #7 (progress bar fix). Requires design decisions on bottleneck detection algorithm. |
+| #25 Stacked area graphs | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Advanced visualization feature. Depends on per-process per-component telemetry in monitor.py. Requires significant changes to data collection. |
 
 ---
 
