@@ -5,7 +5,9 @@
       "Bash(git -C /home/kyle/AI/experiment-1/dashboard diff --stat)",
       "Bash(git -C /home/kyle/AI/experiment-1/dashboard status)",
       "Bash(npm --version)",
-      "Bash(pm2 --version)"
+      "Bash(pm2 --version)",
+      "Bash(pm2 status *)",
+      "Skill(code-review)"
     ]
   }
 }

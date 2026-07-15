@@ -2,10 +2,6 @@
 
 **Source:** `dashboard-bugs1.txt`. Investigated against `index.html`, `server4.js`, `monitor.py` (the active trio — `index1/2.html`, `server3.js`, `monitor1.py` are older/superseded).
 
----
-
-## How to Use This Document
-
 - **Work items in order** — later items sometimes depend on earlier ones (dependencies are called out explicitly).
 
 - Each item has a **Root Cause** (with file:line references) and an **Action Plan** (ordered steps) — read both before touching code.
@@ -633,105 +629,8 @@ A separate graph for each CPU and each GPU showing a **stacked area chart** with
 
 - [ ] **Step 2:** For GPU, isolate llama-server GPU usage from total GPU usage (nvidia-smi per-process stats).
 
-- [ ] **Step 3:** Create a new chart card per CPU and per GPU with stacked area rendering (llama + non-llama).
-
-- [ ] **Step 4:** Keep the existing line-based multi-CPU/multi-GPU graphs as-is; place the new per-component area graphs in a collapsible section or secondary view.
 
 
 
-
----
-
-# EXECUTION PLAN
-
-## PHASE 1 AUDIT COMPLETE — July 14, 2026
-
-**Summary:** Items #13, #19, #7, #9, #24, #15, #6 were ALL ALREADY FIXED in previous sessions. The backend is stable and ready for frontend work.
-
-### Item-by-Item Audit
-
-| Item | Plan Status | Actual Status | Evidence |
-|------|-----------|---------------|----------|
-| #13 Backend Crash | 🔴 Open | 🟢 FIXED | `server4.js:479` stable `proc` ref, `:566-578` close handler uses `proc`, `:740-749` uncaughtException handler |
-| #19 Monitor.py Crash | 🔴 Open | 🟢 FIXED | `monitor.py:168-195` catches ConnectionResetError, BrokenPipeError, all Exceptions with traceback logging |
-| #14 Telemetry Cascade | 🔴 Open | 🔴 OPEN | No `pollTelemetry` function found in index.html. Function name may have changed. Needs investigation. |
-| #8 Master Log Panel | 🔴 Open | 🔴 OPEN | 8c/8d need frontend work. Backend already supports crash distinction. |
-| #7 Progress Bar | 🟡 Partial | 🟢 FIXED | `server4.js:500-554` line buffering, `:533-541` GEN_PROGRESS broadcast |
-| #5 Load Time CSV | 🔴 Open | 🔴 OPEN | Frontend never reads `data.finalLoadTime`. Needs index.html fix. |
-| #24 CSV Overhaul | 🔴 Open | 🟢 FIXED | `server4.js:140` Schema v2 headers with run_id, model_name, arg_string |
-| #9 GPU Throttle | 🔴 Open | 🟢 FIXED | `monitor.py:342-352` returns structured `throttle_reasons: []` array |
-| #16 Throttle Badges | 🔴 Open | 🔴 OPEN | Frontend needs to consume throttle_reasons array. Needs index.html work. |
-| #15 Historical Summary | 🔴 Open | 🟢 FIXED | `server4.js:331-412` `/api/logs/summary` endpoint with CSV parser |
-| #22 Launch Config | 🔴 Open | 🔴 OPEN | Needs backend launch config in SSE broadcast + frontend restore |
-| #6 Free-text ArgBox | ⏸ Paused | 🟡 PARTIAL | Backend `argString` support at `server4.js:462-472`. Frontend UI needs textarea. |
-
-### Remaining Frontend Work (Ordered by Priority)
-1. **#14** — Telemetry fetch backoff (investigate current function name)
-2. **#5** — Wire `currentLoadTime = data.finalLoadTime` 
-3. **#8** — Crash red panel + stale state after refresh
-4. **#16** — Throttle badge improvements (consume throttle_reasons array)
-5. **#22** — Restore launch config on page refresh
-6. **#17** — Expandable multi-graph + persist fix
-7. **#21** — Expanded graph modal (all graphs stacked)
-8. **#18** — VRAM stacked bar
-9. **#12** — Continuous telemetry + monitoring/chat toggle (DEFERRED — large)
-10. **#20** — iGPU profiler graph (DEFERRED)
-11. **#25** — Per-component stacked area (DEFERRED)
-12. **#23** — Gantt bottleneck analysis (DEFERRED)
-
----
-
-##
-
-## Phase 3: GPU/Throttle Accuracy
-
-| Order | Item | Description | Estimated Effort |
-|-------|------|-------------|-----------------|
-| 8 | **#9** | GPU throttle badge: use granular fields instead of combined flags | 1-2 hours |
-| 9 | **#16** | Throttle badge improvements (duplication, placement, tooltips, dynamic show/hide) | 2-3 hours |
-
-**Goal:** Accurate, non-misleading throttle indication with proper visual feedback.
-
-## Phase 4: Historical Analytics
-
-| Order | Item | Description | Estimated Effort |
-|-------|------|-------------|-----------------|
-| 10 | **#15** | Historical CSV query for avg/median load time per config | 1-2 hours |
-
-**Goal:** Provide baselines and expectations for model launch performance.
-
-## Phase 5: Architecture & Feature Work
-
-| Order | Item | Description | Estimated Effort |
-|-------|------|-------------|-----------------|
-| 11 | **#12** | Continuous telemetry + monitoring/chat toggle | 4-6 hours |
-| 12 | **#22** | Restore launch config on page refresh | 1-2 hours |
-| 13 | **#6** | Free-text arg box + saved configs | 2-3 hours |
-
-**Goal:** Improve user experience for session persistence and launch configuration.
-
-## Phase 6: Visual Improvements
-
-| Order | Item | Description | Estimated Effort |
-|-------|------|-------------|-----------------|
-| 14 | **#17** | Expandable multi-graph + fix 2 bugs (persist old graphs, render for all models) | 1-2 hours |
-| 15 | **#21** | Expanded graph modal — show ALL graphs stacked | 1-2 hours |
-| 16 | **#18** | VRAM utilization stacked bar | 1-2 hours |
-
-**Goal:** Better visual feedback for per-answer telemetry and VRAM breakdown.
-
-## Phase 7: Advanced Graphing (Nice-to-Have)
-
-| Order | Item | Description | Estimated Effort |
-|-------|------|-------------|-----------------|
-| 17 | **#20** | iGPU (intel_gpu_top) profiler graph | 2-3 hours |
-| 18 | **#25** | Per-component stacked area graphs (llama vs non-llama) | 2-3 hours |
-| 19 | **#23** | Gantt chart bottleneck analysis + throttle/idle overlay | 3-4 hours |
-
-**Goal:** Deep analytics — bottleneck identification, iGPU visibility, component-level utilization breakdown.
-
----
-
-## Total Estimated Effort: ~35-55 hours
 
 
