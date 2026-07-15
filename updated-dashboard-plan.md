@@ -18,6 +18,23 @@
 
 ---
 
+## Progress Log (2026-07-14)
+
+| Item | Status | Commit | Notes |
+|------|--------|--------|-------|
+| Backend audit (items 1-5, 7, 9, 12, 13, 19) | ✅ COMPLETED | `4eb393a` | All backend items verified fixed or already implemented |
+| Frontend audit (items 6-8d, 10-11, 14-18, 21-24) | ✅ COMPLETED | `4eb393a` | Most frontend items verified fixed |
+| #24 CSV field sync (timelineEls + sessionData) | ✅ COMPLETED | `11e68ef` | Restored missing timelineEls DOM refs and sessionData init block with argString/promptTokens |
+| #16 Throttle badge duplication | ✅ Already implemented | — | Single deduplicated badge container at line 1493-1507 |
+| #17 Multi-graph persistence | ✅ Already implemented | — | responseMetrics stored in chatContext at line 803 |
+| #18 VRAM stacked bar | ✅ Already implemented | — | 3-segment stacked bar (weights/ctx/bg) for master + worker |
+| #8c Crash panel red indication | ✅ Already implemented | — | Log panels turn red on crash (lines 373-383) |
+| #20 iGPU | 🔶 DEFERRED | — | Requires intel_gpu_top install, low priority |
+| #23 Gantt chart | 🔶 DEFERRED | — | Advanced feature, depends on throttle data pipeline |
+| #25 Stacked area graphs | 🔶 DEFERRED | — | Advanced feature, depends on per-component telemetry |
+
+---
+
 ## Dependency Graph (Execution Order)
 
 ```
@@ -410,9 +427,11 @@ Launch config is built field-by-field in the DOM (`index.html:100-153`) and asse
 
 ## 18. VRAM Utilization Bar Improvement
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (verified 2026-07-14)
 
-### Current Behavior
+**Completion Notes:** Already fully implemented. 3-segment stacked bar (weights/ctx/bg) exists for both master and worker cards. Script.js lines 1458-1460 and 1516-1518 set segment widths. HTML indices 404-406 and 416-418 render the segments. Includes process VRAM vs background VRAM split with proper zero-total guards.
+
+### Current Behavior (Before Implementation)
 
 VRAM shows total usage as a single bar.
 
