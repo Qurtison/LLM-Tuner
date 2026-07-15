@@ -631,9 +631,27 @@ async function initServer() {
         process.exit(0);
     };
 
-    process.on('exit', () => { if (pythonProcess) pythonProcess.kill(); });
-    process.on('SIGINT', shutdownHandler);
-    process.on('SIGTERM', shutdownHandler);
+process.on('exit', () => { if (pythonProcess) pythonProcess.kill(); });
+process.on('SIGINT', shutdownHandler);
+process.on('SIGTERM', shutdownHandler);
+
+// Safety net for uncaught exceptions (Item 13, Step 5) — prevents silent
+// crashes from taking down SSE, the models API, and Docker orchestration.
+process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err?.stack || err);
+    // Broadcast error state to connected SSE clients before shutting down
+    try {
+        serverState = 'stopped';
+        broadcastState('', 'Server crash: ' + (err?.message || String(err)));
+    } catch { /* broadcast may fail if clients array is corrupted */ }
+    // Attempt graceful shutdown
+    shutdownHandler();
+});
+
+// Catch rejected promises that bubble up (async handlers without try/catch)
+process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason);
+});
 
     server.listen(PORT, () => console.log(`\n🚀 Mission Control running at: http://localhost:${PORT}`));
 }
