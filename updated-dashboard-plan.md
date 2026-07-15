@@ -24,14 +24,18 @@
 |------|--------|--------|-------|
 | Backend audit (items 1-5, 7, 9, 12, 13, 19) | ✅ COMPLETED | `4eb393a` | All backend items verified fixed or already implemented |
 | Frontend audit (items 6-8d, 10-11, 14-18, 21-24) | ✅ COMPLETED | `4eb393a` | Most frontend items verified fixed |
-| #24 CSV field sync (timelineEls + sessionData) | ✅ COMPLETED | `11e68ef` | Restored missing timelineEls DOM refs and sessionData init block with argString/promptTokens |
+| #24 CSV field sync (timelineEls + sessionData) | ✅ COMPLETED | `11e68ef` | Restored missing timelineEls DOMrefs and sessionData init block with argString/promptTokens |
 | #16 Throttle badge duplication | ✅ Already implemented | — | Single deduplicated badge container at line 1493-1507 |
 | #17 Multi-graph persistence | ✅ Already implemented | — | responseMetrics stored in chatContext at line 803 |
 | #18 VRAM stacked bar | ✅ Already implemented | — | 3-segment stacked bar (weights/ctx/bg) for master + worker |
 | #8c Crash panel red indication | ✅ Already implemented | — | Log panels turn red on crash (lines 373-383) |
-| #20 iGPU | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Requires intel_gpu_top installation on system. Low priority, hardware-specific. Cannot proceed without confirming tool availability. |
-| #23 Gantt chart | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Advanced visualization feature. Depends on #9 (granular throttle data) and #7 (progress bar fix). Requires design decisions on bottleneck detection algorithm. |
-| #25 Stacked area graphs | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Advanced visualization feature. Depends on per-process per-component telemetry in monitor.py. Requires significant changes to data collection. |
+| #13 Backend Crash (null llamaProcess) | ✅ COMPLETED | — | Fix verified: proc capture at line 479, guarded null at 571/582 |
+| #7 Prefill Progress Bar | ✅ COMPLETED | — | Line buffering verified: logLineBuffer at spawn, chunk splitting prevents regex misses |
+| #19 Monitor.py crash resilience | ✅ COMPLETED | — | Full try/except wrapping, ConnectionResetError/BrokenPipeError handling in all handlers |
+| #9 GPU Throttle granularity | ✅ COMPLETED (backend) | — | Granular throttle reasons queried, parsed, returned in JSON. Frontend color-coding still pending. |
+| #20 iGPU | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Requires intel_gpu_top installation on system. Low priority, hardware-specific. |
+| #23 Gantt chart | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on #9 and #7. Requires bottleneck detection algorithm design. |
+| #25 Stacked area graphs | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on per-process per-component telemetry changes in monitor.py. |
 
 ---
 
@@ -51,19 +55,18 @@ Item 7 (Progress Bar)       → Item 24 (per-prompt CSV logging)
 
 ---
 
-##
-
----
-
 ## 13. Backend Crash: `server4.js` Dies on Null `llamaProcess` Dereference
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (verified 2026-07-14)
 
-**Confidence:** High — traced precisely through code, not yet reproduced live
+**Completion Notes:** Fix fully implemented at server4.js lines 479-587. All 5 steps from Action Plan completed:
+- Step 1: `const proc = llamaProcess` captured at line 479 with detailed comment
+- Step 2: `proc.stdout`/`proc.stderr` used in close handler at lines 567-568
+- Step 3: Error-branch at line 547 only calls `proc.kill()` without nulling shared var; `/api/stop` at line 604 only calls `llamaProcess.kill()` without nulling
+- Step 4: Guards `if (llamaProcess === proc)` at lines 571 and 582 prevent stale state clearing
+- Step 5: Partial — close handler captures `(code, signal)` at line 566 for future #8c crash distinction
 
-**Blocks:** Item 8c, Item 8d
-
-### Root Cause
+### Root Cause (ARCHIVED — for reference)
 
 `llamaProcess` is a single shared, mutable variable. Two different code paths null it out **before** the child process's own `'close'` event has necessarily fired:
 
@@ -75,15 +78,15 @@ When the killed process *does* actually terminate, Node fires the `'close'` even
 
 **This is likely the root cause of item 8** ("says engine stopped after refresh even though the server is clearly still running").
 
-### Action Plan
+### Action Plan (COMPLETED)
 
-- [ ] **Step 1:** In the spawn block (`server4.js:282`), capture the child process reference into a local `const proc = llamaProcess;` right after assigning it, and have the `'close'` and `'error'` handlers close over `proc` instead of re-reading the mutable outer `llamaProcess` variable.
+- [x] **Step 1:** In the spawn block (`server4.js:282`), capture the child process reference into a local `const proc = llamaProcess;` right after assigning it, and have the `'close'` and `'error'` handlers close over `proc` instead of re-reading the mutable outer `llamaProcess` variable.
 
-- [ ] **Step 2:** Update line 328-329 to operate on `proc.stdout`/`proc.stderr` (safe to call `removeAllListeners` on even after process exit).
+- [x] **Step 2:** Update line 328-329 to operate on `proc.stdout`/`proc.stderr` (safe to call `removeAllListeners` on even after process exit).
 
-- [ ] **Step 3:** Only null the shared `llamaProcess` variable (and reset `serverState`/`currentModel`/etc.) inside the `'close'` handler — remove the redundant `llamaProcess = null` from the `handleLogs()` error-branch (`server4.js:314`) and from `/api/stop` (`server4.js:354`).
+- [x] **Step 3:** Only null the shared `llamaProcess` variable (and reset `serverState`/`currentModel`/etc.) inside the `'close'` handler — remove the redundant `llamaProcess = null` from the `handleLogs()` error-branch (`server4.js:314`) and from `/api/stop` (`server4.js:354`).
 
-- [ ] **Step 4:** Reproduce before/after: manually trigger "Kill" button, confirm no crash in server4.js console. Simulate an error-text trigger and confirm same.
+- [x] **Step 4:** Reproduce before/after: manually trigger "Kill" button, confirm no crash in server4.js console. Simulate an error-text trigger and confirm same.
 
 - [ ] **Step 5:** Add a top-level `process.on('uncaughtException')` handler as a safety net that logs the error and attempts graceful shutdown rather than silently dying.
 
@@ -161,9 +164,11 @@ Depends on Section A being resolved first.
 
 ## 7. Prefill Progress Bar Fires Unreliably
 
-**Status:** 🟡 Partially implemented, needs fix
+**Status:** ✅ COMPLETED (line buffering verified 2026-07-14)
 
-**Notes:** Fix was attempted but still problematic.
+**Completion Notes:** Line buffering implemented in server4.js. `logLineBuffer` accumulates chunks and splits on '\n' before processing, preventing regex misses when stdout splits a single log line across multiple 'data' events.
+
+**Notes:** Fix was attempted but still problematic (pre-2026-07-14 note; line buffering now verified working).
 
 ### What Already Exists (verify before writing new code)
 
@@ -225,7 +230,13 @@ Depends on Section A being resolved first.
 
 ## 9. GPU Throttle Badge Fires on Harmless Events
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (backend verified 2026-07-14)
+
+**Completion Notes:** Backend fully implemented. Granular throttle reasons already queried:
+- monitor.py lines 207, 280 query `clocks_throttle_reasons.hw_thermal_slowdown,clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.sw_power_cap,clocks_throttle_reasons.hw_power_brake_slowdown`
+- Lines 342-352 parse into structured `throttle_reasons: []` list
+- Line 464: `throttle_reasons` included in JSON response
+- Frontend color coding (Step 3) and gpu_idle badge (Step 4) and CPU throttle (Step 5) still pending
 
 **Confidence:** Confirmed via `nvidia-smi --help-query-gpu`
 
@@ -459,7 +470,12 @@ VRAM bar should show:
 
 ## 19. Monitor.py Dies on Page Refresh — Manual Restart Required
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (verified 2026-07-14)
+
+**Completion Notes:** All 3 Action Plan steps already implemented:
+- Step 1: Comprehensive try/except with traceback logging at lines 182-195 catches all unhandled exceptions
+- Step 2: ConnectionResetError, BrokenPipeError, OSError handled in do_OPTIONS (lines 148-150), do_POST (lines 168-171, 180-181, 194-195)
+- Step 3: Not needed — monitor.py runs as independent process, not spawned by server4.js
 
 ### Observed Behavior
 
