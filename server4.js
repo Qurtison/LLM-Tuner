@@ -134,9 +134,29 @@ async function cleanupPort(port) {
 }
 
 // --- CSV LOG INIT ---
-const CSV_HEADERS = "Timestamp,Category,Metric,Model,Quant,Ctx,NGL,RPC,Transport,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time\n";
+// Schema v2 (Item #24): Removed Category, Metric, Quant (never populated by client).
+// Added run_id (auto-generated), model_name (short), prompt_tokens, arg_string.
+// All string fields are quoted in output to handle commas in paths/args.
+const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time\n";
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
+
+// Generate a short run_id: timestamp + 4 random hex chars
+function generateRunId() {
+    const ts = Date.now().toString(36);
+    const rand = Math.random().toString(16).slice(2, 6);
+    return `${ts}_${rand}`;
+}
+
+// Safely quote a CSV field — wraps in double-quotes, escaping internal quotes
+function csvQuote(val) {
+    if (val === null || val === undefined) return '""';
+    const s = String(val);
+    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
 
 async function initLogsDir() {
     try {
@@ -238,7 +258,7 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // --- BENCHMARK LOG ---
+        // --- BENCHMARK LOG (Schema v2, Item #24) ---
         else if (req.url === '/api/log' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
@@ -247,11 +267,49 @@ const server = http.createServer(async (req, res) => {
             await fs.mkdir(LOGS_DIR, { recursive: true });
 
             const timestamp = new Date().toISOString();
-            const row = `${timestamp},${body.category || 'Bench'},${body.metric || 'N/A'},${body.model},${body.quant || 'N/A'},${body.ctx},${body.ngl},${body.rpc},${body.transport},${body.promptTps},${body.genTps},${body.promptLatency},${body.gpuUtil},${body.gpuPwr},${body.masterGpuTemp || 'N/A'},${body.cpuUtil},${body.masterCpuTemp || 'N/A'},${body.gpuMem},${body.ramUsage},${body.workerGpuUtil || 'N/A'},${body.workerGpuPwr || 'N/A'},${body.workerGpuTemp || 'N/A'},${body.workerCpuTemp || 'N/A'},${body.workerVram || 'N/A'},${body.workerRam || 'N/A'},${body.netThroughput},${body.genTokens},${body.reasonTokens || 0},${body.wallTime},${body.loadTime || 'N/A'}\n`;
+            const runId = generateRunId();
+            // Extract short model name from path
+            const modelPath = body.model || '';
+            const modelName = modelPath.split('/').pop();
+            // Build the row using csvQuote to safely handle commas in paths/args
+            const fields = [
+                timestamp,
+                runId,
+                csvQuote(modelName),
+                csvQuote(modelPath),
+                body.ctx || '',
+                body.ngl || '',
+                body.rpc || '',
+                csvQuote(body.transport || ''),
+                csvQuote(body.argString || ''),
+                body.promptTps || '',
+                body.genTps || '',
+                body.promptLatency || '',
+                body.promptTokens || '',
+                body.gpuUtil || '',
+                body.gpuPwr || '',
+                body.masterGpuTemp || '',
+                body.cpuUtil || '',
+                body.masterCpuTemp || '',
+                body.gpuMem || '',
+                body.ramUsage || '',
+                body.workerGpuUtil || '',
+                body.workerGpuPwr || '',
+                body.workerGpuTemp || '',
+                body.workerCpuTemp || '',
+                body.workerVram || '',
+                body.workerRam || '',
+                body.netThroughput || '',
+                body.genTokens || '',
+                body.reasonTokens || '',
+                body.wallTime || '',
+                body.loadTime || ''
+            ];
+            const row = fields.join(',') + '\n';
 
             await fs.appendFile(CSV_FILE, row);
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ success: true }));
+            return res.end(JSON.stringify({ success: true, run_id: runId }));
         }
 
         // --- CSV DOWNLOAD ---
@@ -266,7 +324,7 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // --- LOGS SUMMARY (Item 15b) ---
+        // --- LOGS SUMMARY (Item 15b + Item #24 Schema v2) ---
         // Returns aggregate stats from the benchmarks CSV so the UI can
         // display "Best Gen Speed", "Avg Prefill", etc. without parsing
         // CSV on the client side.
@@ -278,20 +336,53 @@ const server = http.createServer(async (req, res) => {
                     // empty or header-only
                     return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ count: 0 }));
                 }
-                // CSV columns (0-indexed):
-                //  9=promptTps, 10=genTps, 11=promptLatency, 12=masterGpuUtil,
-                //  13=masterGpuPwr, 26=genTokens, 27=reasonTokens, 28=wallTime, 29=loadTime
+                // Minimal CSV parser that respects double-quoted fields with embedded commas
+                function splitCsvLine(line) {
+                    const cols = [];
+                    let i = 0;
+                    while (i < line.length) {
+                        if (line[i] === '"') {
+                            // Quoted field: find closing quote (escaped quotes are "")
+                            let end = line.indexOf('"', i + 1);
+                            let field = '';
+                            while (end < line.length && line[end + 1] === '"') {
+                                field += line.slice(i + 1, end).replace(/""/g, '"');
+                                i = end + 2;
+                                end = line.indexOf('"', i + 1);
+                            }
+                            field += line.slice(i + 1, end);
+                            cols.push(field);
+                            i = end + 2; // skip closing quote
+                            if (line[i] === ',') i++; // skip comma
+                        } else {
+                            // Unquoted field
+                            const comma = line.indexOf(',', i);
+                            if (comma === -1) { cols.push(line.slice(i)); break; }
+                            else { cols.push(line.slice(i, comma)); i = comma + 1; }
+                        }
+                    }
+                    return cols;
+                }
+                // Schema v2 columns (0-indexed):
+                //  9=promptTps, 10=genTps, 11=promptLatency, 12=promptTokens,
+                //  29=wallTime, 30=loadTime
+                // Old schema (pre v2): 28=wallTime, 29=loadTime (no promptTokens col)
                 let n = 0, sumPromptTps = 0, sumGenTps = 0, sumPromptLat = 0, sumWallTime = 0, sumLoadTime = 0;
                 let bestPromptTps = 0, bestGenTps = 0, bestPromptLat = Infinity, bestWallTime = Infinity, bestLoadTime = Infinity;
                 for (const line of lines) {
                     if (!line.trim()) continue;
-                    const cols = line.split(',');
-                    if (cols.length < 30) continue;
+                    const cols = splitCsvLine(line);
+                    // Need at least 25 cols to have the core metrics; auto-detect schema
+                    if (cols.length < 25) continue;
+                    // Detect v2 vs old: v2 has promptTokens at index 12 before wallTime at 29
+                    const isV2 = cols.length >= 31;
+                    const wallIdx = isV2 ? 29 : 28;
+                    const loadIdx = isV2 ? 30 : 29;
                     const pTps = parseFloat(cols[9]);
                     const gTps = parseFloat(cols[10]);
                     const pLat = parseFloat(cols[11]);
-                    const wTime = parseFloat(cols[28]);
-                    const lTime = parseFloat(cols[29]);
+                    const wTime = parseFloat(cols[wallIdx]);
+                    const lTime = parseFloat(cols[loadIdx]);
                     if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; }
                     if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; }
                     if (Number.isFinite(pLat))  { sumPromptLat += pLat; if (pLat < bestPromptLat)   bestPromptLat = pLat; }
