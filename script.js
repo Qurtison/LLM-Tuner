@@ -472,6 +472,60 @@ eventSource.onmessage = (e) => {
     }
 };
 
+// --- Item #22: Persist last launch config to localStorage ---
+const LAST_LAUNCH_CONFIG_KEY = 'last_launch_config';
+
+function saveLastLaunchConfig(config) {
+    try { localStorage.setItem(LAST_LAUNCH_CONFIG_KEY, JSON.stringify(config)); } catch(e) {}
+}
+
+function restoreLastLaunchConfig() {
+    try {
+        const saved = localStorage.getItem(LAST_LAUNCH_CONFIG_KEY);
+        if (!saved) return;
+        const config = JSON.parse(saved);
+
+        // Restore model selection
+        const modelSelect = document.getElementById('model-select');
+        if (config.modelPath && modelSelect) {
+            modelSelect.value = config.modelPath;
+            modelSelect.dispatchEvent(new Event('change'));
+        }
+
+        // Restore numeric fields
+        if (config.ctx != null) document.getElementById('server-ctx').value = config.ctx;
+        if (config.ngl != null) document.getElementById('server-ngl').value = config.ngl;
+
+        // Restore toggles
+        const rpcChecked = !!config.rpcTarget;
+        document.getElementById('rpc-toggle').checked = rpcChecked;
+        if (config.rpcTarget) document.getElementById('worker-ssh').value = config.rpcTarget;
+        if (config.fa != null) document.getElementById('server-fa').checked = config.fa;
+        if (config.reasoningPreserve != null) document.getElementById('reasoning-preserve-toggle').checked = config.reasoningPreserve;
+
+        // Restore text fields
+        if (config.cacheK != null) document.getElementById('server-cache-k').value = config.cacheK;
+        if (config.cacheV != null) document.getElementById('server-cache-v').value = config.cacheV;
+        if (config.tensorSplit != null) document.getElementById('server-tensor-split').value = config.tensorSplit;
+
+        // Restore MTP settings
+        const mtpEnabled = config.specType === 'draft-mtp';
+        document.getElementById('mtp-toggle').checked = mtpEnabled;
+        if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
+
+        // Restore verbosity
+        if (config.verbosity != null) document.getElementById('server-verbosity').value = config.verbosity;
+
+        // Restore extra args
+        if (config.argString) document.getElementById('extra-args').value = config.argString;
+
+        // Re-render saved configs for the restored model
+        renderSavedConfigs();
+    } catch(e) {
+        console.warn('Failed to restore last launch config:', e);
+    }
+}
+
 document.getElementById('btn-start-server').addEventListener('click', () => {
     const mtpEnabled = document.getElementById('mtp-toggle').checked;
     const verbosityVal = parseInt(document.getElementById('server-verbosity').value);
@@ -490,8 +544,13 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
         verbosity: Number.isFinite(verbosityVal) ? verbosityVal : null,
         argString: document.getElementById('extra-args').value.trim() || null
     };
+    // Save config for page refresh restoration (Item #22)
+    saveLastLaunchConfig(config);
     fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
 });
+
+// Restore last launch config on page load (Item #22)
+restoreLastLaunchConfig();
 
 // --- Item 6: Saved Configs (localStorage) ---
 function getArgConfigs() {
