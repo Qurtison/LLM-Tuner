@@ -1529,8 +1529,8 @@ async function pollTelemetry() {
             tempCard.classList.add('bg-gray-800/50', 'border-gray-700/50');
         }
         
-        // Render throttle badges in #throttle-badges
-        // Deduplicate per-source so the same reason doesn't render twice
+        // Render throttle badges in #throttle-badges (Item 16)
+        // Deduplicate across BOTH master and worker: same reason shown once with combined tooltip
         const badgeContainer = document.getElementById('throttle-badges');
         const throttleLabels = {
             'hw_thermal_slowdown': 'HW Thermal',
@@ -1538,26 +1538,29 @@ async function pollTelemetry() {
             'sw_power_cap': 'SW Power Cap',
             'hw_power_brake_slowdown': 'HW Power Brake'
         };
-        let badgeHTML = '';
-        // Master badges (yellow) — deduplicate
-        const seenMaster = new Set();
+        // Map reason -> {sources: Set<'master'|'worker'>, isThermal: bool}
+        const reasonMap = new Map();
         for (const r of mReasons) {
-            if (seenMaster.has(r)) continue;
-            seenMaster.add(r);
-            const label = throttleLabels[r] || r;
-            const isThermal = thermalReasons.has(r);
-            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="Master: ${label}">${label}</span>`;
+            if (!reasonMap.has(r)) reasonMap.set(r, { sources: new Set(), isThermal: thermalReasons.has(r) });
+            reasonMap.get(r).sources.add('master');
         }
-        // Worker badges (red) — deduplicate
-        const seenWorker = new Set();
         for (const r of wReasons) {
-            if (seenWorker.has(r)) continue;
-            seenWorker.add(r);
-            const label = throttleLabels[r] || r;
-            const isThermal = thermalReasons.has(r);
-            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/60 text-red-200 border border-red-400' : 'bg-red-900/30 text-red-300 border border-red-600/50'}" title="Worker: ${label}">${label}</span>`;
+            if (!reasonMap.has(r)) reasonMap.set(r, { sources: new Set(), isThermal: thermalReasons.has(r) });
+            reasonMap.get(r).sources.add('worker');
+        }
+
+        let badgeHTML = '';
+        for (const [reason, info] of reasonMap) {
+            const label = throttleLabels[reason] || reason;
+            const sources = [...info.sources].join(' + ');
+            const tooltip = `${sources.charAt(0).toUpperCase() + sources.slice(1)}: ${label}`;
+            // Thermal reasons always red; non-thermal with worker involvement gets red tint
+            const hasWorker = info.sources.has('worker');
+            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${info.isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="${tooltip}">${label}</span>`;
         }
         badgeContainer.innerHTML = badgeHTML;
+        // Item 16 Step 3: dynamic visibility — hide container when no throttle reasons
+        badgeContainer.style.display = badgeHTML ? '' : 'none';
         
         if (workerReporting) {
             document.getElementById('current-temp').innerHTML = `<span class="text-yellow-400">${fmtUnit(masterTemp, '°C')}</span> <span class="text-gray-500">/</span> <span class="text-red-400">${fmtUnit(workerTemp, '°C')}</span>`;
