@@ -34,25 +34,7 @@ Item 7 (Progress Bar)       → Item 24 (per-prompt CSV logging)
 
 ---
 
-## Status Legend
-
-| Status | Meaning |
-
-|--------|---------|
-
-| 🔴 Open | Not started, needs work |
-
-| 🟡 In Progress | Partially implemented, needs verification |
-
-| 🟢 Completed | Fix applied, needs user verification |
-
-| ⏸ Paused | Deferred, ignore for now |
-
----
-
-# SECTION A: CRITICAL BUGS (Fix First)
-
-These are stability-critical issues that block other work.
+##
 
 ---
 
