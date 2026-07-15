@@ -1319,17 +1319,26 @@ updateWorkerStatus();
 let workerBaseVram = 0;
 let telemetryInterval = null;
 let workerStatsMissingSince = null;
-// Item 14: Telemetry fetch backoff + failure tracking
+// Item 14: Telemetry fetch backoff + failure tracking + recovery notification
 let telemetryConsecutiveFailures = 0;
+let telemetryHadFailures = false; // track if we ever had failures in this session
 const TELEMETRY_BASE_INTERVAL = 1000;
 const TELEMETRY_MAX_BACKOFF = 10000; // cap at 10s
 
 async function pollTelemetry() {
     try {
         // Reset consecutive failure counter on success
+        const wasFailing = telemetryConsecutiveFailures > 0;
         telemetryConsecutiveFailures = 0;
+        // Recovery notification: if we were failing, briefly show "recovered" then hide banner
         const banner = document.getElementById('telemetry-failure-banner');
-        if (banner) banner.style.display = 'none';
+        if (wasFailing && telemetryHadFailures && banner) {
+            banner.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-green-900/20 border border-green-700/50 text-green-300 text-xs font-mono';
+            banner.querySelector('span:last-child').textContent = 'Telemetry recovered after downtime.';
+            setTimeout(() => { banner.style.display = 'none'; telemetryHadFailures = false; }, 3000);
+        } else if (banner) {
+            banner.style.display = 'none';
+        }
         const rpcEnabled = document.getElementById('rpc-toggle').checked;
         const workerSsh = rpcEnabled ? document.getElementById('worker-ssh').value : '';
         const res = await fetch('http://localhost:8081/stats', {
@@ -1650,7 +1659,9 @@ async function pollTelemetry() {
         const banner = document.getElementById('telemetry-failure-banner');
         if (banner) {
             if (telemetryConsecutiveFailures >= 3) {
+                telemetryHadFailures = true;
                 banner.style.display = 'flex';
+                banner.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-900/20 border border-orange-700/50 text-orange-300 text-xs font-mono';
                 document.getElementById('telemetry-failure-count').textContent = telemetryConsecutiveFailures;
             }
             // Backoff: double interval up to cap
