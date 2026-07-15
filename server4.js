@@ -439,6 +439,15 @@ const server = http.createServer(async (req, res) => {
                             broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
                         }
                     }
+                    else if (line.includes('print_timing:')) {
+                        // Parse eval/generation phase timing (item 7 Step 2):
+                        // slot print_timing: id 0 | task 57443 | n_decoded = 5541, tg = 22.31 t/s, tg_3s = 24.36 t/s
+                        const nDecodedMatch = line.match(/n_decoded\s*=\s*(\d+)/);
+                        const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
+                        if (nDecodedMatch && tpsMatch) {
+                            broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
+                        }
+                    }
                     else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
                         // Don't null the shared `llamaProcess` here -- just request the kill.
                         // The 'close' handler below is now the single place that clears shared

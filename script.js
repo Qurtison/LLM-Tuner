@@ -304,6 +304,14 @@ eventSource.onmessage = (e) => {
             const nTokens = parseInt(parts[3]);
             handlePrefillProgress(progress, tps, nTokens);
         }
+        else if (data.log.startsWith('GEN_PROGRESS:')) {
+            // Format from server: GEN_PROGRESS:<tps>:<nDecoded>:<nTokens>
+            // (item 7 Step 2: display live generation speed from print_timing logs)
+            const parts = data.log.split(':');
+            const tps = parseFloat(parts[1]);
+            const nDecoded = parseInt(parts[2]);
+            handleGenProgress(tps, nDecoded);
+        }
     }
 
     // 1. Handle live ticking timer + boot overlay animation
@@ -657,6 +665,23 @@ function hidePrefillLoadingBar() {
     if (activeBubble) {
         const barContainer = activeBubble.querySelector('.prefill-loading-bar-container');
         if (barContainer) barContainer.classList.add('hidden');
+    }
+}
+
+// Handle live generation progress from server's print_timing SSE events (item 7 Step 2)
+// Format: GEN_PROGRESS:<tps>:<nDecoded>:<nTokens>
+function handleGenProgress(tps, nDecoded) {
+    const elapsed = ((Date.now() - (window.__promptStartTime || Date.now())) / 1000).toFixed(1);
+    document.getElementById('status-indicator').innerText = isNaN(tps)
+        ? `Generating... [${elapsed}s]`
+        : `Generating (${tps.toFixed(1)} t/s, ${nDecoded} tokens)... [${elapsed}s]`;
+
+    // Live gen speed in the sidebar card
+    if (!isNaN(tps)) {
+        document.getElementById('metric-gen').innerText = `${tps.toFixed(1)} t/s`;
+    }
+    if (!isNaN(nDecoded)) {
+        document.getElementById('metric-gen-tokens').innerText = `${nDecoded} tokens`;
     }
 }
 
