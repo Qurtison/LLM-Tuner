@@ -290,7 +290,7 @@ So a brief power-brake blip flips the same "throttling" flag as real overheating
 
 ### Action Plan
 
-- [ ] **Step 1:** Fix badge duplication — investigate why throttle reasons are being rendered twice (likely a duplicate render call or the badge container not being cleared before re-rendering).
+- [ ] **Step 1:** Fix badge duplication — investigate why throttle reasons are being rendered twice (likely a duplicate render call or the badge container not being cleared before re-rendering). (Note: I'm noticing I see 2 copies of every badge title, even though 4 are red and 2 are yellow. It's possible we're just not correctly assigning the colors, and that both cards have all the same throttle flags.)
 
 - [ ] **Step 2:** Move throttle badges to their correct graph containers: power-related badges (`sw_power_cap`, `hw_power_brake_slowdown`) go in the power graph; thermal badges (`hw_thermal_slowdown`, `sw_thermal_slowdown`) go in the temp graph.
 

@@ -864,6 +864,12 @@ async function submitPrompt() {
     `;
     chatBox.scrollTop = chatBox.scrollHeight;
     const astEl = document.getElementById('active-ast');
+    const timelineEls = {
+        container: astEl.querySelector('.metrics-timeline-container'),
+        pLbl: astEl.querySelector('.label-prefill'),
+        tLbl: astEl.querySelector('.label-think'),
+        aLbl: astEl.querySelector('.label-answer')
+    };
     const contentBody = astEl.querySelector('.msg-content');
     const reasoningBox = astEl.querySelector('.reasoning-container');
     const reasoningBody = astEl.querySelector('.reasoning-body');
@@ -887,22 +893,6 @@ async function submitPrompt() {
     hwChartContainer = astEl.querySelector('.hw-chart-container');
     hwChartCanvas = astEl.querySelector('.hw-chart-canvas');
 
-    // Reset prefill sparkline state for this new response
-    activePrefillSamples = [];
-    activeTimelineEls = {
-        svg: astEl.querySelector('.timeline-graph-svg'),
-        prefillLine: astEl.querySelector('.timeline-prefill-line'),
-        thinkLine: astEl.querySelector('.timeline-think-line'),
-        answerLine: astEl.querySelector('.timeline-answer-line')
-    };
-    
-    const timelineEls = {
-        container: astEl.querySelector('.metrics-timeline-container'),
-        pLbl: astEl.querySelector('.label-prefill'),
-        tLbl: astEl.querySelector('.label-think'),
-        aLbl: astEl.querySelector('.label-answer')
-    };
-    
     // Start CSV Data payload
     sessionData = {
         model: document.getElementById('model-select').value,
@@ -910,15 +900,14 @@ async function submitPrompt() {
         ngl: document.getElementById('server-ngl').value,
         rpc: document.getElementById('rpc-toggle').checked ? 'yes' : 'no',
         transport: document.getElementById('transport-type').value,
+        argString: document.getElementById('extra-args').value.trim() || '',
+        promptTokens: 0,
         gpuMem: currentVramSnapshot,
         wallTime: 0,
         loadTime: currentLoadTime 
     };
 
     // Reset charts
-    tpsHistory = []; netHistory = [];
-    window.chartEvents = [];
-    window.chartEvents.push({ time: Date.now(), label: 'Prompt Start', color: '#60a5fa', offset: 0 });
     tpsChart.data.labels = [];
     tpsChart.data.datasets[0].data = []; // Prefill Speed
     tpsChart.data.datasets[1].data = []; // Gen Speed
