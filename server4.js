@@ -20,6 +20,7 @@ let isRpc = false;
 let clients = [];
 let loadStartTime = 0;
 let finalLoadTime = 0;
+let currentLaunchCommand = '';
 // In-memory ring buffer for master logs (last 500 lines) — sidesteps the
 // docker compose run --rm one-off container issue (see dashboard-bugs1-analysis.md item 5)
 let masterLogBuffer = [];
@@ -37,7 +38,7 @@ function toContainerPath(hostPath) {
 
 // --- SAFE SSE BROADCAST ---
 function broadcastState(logLine = '', errorMessage = '') {
-    const payload = JSON.stringify({ state: serverState, model: currentModel, isRpc, log: logLine, error: errorMessage, loadStartTime, finalLoadTime });
+    const payload = JSON.stringify({ state: serverState, model: currentModel, isRpc, log: logLine, error: errorMessage, loadStartTime, finalLoadTime, launchCommand: currentLaunchCommand });
     const deadClients = [];
     for (const client of clients) {
         try {
@@ -137,7 +138,7 @@ async function cleanupPort(port) {
 // Schema v2 (Item #24): Removed Category, Metric, Quant (never populated by client).
 // Added run_id (auto-generated), model_name (short), prompt_tokens, arg_string.
 // All string fields are quoted in output to handle commas in paths/args.
-const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time\n";
+const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time\n";
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
 
@@ -282,6 +283,7 @@ const server = http.createServer(async (req, res) => {
                 body.rpc || '',
                 csvQuote(body.transport || ''),
                 csvQuote(body.argString || ''),
+                csvQuote(body.launchCommand || ''),
                 body.promptTps || '',
                 body.genTps || '',
                 body.promptLatency || '',
@@ -363,10 +365,11 @@ const server = http.createServer(async (req, res) => {
                     }
                     return cols;
                 }
-                // Schema v2 columns (0-indexed):
-                //  9=promptTps, 10=genTps, 11=promptLatency, 12=promptTokens,
-                //  29=wallTime, 30=loadTime
-                // Old schema (pre v2): 28=wallTime, 29=loadTime (no promptTokens col)
+                // Schema v3 columns (0-indexed, 32 cols with launch_command):
+                //  10=promptTps, 11=genTps, 12=promptLatency, 13=promptTokens,
+                //  30=wallTime, 31=loadTime
+                // Schema v2 (31 cols, no launch_command): 9=promptTps, 10=genTps, 11=promptLatency, 29=wallTime, 30=loadTime
+                // Old schema (30 cols): 8=promptTps, 9=genTps, 10=promptLatency, 28=wallTime, 29=loadTime
                 let n = 0, sumPromptTps = 0, sumGenTps = 0, sumPromptLat = 0, sumWallTime = 0, sumLoadTime = 0;
                 let bestPromptTps = 0, bestGenTps = 0, bestPromptLat = Infinity, bestWallTime = Infinity, bestLoadTime = Infinity;
                 for (const line of lines) {
@@ -374,15 +377,29 @@ const server = http.createServer(async (req, res) => {
                     const cols = splitCsvLine(line);
                     // Need at least 25 cols to have the core metrics; auto-detect schema
                     if (cols.length < 25) continue;
-                    // Detect v2 vs old: v2 has promptTokens at index 12 before wallTime at 29
-                    const isV2 = cols.length >= 31;
-                    const wallIdx = isV2 ? 29 : 28;
-                    const loadIdx = isV2 ? 30 : 29;
-                    const pTps = parseFloat(cols[9]);
-                    const gTps = parseFloat(cols[10]);
-                    const pLat = parseFloat(cols[11]);
-                    const wTime = parseFloat(cols[wallIdx]);
-                    const lTime = parseFloat(cols[loadIdx]);
+                    let pTps, gTps, pLat, wTime, lTime;
+                    if (cols.length >= 32) {
+                        // v3: 32 cols with launch_command
+                        pTps = parseFloat(cols[10]);
+                        gTps = parseFloat(cols[11]);
+                        pLat = parseFloat(cols[12]);
+                        wTime = parseFloat(cols[30]);
+                        lTime = parseFloat(cols[31]);
+                    } else if (cols.length >= 31) {
+                        // v2: 31 cols without launch_command
+                        pTps = parseFloat(cols[9]);
+                        gTps = parseFloat(cols[10]);
+                        pLat = parseFloat(cols[11]);
+                        wTime = parseFloat(cols[29]);
+                        lTime = parseFloat(cols[30]);
+                    } else {
+                        // old: 30 cols
+                        pTps = parseFloat(cols[8]);
+                        gTps = parseFloat(cols[9]);
+                        pLat = parseFloat(cols[10]);
+                        wTime = parseFloat(cols[28]);
+                        lTime = parseFloat(cols[29]);
+                    }
                     if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; }
                     if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; }
                     if (Number.isFinite(pLat))  { sumPromptLat += pLat; if (pLat < bestPromptLat)   bestPromptLat = pLat; }
@@ -470,6 +487,14 @@ const server = http.createServer(async (req, res) => {
                     }
                 }
             }
+
+
+currentLaunchCommand = 'docker ' + args.map(a =>
+    /\s/.test(a) ? JSON.stringify(a) : a
+).join(' ');
+console.log('LAUNCHING:', currentLaunchCommand);
+broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
+
 
             llamaProcess = spawn('docker', args, { cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
             // Stable reference for this process's own handlers below. `llamaProcess`

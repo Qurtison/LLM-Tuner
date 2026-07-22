@@ -284,8 +284,10 @@ function setHardwareConfigLocked(locked) {
 }
 
 // --- THE SSE HANDLER ---
+let lastLaunchCommand = '';
 eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
+    if (data.launchCommand) lastLaunchCommand = data.launchCommand;
     const badge = document.getElementById('engine-status');
     const input = document.getElementById('user-prompt');
     const btn = document.getElementById('submit-btn');
@@ -357,7 +359,7 @@ eventSource.onmessage = (e) => {
         badge.innerHTML = '<span class="h-2 w-2 rounded-full bg-red-500"></span> ENGINE STOPPED';
         document.getElementById('btn-start-server').classList.remove('hidden'); 
         document.getElementById('btn-stop-server').classList.add('hidden');
-        input.disabled = true; btn.disabled = true; isModelLoaded = false; isColdStart = true;
+        input.disabled = true; btn.disabled = true; isModelLoaded = false;
 
         // Restore hardware config controls (previously these could get stuck
         // disabled forever because this reset lived in an unreachable
@@ -674,7 +676,7 @@ function toggleReasoning(headerEl) {
 
 let currentVramSnapshot = 0;
 let chatContext = []; // Stores conversation history for the API
-let isColdStart = true;
+// isColdStart removed - all prompts now logged to CSV
 
 // --- Prefill sparkline (replaces the old flat prefill/think/answer bar) ---
 // `points` is an array of {progress, tps} samples captured live from the
@@ -1033,6 +1035,7 @@ async function submitPrompt() {
                         if (data.usage) {
                             sessionData.genTokens = data.usage.completion_tokens;
                             sessionData.reasonTokens = reasoningTokenCount; 
+                            sessionData.promptTokens = data.usage.prompt_tokens;
                             sessionData.promptTps = prefillMetrics.tps;
                             
                             const finalAnsTime = ((Date.now() - startTime) / 1000) - timeToFirstToken - timeToFirstContent;
@@ -1150,11 +1153,8 @@ async function submitPrompt() {
 
         // Write to CSV
         try {
-            if (isColdStart) {
-                isColdStart = false; // Mark cold start as consumed
-            } else {
-                await fetch('/api/log', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(sessionData) });
-            }
+            const logPayload = { ...sessionData, launchCommand: lastLaunchCommand };
+            await fetch('/api/log', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(logPayload) });
         } catch(e) {}
         
     } catch (err) { if(err.name!=='AbortError') contentBody.innerHTML += `<br>Error: ${escapeHtml(err.message)}`; }
@@ -1985,6 +1985,31 @@ document.getElementById('btn-new-chat').addEventListener('click', () => {
 });
 
 // --- CSV Viewer ---
+function parseCSVLine(line) {
+    const cols = [];
+    let i = 0;
+    while (i < line.length) {
+        if (line[i] === '"') {
+            let end = line.indexOf('"', i + 1);
+            let field = '';
+            while (end < line.length && line[end + 1] === '"') {
+                field += line.slice(i + 1, end).replace(/""/g, '"');
+                i = end + 2;
+                end = line.indexOf('"', i + 1);
+            }
+            field += line.slice(i + 1, end);
+            cols.push(field);
+            i = end + 2;
+            if (line[i] === ',') i++;
+        } else {
+            const comma = line.indexOf(',', i);
+            if (comma === -1) { cols.push(line.slice(i)); break; }
+            else { cols.push(line.slice(i, comma)); i = comma + 1; }
+        }
+    }
+    return cols;
+}
+
 document.getElementById('btn-view-csv').addEventListener('click', async () => {
     const modal = document.getElementById('csv-modal');
     const thead = document.querySelector('#csv-table thead');
@@ -1998,8 +2023,10 @@ document.getElementById('btn-view-csv').addEventListener('click', async () => {
         if(!res.ok) throw new Error('No logs found');
         const text = await res.text();
         
-        const rows = text.trim().split('\n').map(r => r.split(','));
-        if (rows.length === 0) return;
+        const lines = text.trim().split('\n');
+        if (lines.length === 0) return;
+        
+        const rows = lines.map(l => parseCSVLine(l));
         
         // Headers
         const trH = document.createElement('tr');
