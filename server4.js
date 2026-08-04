@@ -2,10 +2,11 @@ const http = require('http');
 const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const { spawn, exec } = require('child_process');
+const { spawn, exec, execFile } = require('child_process');
 const { promisify } = require('util');
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const ROOT_DIR = path.join(__dirname, '..');
 const PORT = 3000;
@@ -21,6 +22,35 @@ let clients = [];
 let loadStartTime = 0;
 let finalLoadTime = 0;
 let currentLaunchCommand = '';
+// Full structured config passed to the most recent /api/start (Item 22: lets a
+// freshly-connected/refreshed client repopulate the launch-config UI from the
+// server's authoritative state instead of staying blank). Cleared once the
+// server actually stops so a dead run's config isn't offered as "current".
+let currentLaunchConfig = null;
+
+// --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
+// dashboard.config.json is user-editable and gitignored (see dashboard.config.example.json);
+// missing/invalid file silently falls back to this default.
+const DEFAULT_LLAMA_SERVER_BINARY = '/home/kyle/AI/llama-official/llama.cpp/build/bin/llama-server';
+const DASHBOARD_CONFIG_FILE = path.join(__dirname, 'dashboard.config.json');
+let dashboardConfig = { llamaServerBinary: DEFAULT_LLAMA_SERVER_BINARY };
+
+async function loadDashboardConfig() {
+    try {
+        const parsed = JSON.parse(await fs.readFile(DASHBOARD_CONFIG_FILE, 'utf-8'));
+        if (parsed.llamaServerBinary) dashboardConfig.llamaServerBinary = parsed.llamaServerBinary;
+    } catch {
+        // missing/invalid config file -- keep the default
+    }
+}
+
+function getLlamaServerBinary() {
+    return dashboardConfig.llamaServerBinary;
+}
+
+function isLocalMode() {
+    return !!(currentLaunchConfig && currentLaunchConfig.launchMode === 'local-multi-gpu');
+}
 // In-memory ring buffer for master logs (last 500 lines) — sidesteps the
 // docker compose run --rm one-off container issue (see dashboard-bugs1-analysis.md item 5)
 let masterLogBuffer = [];
@@ -38,7 +68,7 @@ function toContainerPath(hostPath) {
 
 // --- SAFE SSE BROADCAST ---
 function broadcastState(logLine = '', errorMessage = '') {
-    const payload = JSON.stringify({ state: serverState, model: currentModel, isRpc, log: logLine, error: errorMessage, loadStartTime, finalLoadTime, launchCommand: currentLaunchCommand });
+    const payload = JSON.stringify({ state: serverState, model: currentModel, isRpc, log: logLine, error: errorMessage, loadStartTime, finalLoadTime, launchCommand: currentLaunchCommand, launchConfig: currentLaunchConfig });
     const deadClients = [];
     for (const client of clients) {
         try {
@@ -132,6 +162,157 @@ async function cleanupPort(port) {
     } catch {
         // fuser unavailable or port already free - silently ignore
     }
+}
+
+// --- SHARED ARG BUILDER ---
+// Flags common to both launch modes (Docker+RPC and local-multi-gpu). `mapModelPath`
+// remaps host paths to container paths in Docker mode, or is the identity function
+// for a directly-spawned local process. `deviceArgs` is the mode-specific device/split
+// selection (--rpc+--split-mode for Docker RPC, or -dev+--split-mode for local Vulkan),
+// injected at the same position the old RPC-only block used to occupy.
+function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
+    const args = ['-m', mapModelPath(config.modelPath),
+        '-c', config.ctx.toString(), '-ngl', config.ngl.toString(),
+        '--host', '0.0.0.0', '--port', '8080', '--metrics'];
+
+    if (config.fa) args.push('-fa', 'on');
+    if (config.cacheK) args.push('--cache-type-k', config.cacheK);
+    if (config.cacheV) args.push('--cache-type-v', config.cacheV);
+    if (config.specType) {
+        args.push('--spec-type', config.specType);
+        args.push('--spec-draft-n-max', (config.specDraftNMax || 2).toString());
+        args.push('-np', '1');
+    }
+    if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
+    if (config.preserveThinking) {
+        args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
+        args.push('--reasoning-preserve');
+    }
+    args.push(...deviceArgs);
+    if (config.reasoningPreserve) {
+        args.push('--reasoning-preserve');
+    }
+    // Item 6: pass-through raw arg string (takes priority when provided)
+    if (config.argString && config.argString.trim().length > 0) {
+        const rawTokens = config.argString.trim().split(/\s+/);
+        for (let i = 0; i < rawTokens.length; i++) {
+            const t = rawTokens[i];
+            if (t === '-m' && i + 1 < rawTokens.length) {
+                args.push('-m', mapModelPath(rawTokens[++i]));
+            } else {
+                args.push(t);
+            }
+        }
+    }
+    return args;
+}
+
+// --- SHARED PROCESS SPAWN + LIFECYCLE ---
+// Generic over "a spawned child process that speaks llama-server's stdout log format" --
+// used for both the `docker` invocation (Docker+RPC mode) and a directly-spawned
+// llama-server binary (local-multi-gpu mode). `onErrorCleanup`, if given, is called
+// (in addition to `proc.kill()`) when handleLogs detects an abort/OOM/error line --
+// Docker mode uses it to tear down the compose container; local mode has nothing
+// extra to clean up, so it's omitted there.
+function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
+    const proc = spawn(command, args, { cwd: cwd || ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    // Line-buffering to prevent regex misses when stdout chunks split a single
+    // log line across multiple 'data' events (item 7)
+    let logLineBuffer = '';
+
+    const handleLogs = (d) => {
+        const text = d.toString();
+        process.stdout.write(text);
+
+        // Append to in-memory ring buffer for /api/master/logs (item 5)
+        const rawLines = text.split('\n');
+        for (const l of rawLines) {
+            if (l.length > 0) {
+                masterLogBuffer.push(l);
+                if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
+                    masterLogBuffer.shift();
+                }
+            }
+        }
+
+        // Buffer partial lines to handle chunk boundaries (item 7)
+        logLineBuffer += text;
+        const bufferedLines = logLineBuffer.split('\n');
+        logLineBuffer = bufferedLines.pop() || '';
+
+        for (const line of bufferedLines) {
+            if (line.includes('load_model: loading model')) {
+                serverState = 'loading';
+                broadcastState();
+            }
+            else if (line.includes('llama_server: model loaded')) {
+                console.log("MODEL LOADED! READY!");
+                serverState = 'ready';
+                if (loadStartTime > 0) {
+                    finalLoadTime = ((Date.now() - loadStartTime) / 1000).toFixed(1);
+                    loadStartTime = 0;
+                }
+                broadcastState();
+            }
+            else if (line.includes('prompt processing, n_tokens =')) {
+                const nTokensMatch = line.match(/n_tokens =\s*(\d+)/);
+                const progressMatch = line.match(/progress = (0\.\d+|1\.00)/);
+                const tpsMatch = line.match(/(\d+\.?\d*)\s*tokens per second/);
+                if (progressMatch) {
+                    const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
+                    const tps = tpsMatch ? tpsMatch[1] : '0';
+                    broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
+                }
+            }
+            else if (line.includes('print_timing:')) {
+                const nDecodedMatch = line.match(/n_decoded\s*=\s*(\d+)/);
+                const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
+                if (nDecodedMatch && tpsMatch) {
+                    broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
+                }
+            }
+            else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
+                serverState = 'stopped';
+                proc.kill();
+                if (onErrorCleanup) onErrorCleanup().catch(() => { });
+                const errMsg = line.includes('failed to fit params')
+                    ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
+                    : 'Process error: ' + line.trim().slice(-200);
+                broadcastState('', errMsg);
+            }
+        }
+    };
+
+    proc.stdout.on('data', handleLogs);
+    proc.stderr.on('data', handleLogs);
+
+    // Single source of truth for tearing down shared state: fires exactly once
+    // per spawned process, after it has actually closed.
+    proc.on('close', (code, signal) => {
+        proc.stdout.removeAllListeners('data');
+        proc.stderr.removeAllListeners('data');
+        if (llamaProcess === proc) {
+            llamaProcess = null;
+            serverState = 'stopped';
+            currentModel = '';
+            isRpc = false;
+            currentLaunchConfig = null;
+            broadcastState();
+        }
+    });
+
+    proc.on('error', (err) => {
+        console.error('Llama process error:', err);
+        if (llamaProcess === proc) {
+            llamaProcess = null;
+            serverState = 'stopped';
+            currentLaunchConfig = null;
+            broadcastState('', 'Failed to start process: ' + err.message);
+        }
+    });
+
+    return proc;
 }
 
 // --- CSV LOG INIT ---
@@ -234,7 +415,7 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify(uniqueModels));
         }
 
-        else if (req.url.match(/^\/[\w.-]+\.(js|css|map|ico|png|svg)$/)) {
+        else if (req.url.match(/^\/(?:vendor\/)?[\w.-]+\.(js|css|map|ico|png|svg)$/)) {
             const filePath = path.join(__dirname, req.url);
             // Prevent path traversal — ensure resolved path stays in __dirname
             if (!filePath.startsWith(__dirname)) {
@@ -428,6 +609,29 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // --- LIST VULKAN/CUDA DEVICES (local-multi-gpu mode) ---
+        else if (req.url === '/api/devices' && req.method === 'GET') {
+            const binary = getLlamaServerBinary();
+            try {
+                // Hard timeout: device enumeration talks to the Vulkan/CUDA loader, which
+                // can hang (e.g. a TB4 eGPU in a bad power/link state) -- never let this
+                // block the HTTP response. Caller (script.js) falls back to manual entry.
+                const { stdout } = await execFileAsync(binary, ['--list-devices'], { timeout: 8000, maxBuffer: 1024 * 1024 });
+                const devices = [];
+                const lineRe = /^(\S+):\s*(.+?)\s*\((\d+) MiB, (\d+) MiB free\)$/;
+                for (const rawLine of stdout.split('\n')) {
+                    const m = rawLine.trim().match(lineRe);
+                    if (m) devices.push({ id: m[1], description: m[2], totalMib: parseInt(m[3], 10), freeMib: parseInt(m[4], 10) });
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ devices }));
+            } catch (err) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                const reason = (err.killed || err.signal) ? 'timed out' : (err.message || 'failed');
+                return res.end(JSON.stringify({ devices: [], error: reason }));
+            }
+        }
+
         // --- START SERVER ---
         else if (req.url === '/api/start' && req.method === 'POST') {
             let body;
@@ -436,8 +640,10 @@ const server = http.createServer(async (req, res) => {
             if (llamaProcess) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Running' })); }
 
             const config = body;
+            const launchMode = config.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
             currentModel = config.model;
-            isRpc = !!config.rpcTarget;
+            isRpc = launchMode === 'docker-rpc' && !!config.rpcTarget;
+            currentLaunchConfig = config;
             serverState = 'starting';
             loadStartTime = Date.now();
             finalLoadTime = 0;
@@ -445,171 +651,46 @@ const server = http.createServer(async (req, res) => {
             masterLogBuffer = [];
             broadcastState();
 
-            await runDockerCompose('down --remove-orphans');
+            let command, baseArgs, mapModelPath, deviceArgs, onErrorCleanup;
 
-            let args = ['compose', '-f', 'docker-compose.master.yml', 'run', '--rm', '--service-ports', 'master-node',
-                '/app/llama-server', '-m', toContainerPath(config.modelPath),
-                '-c', config.ctx.toString(), '-ngl', config.ngl.toString(),
-                '--host', '0.0.0.0', '--port', '8080', '--metrics'];
-
-            if (config.fa) args.push('-fa', 'on');
-            if (config.cacheK) args.push('--cache-type-k', config.cacheK);
-            if (config.cacheV) args.push('--cache-type-v', config.cacheV);
-            if (config.specType) {
-                args.push('--spec-type', config.specType);
-                args.push('--spec-draft-n-max', (config.specDraftNMax || 2).toString());
-                args.push('-np', '1');
-            }
-            if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
-            if (config.preserveThinking) {
-                args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
-                args.push('--reasoning-preserve');
-            }
-            if (isRpc) {
-                args.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`);
-                args.push('--split-mode', 'layer');
-                if (config.tensorSplit && config.tensorSplit < 100) {
-                    args.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
-                }
-            }
-            if (config.reasoningPreserve) {
-                args.push('--reasoning-preserve');
-            }
-            // Item 6: pass-through raw arg string (takes priority when provided)
-            if (config.argString && config.argString.trim().length > 0) {
-                const rawTokens = config.argString.trim().split(/\s+/);
-                for (let i = 0; i < rawTokens.length; i++) {
-                    const t = rawTokens[i];
-                    if (t === '-m' && i + 1 < rawTokens.length) {
-                        args.push('-m', toContainerPath(rawTokens[++i]));
-                    } else {
-                        args.push(t);
+            if (launchMode === 'local-multi-gpu') {
+                // No Docker involved -- spawn the Vulkan-enabled llama-server binary
+                // directly, matching the raw command this mode is built to replace.
+                command = getLlamaServerBinary();
+                baseArgs = [];
+                mapModelPath = (p) => p; // raw host path, no container mount to remap into
+                deviceArgs = [];
+                if (config.deviceA && config.deviceB) {
+                    deviceArgs.push('--split-mode', 'layer', '-dev', `${config.deviceA},${config.deviceB}`);
+                    if (config.tensorSplit && config.tensorSplit < 100) {
+                        deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
                     }
                 }
+                onErrorCleanup = null; // proc.kill() is sufficient -- no container to tear down
+            } else {
+                await runDockerCompose('down --remove-orphans');
+                command = 'docker';
+                baseArgs = ['compose', '-f', 'docker-compose.master.yml', 'run', '--rm', '--service-ports', 'master-node', '/app/llama-server'];
+                mapModelPath = toContainerPath;
+                deviceArgs = [];
+                if (isRpc) {
+                    deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`, '--split-mode', 'layer');
+                    if (config.tensorSplit && config.tensorSplit < 100) {
+                        deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
+                    }
+                }
+                onErrorCleanup = () => runDockerCompose('down --remove-orphans');
             }
 
+            const args = [...baseArgs, ...buildLlamaArgs(config, { mapModelPath, deviceArgs })];
 
-currentLaunchCommand = 'docker ' + args.map(a =>
-    /\s/.test(a) ? JSON.stringify(a) : a
-).join(' ');
-console.log('LAUNCHING:', currentLaunchCommand);
-broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
+            currentLaunchCommand = command + ' ' + args.map(a =>
+                /\s/.test(a) ? JSON.stringify(a) : a
+            ).join(' ');
+            console.log('LAUNCHING:', currentLaunchCommand);
+            broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
 
-
-            llamaProcess = spawn('docker', args, { cwd: ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
-            // Stable reference for this process's own handlers below. `llamaProcess`
-            // (the shared/mutable var) can get reassigned or nulled by /api/stop or the
-            // error-branch in handleLogs() before this process's 'close' event actually
-            // fires -- closing over `proc` instead avoids dereferencing a null.
-            const proc = llamaProcess;
-
-            // Line-buffering for handleLogs to prevent regex misses when stdout chunks
-            // split a single log line across multiple 'data' events (item 7)
-            let logLineBuffer = '';
-
-            const handleLogs = (d) => {
-                const text = d.toString();
-                process.stdout.write(text);
-
-                // Append to in-memory ring buffer for /api/master/logs (item 5)
-                const rawLines = text.split('\n');
-                for (const l of rawLines) {
-                    if (l.length > 0) {
-                        masterLogBuffer.push(l);
-                        if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
-                            masterLogBuffer.shift();
-                        }
-                    }
-                }
-
-                // Buffer partial lines to handle chunk boundaries (item 7)
-                logLineBuffer += text;
-                const bufferedLines = logLineBuffer.split('\n');
-                // Keep the last (potentially incomplete) fragment in the buffer
-                logLineBuffer = bufferedLines.pop() || '';
-
-                // Process all complete lines using buffered (reassembled) lines
-                // so regex matches aren't missed when stdout splits mid-line
-                for (const line of bufferedLines) {
-                    if (line.includes('load_model: loading model')) {
-                        serverState = 'loading';
-                        broadcastState();
-                    }
-                    else if (line.includes('llama_server: model loaded')) {
-                        console.log("MODEL LOADED! READY!");
-                        serverState = 'ready';
-                        if (loadStartTime > 0) {
-                            finalLoadTime = ((Date.now() - loadStartTime) / 1000).toFixed(1);
-                            loadStartTime = 0;
-                        }
-                        broadcastState();
-                    }
-                    else if (line.includes('prompt processing, n_tokens =')) {
-                        // Parse: prompt processing, n_tokens =  8192, progress = 0.66, t =  3.61 s / 2272.33 tokens per second
-                        const nTokensMatch = line.match(/n_tokens =\s*(\d+)/);
-                        const progressMatch = line.match(/progress = (0\.\d+|1\.00)/);
-                        const tpsMatch = line.match(/(\d+\.?\d*)\s*tokens per second/);
-                        if (progressMatch) {
-                            const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
-                            const tps = tpsMatch ? tpsMatch[1] : '0';
-                            broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
-                        }
-                    }
-                    else if (line.includes('print_timing:')) {
-                        // Parse eval/generation phase timing (item 7 Step 2):
-                        // slot print_timing: id 0 | task 57443 | n_decoded = 5541, tg = 22.31 t/s, tg_3s = 24.36 t/s
-                        const nDecodedMatch = line.match(/n_decoded\s*=\s*(\d+)/);
-                        const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
-                        if (nDecodedMatch && tpsMatch) {
-                            broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
-                        }
-                    }
-                    else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
-                        // Don't null the shared `llamaProcess` here -- just request the kill.
-                        // The 'close' handler below is now the single place that clears shared
-                        // state, and only once this specific process has actually exited.
-                        serverState = 'stopped';
-                        proc.kill();
-                        runDockerCompose('down --remove-orphans').catch(() => { });
-                        const errMsg = line.includes('failed to fit params')
-                            ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
-                            : 'Process error: ' + line.trim().slice(-200);
-                        broadcastState('', errMsg);
-                    }
-                }
-            };
-
-            proc.stdout.on('data', handleLogs);
-            proc.stderr.on('data', handleLogs);
-
-            // Single source of truth for tearing down shared state: fires exactly once
-            // per spawned process, after it has actually closed -- never dereferences a
-            // null `llamaProcess` (previously this crashed the whole Node process whenever
-            // /api/stop or the error-branch above had already nulled it first). `code`/
-            // `signal` are captured here as the hook point for distinguishing a crash from
-            // a clean stop (see dashboard-bugs1-analysis.md item 8c), not yet used below.
-            proc.on('close', (code, signal) => {
-                proc.stdout.removeAllListeners('data');
-                proc.stderr.removeAllListeners('data');
-                // Only clear shared state if nothing newer has replaced this process
-                // in the meantime (e.g. a fresh /api/start after a fast stop/restart).
-                if (llamaProcess === proc) {
-                    llamaProcess = null;
-                    serverState = 'stopped';
-                    currentModel = '';
-                    isRpc = false;
-                    broadcastState();
-                }
-            });
-
-            proc.on('error', (err) => {
-                console.error('Llama process error:', err);
-                if (llamaProcess === proc) {
-                    llamaProcess = null;
-                    serverState = 'stopped';
-                    broadcastState('', 'Failed to start process: ' + err.message);
-                }
-            });
+            llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR, onErrorCleanup });
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ status: 'launching' }));
@@ -619,7 +700,11 @@ broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as
         else if (req.url === '/api/stop' && req.method === 'POST') {
             serverState = 'stopping';
             broadcastState();
-            await runDockerCompose('down --remove-orphans');
+            // Docker teardown only applies to the Docker+RPC launch path -- a
+            // local-multi-gpu run has no compose container to bring down.
+            if (!isLocalMode()) {
+                await runDockerCompose('down --remove-orphans');
+            }
             // Request the kill but don't null `llamaProcess` here -- the process's own
             // 'close' handler (registered at spawn time) is now the single place that
             // clears shared state, once the process has actually exited. Nulling it here
@@ -631,6 +716,7 @@ broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as
             serverState = 'stopped';
             currentModel = '';
             isRpc = false;
+            currentLaunchConfig = null;
             broadcastState();
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ status: 'stopped' }));
@@ -728,6 +814,7 @@ broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as
 
 // --- SERVER INITIALIZATION ---
 async function initServer() {
+    await loadDashboardConfig();
     await initLogsDir();
     await cleanupPort(8081); // Restored safe orphan-process protection
 
@@ -750,7 +837,13 @@ async function initServer() {
 
     const shutdownHandler = async () => {
         if (llamaProcess) {
-            try { await execAsync('docker compose -f docker-compose.master.yml down', { cwd: ROOT_DIR }); } catch { }
+            if (isLocalMode()) {
+                // Directly-spawned process -- Docker teardown wouldn't touch it,
+                // so it must be killed explicitly or it's orphaned on shutdown.
+                try { llamaProcess.kill(); } catch { }
+            } else {
+                try { await execAsync('docker compose -f docker-compose.master.yml down', { cwd: ROOT_DIR }); } catch { }
+            }
         }
         if (pythonProcess) pythonProcess.kill();
         process.exit(0);

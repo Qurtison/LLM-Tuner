@@ -4,10 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cluster Command Center</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script>tailwind.config={darkMode:'class',theme:{extend:{colors:{gray:{850:'#1f2937',900:'#111827',950:'#030712'}}}}}</script>
+    <link rel="stylesheet" href="./vendor/tailwind.css">
+    <script src="./vendor/marked.min.js"></script>
+    <script src="./vendor/chart.js"></script>
     <style>
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: #111827; }
@@ -174,35 +173,85 @@
                 </div>
 
                 <div class="p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg space-y-3">
-                    <label class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-                        <input type="checkbox" id="rpc-toggle" checked class="accent-indigo-500 rounded">
-                        Enable RPC Worker
-                    </label>
-                    <input type="text" id="worker-ssh" value="kyle4090@169.254.61.173" class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-200">
-                    
-                    <div id="worker-ssh-controls" class="space-y-2 border-t border-gray-700/50 pt-2">
-                        <div class="flex items-center gap-2 mb-2">
-                            <label class="text-[10px] text-gray-400 w-1/4">Transport</label>
-                            <select id="transport-type" class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
-                                <option value="WiFi">Wi-Fi / LAN</option>
-                                <option value="TB4">Thunderbolt 4</option>
-                            </select>
-                        </div>
-                        <div class="flex justify-between items-center text-[10px]">
-                            <span class="text-gray-400">Worker Status:</span>
-                            <span id="worker-status-badge" class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500">OFFLINE</span>
-                        </div>
-                        <div class="flex gap-2">
-                            <button id="btn-worker-start" class="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-medium transition-colors">Start Worker</button>
-                            <button id="btn-worker-stop" class="flex-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] font-medium transition-colors">Stop</button>
-                        </div>
-                        <div id="tensor-split-container" class="hidden pt-2 border-t border-gray-700/50 mt-2">
-                            <div class="flex justify-between text-[10px] text-gray-400 mb-1">
-                                <span>Tensor Split (Master/Worker)</span>
-                                <span id="ts-val-display">50% / 50%</span>
+                    <div class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
+                        <label class="shrink-0">Launch Mode</label>
+                        <select id="launch-mode-select" class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
+                            <option value="docker-rpc">Docker + RPC Worker</option>
+                            <option value="local-multi-gpu">Local Multi-GPU (Vulkan)</option>
+                        </select>
+                    </div>
+
+                    <!-- Docker + RPC Worker mode (existing path, unchanged) -->
+                    <div id="docker-rpc-panel" class="space-y-3">
+                        <label class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
+                            <input type="checkbox" id="rpc-toggle" checked class="accent-indigo-500 rounded">
+                            Enable RPC Worker
+                        </label>
+                        <input type="text" id="worker-ssh" value="kyle4090@169.254.61.173" class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-200">
+
+                        <div id="worker-ssh-controls" class="space-y-2 border-t border-gray-700/50 pt-2">
+                            <div class="flex items-center gap-2 mb-2">
+                                <label class="text-[10px] text-gray-400 w-1/4">Transport</label>
+                                <select id="transport-type" class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
+                                    <option value="WiFi">Wi-Fi / LAN</option>
+                                    <option value="TB4">Thunderbolt 4</option>
+                                </select>
                             </div>
-                            <input type="range" id="server-tensor-split" min="0" max="100" value="50" class="w-full accent-indigo-500 cursor-pointer">
+                            <div class="flex justify-between items-center text-[10px]">
+                                <span class="text-gray-400">Worker Status:</span>
+                                <span id="worker-status-badge" class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500">OFFLINE</span>
+                            </div>
+                            <div class="flex gap-2">
+                                <button id="btn-worker-start" class="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-medium transition-colors">Start Worker</button>
+                                <button id="btn-worker-stop" class="flex-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] font-medium transition-colors">Stop</button>
+                            </div>
                         </div>
+                    </div>
+
+                    <!-- Local Multi-GPU (Vulkan) mode: no Docker, no SSH -- spawns
+                         llama-server directly with -dev/-ts (see server4.js /api/start,
+                         local-multi-gpu branch). -->
+                    <div id="local-multi-gpu-panel" class="hidden space-y-2">
+                        <div class="flex justify-between items-center">
+                            <span class="text-[10px] text-gray-400">Vulkan/CUDA devices on this machine</span>
+                            <button id="btn-detect-devices" type="button" class="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Detect Devices</button>
+                        </div>
+                        <div id="device-detect-status" class="hidden text-[9px] text-amber-400"></div>
+
+                        <div id="device-dropdown-row" class="hidden grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU A</label>
+                                <select id="device-select-a" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
+                            </div>
+                            <div>
+                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU B</label>
+                                <select id="device-select-b" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
+                            </div>
+                        </div>
+
+                        <!-- Manual fallback: shown when detection fails/times out, or the user
+                             wants to type device ids directly. -->
+                        <div id="device-manual-row" class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU A id</label>
+                                <input type="text" id="device-manual-a" placeholder="e.g. Vulkan0" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
+                            </div>
+                            <div>
+                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU B id</label>
+                                <input type="text" id="device-manual-b" placeholder="e.g. Vulkan1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Shared 2-way tensor split -- both modes are always exactly a
+                         2-node split (Docker RPC's master+worker, or local's GPU A+B),
+                         so one slider covers both; only the visible label changes. -->
+                    <div id="tensor-split-container" class="hidden pt-2 border-t border-gray-700/50 mt-2">
+                        <div class="flex justify-between text-[10px] text-gray-400 mb-1">
+                            <span>Tensor Split (<span class="node-a-label">Master</span>/<span class="node-b-label">Worker</span>)</span>
+                            <span id="ts-val-display">50% / 50%</span>
+                        </div>
+                        <input type="range" id="server-tensor-split" min="0" max="100" value="50" class="w-full accent-indigo-500 cursor-pointer">
                     </div>
                 </div>
                 <div class="flex flex-col gap-2">
@@ -409,7 +458,7 @@
             
             <div id="worker-vram-container" class="hidden">
                 <div class="flex justify-between text-xs mb-1">
-                    <span class="text-gray-300">Worker VRAM</span>
+                    <span class="text-gray-300"><span class="node-b-label">Worker</span> VRAM</span>
                     <span id="worker-vram-text" class="text-gray-400 font-mono">-- MB</span>
                 </div>
                 <div class="w-full bg-gray-900 rounded-full h-2 flex overflow-hidden">
@@ -432,7 +481,7 @@
             
             <div id="worker-ram-container" class="hidden pt-1">
                 <div class="flex justify-between text-[10px] mb-1">
-                    <span class="text-gray-400">Worker RAM</span>
+                    <span class="text-gray-400"><span class="node-b-label">Worker</span> RAM</span>
                     <span id="worker-ram-text" class="text-gray-500 font-mono">-- MB</span>
                 </div>
                 <div class="w-full bg-gray-900 rounded-full h-1 flex overflow-hidden">
@@ -463,7 +512,7 @@
                     <span class="text-xs text-gray-300">GPU Temp <span class="text-gray-500 cursor-help ml-1" title="Temperature of the Master and Worker GPUs">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> Worker <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                     <div id="throttle-badges" class="flex flex-wrap gap-1 mt-1 min-h-[1.25rem]"></div>
                 </div>
@@ -478,8 +527,9 @@
                     <span class="text-xs text-gray-300">GPU Power <span class="text-gray-500 cursor-help ml-1" title="Power Draw of the Master and Worker GPUs in Watts">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> Worker <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
+                    <div id="throttle-badges-pwr" class="flex flex-wrap gap-1 mt-1 min-h-[1.25rem]"></div>
                 </div>
                 <span id="current-pwr" class="text-xs font-bold font-mono mt-1"><span class="text-yellow-400">--W</span> <span class="text-gray-500">/</span> <span class="text-red-400">--W</span></span>
             </div>
@@ -492,7 +542,7 @@
                     <span class="text-xs text-gray-300">GPU Util <span class="text-gray-500 cursor-help ml-1" title="GPU Core Utilization">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> Worker <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
                 <span id="current-gpu-util" class="text-xs font-bold font-mono mt-1"><span class="text-yellow-400">--%</span> <span class="text-gray-500">/</span> <span class="text-red-400">--%</span></span>
@@ -506,7 +556,7 @@
                     <span class="text-xs text-gray-300">CPU Util <span class="text-gray-500 cursor-help ml-1" title="CPU Utilization of Master and Worker">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> Worker <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="node-b-cpu-row flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
                 <span id="current-cpu" class="text-xs font-bold font-mono mt-1"><span class="text-yellow-400">--%</span> <span class="text-gray-500">/</span> <span class="text-red-400">--%</span></span>
@@ -520,7 +570,7 @@
                     <span class="text-xs text-gray-300">CPU Temp <span class="text-gray-500 cursor-help ml-1" title="CPU Temperature">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> Worker <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="node-b-cpu-row flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
                 <span id="current-cpu-temp" class="text-xs font-bold font-mono mt-1"><span class="text-yellow-400">--°C</span> <span class="text-gray-500">/</span> <span class="text-red-400">--°C</span></span>

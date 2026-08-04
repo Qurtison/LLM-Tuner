@@ -1,12 +1,73 @@
+import glob
 import http.server
 import socketserver
 import json
+import os
+import signal
 import subprocess
 import sys
 import time
 import traceback
 
 PORT = 8081
+
+# get_amd_stats() below has to force-kill amdgpu_top every call (it doesn't respect
+# its own "-n 1" sample-count flag -- see that function's docstring). If the device
+# is in a bad state (e.g. an eGPU mid-disconnect) the kill can outlive our own
+# best-effort proc.wait(), leaving a zombie our reap attempt already gave up on.
+# This reaps any such stragglers automatically so they can't accumulate during
+# extended polling against a misbehaving device.
+def _reap_children(signum, frame):
+    try:
+        while True:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+            if pid == 0:
+                break
+    except ChildProcessError:
+        pass
+
+signal.signal(signal.SIGCHLD, _reap_children)
+
+def read_amdgpu_hwmon():
+    """Find the sysfs hwmon dir for the AMD GPU (name == 'amdgpu') and read power
+    (power1_average, PPT/board power) and temperature (prefer 'junction' label,
+    fall back to 'edge') straight from the kernel driver -- cheap synchronous file
+    reads, no subprocess needed. amdgpu_top's own JSON 'Sensors' fields came back
+    null for these on this card/driver combo even under real generation load
+    (verified live), but the underlying kernel data is right here in sysfs, so
+    this is used as the preferred source in get_amd_stats() below.
+    Returns (power_watts_or_None, temp_celsius_or_None)."""
+    power, temp = None, None
+    try:
+        for hwmon_dir in glob.glob('/sys/class/hwmon/hwmon*'):
+            try:
+                with open(os.path.join(hwmon_dir, 'name')) as f:
+                    if f.read().strip() != 'amdgpu':
+                        continue
+            except Exception:
+                continue
+
+            try:
+                with open(os.path.join(hwmon_dir, 'power1_average')) as f:
+                    power = int(f.read().strip()) / 1_000_000.0  # uW -> W
+            except Exception:
+                pass
+
+            temp_by_label = {}
+            for temp_input in glob.glob(os.path.join(hwmon_dir, 'temp*_input')):
+                label_path = temp_input.replace('_input', '_label')
+                try:
+                    with open(label_path) as f:
+                        label = f.read().strip()
+                    with open(temp_input) as f:
+                        temp_by_label[label] = int(f.read().strip()) / 1000
+                except Exception:
+                    continue
+            temp = temp_by_label.get('junction', temp_by_label.get('edge'))
+            break  # first amdgpu hwmon device only -- matches the single-GPU assumption elsewhere in get_amd_stats()
+    except Exception:
+        pass
+    return power, temp
 
 def get_meminfo_usage():
     """Read /proc/meminfo and return (total_kb, used_kb) where used = Total - Available.
@@ -157,7 +218,12 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
 
             stats = {"master": self.get_stats()}
             worker_ssh = req.get('worker_ssh', '').strip()
-            if worker_ssh:
+            local_second_gpu = req.get('local_second_gpu', '').strip()
+            if local_second_gpu == 'amd':
+                # Local-multi-gpu launch mode: "worker" slot is the second GPU on
+                # THIS machine (the AMD eGPU), not a remote SSH host.
+                stats['worker'] = self.get_amd_stats()
+            elif worker_ssh:
                 stats['worker'] = self.get_stats(worker_ssh)
 
             self.send_response(200)
@@ -193,6 +259,153 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             except (ConnectionResetError, BrokenPipeError, OSError):
                 pass
+
+    def get_amd_stats(self):
+        """Local AMD GPU telemetry via `amdgpu_top -J` (local-multi-gpu launch mode's
+        second GPU, e.g. a 7900 XTX eGPU). Returns the same dict shape as get_stats()
+        so pollTelemetry's existing worker-card rendering on the frontend needs no
+        changes to consume it. Verified live end-to-end (local-multi-gpu launch,
+        real generation load split across a 4090 + this 7900 XTX): util/VRAM/power
+        all populate correctly and track actual load (e.g. gpu_util 0->52%, gpu_pwr
+        0->92W once generation started). amdgpu_top's own JSON 'Sensors' fields
+        (Average/GFX Power, Junction/Edge Temperature) stayed null throughout, even
+        under load -- power and temp come from read_amdgpu_hwmon() (sysfs) instead,
+        which does report real numbers. If that ever comes back empty too (e.g. a
+        different card/driver where hwmon isn't exposed the same way), this falls
+        back to amdgpu_top's Sensors dict, then to 0 rather than raising -- same
+        convention nvidia-smi's '[Not Supported]' case already uses below.
+        AMD exposes no equivalent to
+        nvidia's clocks_throttle_reasons bits, so throttle_reasons is always empty --
+        that just means no throttle badges fire for this GPU, not that it's broken.
+
+        IMPORTANT (confirmed during implementation, amdgpu_top 0.11.5): `-n 1` does
+        NOT make it exit after one sample -- it just keeps streaming a fresh JSON
+        object every `-s` ms forever, ignoring the count. So this always spawns it,
+        waits a short bounded window, force-kills it, and parses only the *first*
+        complete JSON object out of whatever got buffered (there's no clean "run
+        once and exit" mode to rely on). The explicit kill is required every call --
+        without it this would leak one long-running amdgpu_top process per poll.
+        """
+        device = None
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["amdgpu_top", "-J", "-s", "150"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            # 0.5s measured live as comfortably reliable (a healthy device flushes
+            # its first sample in ~0.3s at -s 150); kept short since this blocks
+            # monitor.py's single-threaded request handling for the duration.
+            try:
+                raw_out, _ = proc.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired as e:
+                raw_out = e.stdout or b''
+            text = raw_out.decode('utf-8', errors='ignore')
+            obj, _ = json.JSONDecoder().raw_decode(text)
+            devices = obj.get('devices', [])
+            if not devices:
+                raise ValueError("amdgpu_top returned no devices")
+            device = devices[0]
+        except Exception:
+            pass
+        finally:
+            # amdgpu_top never exits on its own (see above) -- always reap it.
+            # A device in a bad TB4/power state can leave the kernel driver call
+            # amdgpu_top is blocked in stuck (D-state), where even SIGKILL can't
+            # complete immediately; don't let that possibility raise or hang here.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+
+        if device is None:
+            return {
+                "gpu_name": "Offline", "gpu_throttle": False, "throttle_reasons": [],
+                "vram_used": 0, "vram_total": 1, "process_vram": 0,
+                "gpu_pwr": 0, "gpu_temp": 0, "gpu_util": 0,
+                "ram_used": 0, "ram_total": 1, "process_ram": 0,
+                "cpu_name": "Offline", "cpu_util": 0.0, "cpu_temp": 0,
+                "net_bytes": 0, "amdgpu_top_error": True
+            }
+
+        def _val(d, *path, default=0):
+            cur = d
+            for key in path:
+                if not isinstance(cur, dict) or key not in cur:
+                    return default
+                cur = cur[key]
+            if isinstance(cur, dict):
+                return cur.get('value', default)
+            return cur if cur is not None else default
+
+        gpu_name = _val(device, 'Info', 'DeviceName', default='Unknown AMD GPU')
+        vram_used = int(_val(device, 'VRAM', 'Total VRAM Usage', default=0))
+        vram_total = int(_val(device, 'VRAM', 'Total VRAM', default=1)) or 1
+        gpu_util = int(_val(device, 'gpu_activity', 'GFX', default=0))
+
+        # Prefer sysfs hwmon (verified reliable on this card/driver combo, see
+        # read_amdgpu_hwmon() docstring); fall back to amdgpu_top's own JSON
+        # sensor fields for portability to setups where that isn't the case.
+        hwmon_power, hwmon_temp = read_amdgpu_hwmon()
+
+        gpu_pwr = hwmon_power
+        if gpu_pwr is None:
+            gpu_pwr = _val(device, 'Sensors', 'Average Power', default=None)
+            if gpu_pwr is None:
+                gpu_pwr = _val(device, 'Sensors', 'GFX Power', default=0)
+        gpu_pwr = float(gpu_pwr or 0)
+
+        gpu_temp = hwmon_temp
+        if gpu_temp is None:
+            gpu_temp = _val(device, 'Sensors', 'Junction Temperature', default=None)
+            if gpu_temp is None:
+                gpu_temp = _val(device, 'Sensors', 'Edge Temperature', default=0)
+        gpu_temp = int(gpu_temp or 0)
+
+        # fdinfo is keyed by pid, doubly-nested per amdgpu_top's JSON shape:
+        # {pid: {name, usage: {name, usage: {VRAM: {unit, value}, GFX: {...}, ...}}}}
+        process_vram = 0
+        try:
+            for pid, entry in device.get('fdinfo', {}).items():
+                name = entry.get('name', '')
+                if 'llama-server' in name or 'llama' in name or 'ggml-rpc' in name:
+                    inner = entry.get('usage', {}).get('usage', {})
+                    process_vram += int(_val(inner, 'VRAM', default=0))
+        except Exception:
+            process_vram = 0
+
+        # CPU/RAM/net are this same local host's -- both GPUs share one pool, so
+        # these mirror what get_stats() computes for master. The frontend hides the
+        # worker RAM/CPU sub-panels in local-multi-gpu mode since a duplicate
+        # reading there would be redundant, but the fields stay populated here so
+        # the dict shape is always valid regardless of how the frontend renders it.
+        mem_total_kb, mem_used_kb = get_meminfo_usage()
+        ram_total = max(mem_total_kb // 1024, 1)
+        ram_used = max(mem_used_kb // 1024, 0)
+
+        cpu_util = 0.0
+        try:
+            cpu_util = _parse_cpu_util_from_stat(open('/proc/stat').read())
+        except Exception:
+            cpu_util = 0.0
+
+        cpu_name = "Unknown CPU"
+        try:
+            cpu_info = open('/proc/cpuinfo').read()
+            cpu_name = [l for l in cpu_info.split('\n') if "model name" in l][0].split(':')[1].strip()
+        except Exception:
+            pass
+
+        return {
+            "gpu_name": gpu_name, "gpu_throttle": False, "throttle_reasons": [],
+            "vram_used": vram_used, "vram_total": vram_total, "process_vram": process_vram,
+            "gpu_pwr": gpu_pwr, "gpu_temp": gpu_temp, "gpu_util": gpu_util,
+            "ram_used": ram_used, "ram_total": ram_total, "process_ram": 0,
+            "cpu_name": cpu_name, "cpu_util": cpu_util, "cpu_temp": 0,
+            "net_bytes": get_net_bytes(), "amdgpu_top_error": False
+        }
 
     def get_stats(self, ssh_prefix=""):
         meminfo_out = ""  # For SSH remote meminfo data; empty for local (uses /proc/meminfo directly)
@@ -347,7 +560,7 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             ]
             throttle_reasons = []
             for i, field in enumerate(throttle_fields):
-                if i < len(parts) and 'Active' in parts[i + 6]:
+                if i + 6 < len(parts) and parts[i + 6].strip() == 'Active':
                     throttle_reasons.append(field)
             gpu_throttle = len(throttle_reasons) > 0
         except Exception as e:

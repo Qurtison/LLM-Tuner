@@ -39,6 +39,15 @@
 | #23 Gantt chart | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on #9 and #7. Requires bottleneck detection algorithm design. |
 | #25 Stacked area graphs | 🔶 DEFERRED / NEEDS HUMAN REVIEW | — | Depends on per-process per-component telemetry changes in monitor.py. |
 
+## Progress Log (2026-08-04)
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Local Multi-GPU (Vulkan) launch mode | ✅ COMPLETED, verified live | New `launchMode: 'local-multi-gpu'` path in server4.js spawns `llama-server` directly (no Docker) with `-dev`/`-ts`/`--split-mode layer`, alongside the existing Docker+RPC path. `GET /api/devices` (timeout-safe `--list-devices`) + UI mode selector + device dropdowns with manual fallback. Verified end-to-end: booted a real model split across an RTX 4090 + 7900 XTX eGPU, confirmed both GPUs actively computing (`gpu_util` 0→36%/52%), chat completion worked, clean `/api/stop` teardown. |
+| AMD GPU telemetry | ✅ COMPLETED, verified live under load | `monitor.py get_amd_stats()` via `amdgpu_top -J` for util/VRAM/per-process-VRAM, `read_amdgpu_hwmon()` (sysfs) for power/temp since amdgpu_top's own Sensors fields were null on this card/driver combo even under load. Verified live: power/util/VRAM all track real generation load correctly. |
+| #8a/8b/8c/8d Master log panel | ✅ Already fixed, doc was stale | See Item 8's updated notes above — no code changes needed, just corrected this doc's status. |
+| #22 Restore launch config on refresh | ✅ COMPLETED | `server4.js` now broadcasts the full structured launch config over SSE; `populateLaunchConfig()` in script.js consumes it (one-shot, doesn't clobber in-progress edits). Verified live via SSE curl. |
+
 ---
 
 ## Dependency Graph (Execution Order)
@@ -129,39 +138,27 @@ Depends on Section A being resolved first.
 
 ## 8. Master Log Panel — Multiple Issues
 
-**Status:** 🔴 Open (8c depends on Item 13)
+**Status:** ✅ 8a/8b/8c COMPLETED (verified 2026-08-04) · 8d COMPLETED as a side effect of Item 22 (this session)
 
-**Depends on:** Item 13
+**Completion Notes (2026-08-04):** Re-investigated per the local-multi-gpu/AMD work session. All four sub-items turned out to already be fixed by earlier commits that this doc's status table was never updated to reflect:
 
-### 8a. Broken Fetch
+- **8a (Broken Fetch):** Already fixed by `8ab1dba` (Item 5's in-memory ring buffer, which sidesteps the original problem — `docker compose logs` can't see `run --rm` one-off containers). Verified live this session: `curl /api/master/logs` returns real buffered log content, and it kept working correctly for the new local-multi-gpu launch path too (a directly-spawned process, not Docker at all) since `handleLogs()`'s ring-buffer append is shared code, not Docker-specific.
+- **8b (Wrong Placement):** Already fixed by `ef7726e` + `a0a336b` — moved out of the RPC card into its own dedicated "Server Logs" section, added fade/scroll-stick-to-bottom polish.
+- **8c (Red on crash):** Already implemented by `afcb6d0` — red border/bg on both log panel containers when `data.error` is present, container IDs added for targeting. Not re-verified against a live crash this session (would need to intentionally kill the process mid-run), but the code path is present and matches the action plan exactly.
+- **8d (Stale state after refresh):** Was already partially covered by `/api/status` broadcasting current `state` to every new SSE connection. This session's Item 22 work (structured `launchConfig` broadcast + `populateLaunchConfig()` in script.js) closes the remaining gap — a refreshed client now also gets the model/ctx/launch-mode/etc. that produced that state, not just the state label. Verified live via SSE curl this session (see server4.js/script.js changes, 2026-08-04).
 
-**Action Plan:**
+No code changes were needed for 8a/8b/8c themselves — this is a documentation correction only. Original root-cause/action-plan text preserved below for reference.
 
-- [ ] Investigate and fix the fetch that populates the master log panel.
+<details>
+<summary>Original (stale) root-cause notes</summary>
 
-### 8b. Wrong Placement
+**Root Cause (8c):** No visual distinction between "cleanly stopped" and "crashed while running." Both end up as the same red "ENGINE STOPPED" badge, and log panels didn't change color at all — fixed by `afcb6d0`.
 
-**Action Plan:**
+**Action Plan (8c, now done):**
+- [x] Backend: distinguish a crash from a clean stop using exit code/signal in the `'close'` handler.
+- [x] Frontend: red border/background on the master log panel container when `data.error` is present.
 
-- [ ] Fix placement of the master log panel.
-
-### 8c. Should Turn Red When the Server Crashes
-
-**Root Cause:** No visual distinction between "cleanly stopped" and "crashed while running." Both end up as the same red "ENGINE STOPPED" badge (`index.html:849-850`), and log panels don't change color at all.
-
-**This depends on Item 13** being fixed first — right now a real crash takes down all of `server4.js`, including the very endpoint that would tell the UI a crash happened.
-
-**Action Plan:**
-
-- [ ] **Step 1 (Backend):** In the `'close'` handler (`server4.js:327-335`), distinguish a crash from a clean stop using exit code/signal (`close` fires as `(code, signal)` — capture those params, currently ignored). Broadcast an `error` message when `code !== 0` or a `signal` is present and the stop wasn't user-initiated. Track a simple `let stopRequested = false` flag, set `true` at the top of `/api/stop`, reset after clean stop or new start.
-
-- [ ] **Step 2 (Frontend):** In the `data.state === 'stopped'` branch (`index.html:837-875`), when `data.error` is present, add a red border/background to the master log panel container (`#master-logs-pre`) in addition to the existing chat-box error bubble.
-
-### 8d. Stale State After Refresh
-
-**Action Plan:**
-
-- [ ] Once Item 13 is fixed, verify that stale "stopped" state after page refresh is resolved. If not, persist engine state in `localStorage` on every state change and restore it on page load.
+</details>
 
 ---
 
@@ -556,7 +553,9 @@ Clicking to expand should fill a full-screen modal with **all the sidebar histor
 
 ## 22. Restore Launch Config on Page Refresh
 
-**Status:** 🔴 Open
+**Status:** ✅ COMPLETED (2026-08-04)
+
+**Completion Notes:** All 3 steps implemented. Step 1: `server4.js` stores the full config object from `/api/start` in `currentLaunchConfig`, included as `launchConfig` in every `broadcastState()` payload, cleared on stop/close so a dead run's config isn't offered as current. Step 2: `populateLaunchConfig()` in script.js consumes `data.launchConfig` from the SSE handler (one-shot via `hasAppliedServerConfig`, so it never clobbers in-progress edits) — refactored the existing localStorage-restore logic into a shared `applyConfigToUI()` used by both paths rather than duplicating the field-by-field restore code. Step 3 (localStorage fallback) already existed (`restoreLastLaunchConfig()`). Verified live via SSE curl: booting a model and connecting fresh returns the full structured config (model path, ctx, launch mode, devices, tensor split, etc.) in the very first SSE message.
 
 ### Current Behavior
 

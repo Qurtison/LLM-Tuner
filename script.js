@@ -26,6 +26,13 @@ let lastNetBytes = 0;
 let isModelLoaded = false;
 let masterBaseVram = 0;
 
+// Launch mode: 'docker-rpc' (existing Docker+SSH-worker path) or
+// 'local-multi-gpu' (direct llama-server spawn across 2 local GPUs, e.g. a
+// 4090 + a Vulkan eGPU -- see server4.js /api/start). Drives which config
+// panel is shown, what pollTelemetry's POST body looks like, and whether the
+// "worker" telemetry slot means "remote RPC node" or "second local GPU".
+let currentLaunchMode = 'docker-rpc';
+
 // Active Session Trackers for CSV
 let sessionData = {};
 
@@ -288,6 +295,7 @@ let lastLaunchCommand = '';
 eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
     if (data.launchCommand) lastLaunchCommand = data.launchCommand;
+    if (data.launchConfig) populateLaunchConfig(data.launchConfig);
     const badge = document.getElementById('engine-status');
     const input = document.getElementById('user-prompt');
     const btn = document.getElementById('submit-btn');
@@ -481,65 +489,115 @@ function saveLastLaunchConfig(config) {
     try { localStorage.setItem(LAST_LAUNCH_CONFIG_KEY, JSON.stringify(config)); } catch(e) {}
 }
 
+// Shared by both config-restore paths (Item #22): the synchronous localStorage
+// fallback below, and the SSE-driven populateLaunchConfig() (which restores
+// from the server's own authoritative in-memory config -- more reliable since
+// it reflects what's *actually running*, not just what this browser last sent).
+function applyConfigToUI(config) {
+    // Restore model selection
+    const modelSelect = document.getElementById('model-select');
+    if (config.modelPath && modelSelect) {
+        modelSelect.value = config.modelPath;
+        modelSelect.dispatchEvent(new Event('change'));
+    }
+
+    // Restore numeric fields
+    if (config.ctx != null) document.getElementById('server-ctx').value = config.ctx;
+    if (config.ngl != null) document.getElementById('server-ngl').value = config.ngl;
+
+    // Restore launch mode
+    const mode = config.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
+    document.getElementById('launch-mode-select').value = mode;
+    applyLaunchMode(mode);
+
+    // Restore toggles
+    const rpcChecked = !!config.rpcTarget;
+    document.getElementById('rpc-toggle').checked = rpcChecked;
+    if (config.rpcTarget) document.getElementById('worker-ssh').value = config.rpcTarget;
+    if (config.fa != null) document.getElementById('server-fa').checked = config.fa;
+    if (config.reasoningPreserve != null) document.getElementById('reasoning-preserve-toggle').checked = config.reasoningPreserve;
+
+    // Restore text fields
+    if (config.cacheK != null) document.getElementById('server-cache-k').value = config.cacheK;
+    if (config.cacheV != null) document.getElementById('server-cache-v').value = config.cacheV;
+    if (config.tensorSplit != null) document.getElementById('server-tensor-split').value = config.tensorSplit;
+    document.getElementById('server-tensor-split').dispatchEvent(new Event('input'));
+
+    // Restore local-multi-gpu device selection (manual fields always; dropdowns
+    // only if a Detect Devices run already populated matching options)
+    if (config.deviceA != null) {
+        document.getElementById('device-manual-a').value = config.deviceA;
+        const selA = document.getElementById('device-select-a');
+        if ([...selA.options].some(o => o.value === config.deviceA)) selA.value = config.deviceA;
+    }
+    if (config.deviceB != null) {
+        document.getElementById('device-manual-b').value = config.deviceB;
+        const selB = document.getElementById('device-select-b');
+        if ([...selB.options].some(o => o.value === config.deviceB)) selB.value = config.deviceB;
+    }
+
+    // Restore MTP settings
+    const mtpEnabled = config.specType === 'draft-mtp';
+    document.getElementById('mtp-toggle').checked = mtpEnabled;
+    if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
+
+    // Restore verbosity
+    if (config.verbosity != null) document.getElementById('server-verbosity').value = config.verbosity;
+
+    // Restore extra args
+    if (config.argString) document.getElementById('extra-args').value = config.argString;
+
+    // Re-render saved configs for the restored model
+    renderSavedConfigs();
+}
+
 function restoreLastLaunchConfig() {
     try {
         const saved = localStorage.getItem(LAST_LAUNCH_CONFIG_KEY);
         if (!saved) return;
-        const config = JSON.parse(saved);
-
-        // Restore model selection
-        const modelSelect = document.getElementById('model-select');
-        if (config.modelPath && modelSelect) {
-            modelSelect.value = config.modelPath;
-            modelSelect.dispatchEvent(new Event('change'));
-        }
-
-        // Restore numeric fields
-        if (config.ctx != null) document.getElementById('server-ctx').value = config.ctx;
-        if (config.ngl != null) document.getElementById('server-ngl').value = config.ngl;
-
-        // Restore toggles
-        const rpcChecked = !!config.rpcTarget;
-        document.getElementById('rpc-toggle').checked = rpcChecked;
-        if (config.rpcTarget) document.getElementById('worker-ssh').value = config.rpcTarget;
-        if (config.fa != null) document.getElementById('server-fa').checked = config.fa;
-        if (config.reasoningPreserve != null) document.getElementById('reasoning-preserve-toggle').checked = config.reasoningPreserve;
-
-        // Restore text fields
-        if (config.cacheK != null) document.getElementById('server-cache-k').value = config.cacheK;
-        if (config.cacheV != null) document.getElementById('server-cache-v').value = config.cacheV;
-        if (config.tensorSplit != null) document.getElementById('server-tensor-split').value = config.tensorSplit;
-
-        // Restore MTP settings
-        const mtpEnabled = config.specType === 'draft-mtp';
-        document.getElementById('mtp-toggle').checked = mtpEnabled;
-        if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
-
-        // Restore verbosity
-        if (config.verbosity != null) document.getElementById('server-verbosity').value = config.verbosity;
-
-        // Restore extra args
-        if (config.argString) document.getElementById('extra-args').value = config.argString;
-
-        // Re-render saved configs for the restored model
-        renderSavedConfigs();
+        applyConfigToUI(JSON.parse(saved));
     } catch(e) {
         console.warn('Failed to restore last launch config:', e);
+    }
+}
+
+// Item #22 (SSE path): a freshly-connected/refreshed client gets the server's
+// authoritative current launch config (if a server is actually running) over
+// the /api/status SSE stream (see server4.js broadcastState's `launchConfig`
+// field) and uses it to populate the UI -- more reliable than the localStorage
+// fallback above since it reflects this specific browser's own last launch,
+// which may be stale or belong to a different session entirely. One-shot: only
+// applied once per page load, so it never clobbers in-progress user edits.
+let hasAppliedServerConfig = false;
+function populateLaunchConfig(config) {
+    if (hasAppliedServerConfig || !config) return;
+    hasAppliedServerConfig = true;
+    try {
+        applyConfigToUI(config);
+    } catch (e) {
+        console.warn('Failed to populate launch config from server:', e);
     }
 }
 
 document.getElementById('btn-start-server').addEventListener('click', () => {
     const mtpEnabled = document.getElementById('mtp-toggle').checked;
     const verbosityVal = parseInt(document.getElementById('server-verbosity').value);
+    const isLocal = currentLaunchMode === 'local-multi-gpu';
+    // Local mode: dropdown value wins if Detect Devices populated it and it's
+    // still selected, otherwise fall back to whatever's in the manual text field.
+    const deviceA = isLocal ? (document.getElementById('device-select-a').value || document.getElementById('device-manual-a').value.trim() || null) : null;
+    const deviceB = isLocal ? (document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim() || null) : null;
     const config = {
         modelPath: document.getElementById('model-select').value, // full host path, not just filename
         ctx: parseInt(document.getElementById('server-ctx').value),
         ngl: parseInt(document.getElementById('server-ngl').value),
-        rpcTarget: document.getElementById('rpc-toggle').checked ? document.getElementById('worker-ssh').value.trim() : null,
+        launchMode: currentLaunchMode,
+        rpcTarget: (!isLocal && document.getElementById('rpc-toggle').checked) ? document.getElementById('worker-ssh').value.trim() : null,
+        deviceA, deviceB,
         fa: document.getElementById('server-fa').checked,
         cacheK: document.getElementById('server-cache-k').value,
         cacheV: document.getElementById('server-cache-v').value,
-        tensorSplit: document.getElementById('rpc-toggle').checked ? parseInt(document.getElementById('server-tensor-split').value) : null,
+        tensorSplit: (isLocal || document.getElementById('rpc-toggle').checked) ? parseInt(document.getElementById('server-tensor-split').value) : null,
         specType: mtpEnabled ? 'draft-mtp' : null,
         specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
@@ -900,8 +958,8 @@ async function submitPrompt() {
         model: document.getElementById('model-select').value,
         ctx: document.getElementById('server-ctx').value,
         ngl: document.getElementById('server-ngl').value,
-        rpc: document.getElementById('rpc-toggle').checked ? 'yes' : 'no',
-        transport: document.getElementById('transport-type').value,
+        rpc: (currentLaunchMode !== 'local-multi-gpu' && document.getElementById('rpc-toggle').checked) ? 'yes' : 'no',
+        transport: currentLaunchMode === 'local-multi-gpu' ? 'Local' : document.getElementById('transport-type').value,
         argString: document.getElementById('extra-args').value.trim() || '',
         promptTokens: 0,
         gpuMem: currentVramSnapshot,
@@ -1384,6 +1442,105 @@ document.getElementById('rpc-toggle').addEventListener('change', () => {
     }
 });
 
+// --- Launch Mode: Docker+RPC Worker vs Local Multi-GPU (Vulkan) ---
+const LAST_DETECTED_DEVICES_KEY = 'last_detected_devices';
+
+function applyLaunchMode(mode) {
+    currentLaunchMode = mode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
+    const isLocal = currentLaunchMode === 'local-multi-gpu';
+
+    document.getElementById('docker-rpc-panel').classList.toggle('hidden', isLocal);
+    document.getElementById('local-multi-gpu-panel').classList.toggle('hidden', !isLocal);
+
+    // RPC mode's tensor-split visibility is driven by updateWorkerStatus() (only
+    // shown once the remote worker is confirmed running); local mode has no such
+    // "is the second node up" step, so just show it unconditionally.
+    if (isLocal) {
+        document.getElementById('tensor-split-container').classList.remove('hidden');
+    } else {
+        document.getElementById('tensor-split-container').classList.add('hidden');
+        updateWorkerStatus();
+    }
+
+    // Worker Logs panel is meaningless in local mode -- there's no separate
+    // remote process to fetch logs from, it's all one process's stdout.
+    document.getElementById('worker-logs-container').classList.toggle('hidden', isLocal);
+    if (isLocal && workerLogsInterval) { clearInterval(workerLogsInterval); workerLogsInterval = null; }
+
+    // Both GPUs share one CPU/RAM pool on this host in local mode, so a
+    // duplicate "Worker" CPU/RAM reading would just be redundant.
+    document.getElementById('worker-ram-container').classList.toggle('hidden', isLocal);
+    document.querySelectorAll('.node-b-cpu-row').forEach(el => el.classList.toggle('hidden', isLocal));
+
+    document.querySelectorAll('.node-a-label').forEach(el => { el.textContent = isLocal ? 'GPU A' : 'Master'; });
+    document.querySelectorAll('.node-b-label').forEach(el => { el.textContent = isLocal ? 'GPU B (AMD)' : 'Worker'; });
+}
+
+document.getElementById('launch-mode-select').addEventListener('change', (e) => {
+    applyLaunchMode(e.target.value);
+});
+
+function renderDeviceOptions(devices) {
+    const selA = document.getElementById('device-select-a');
+    const selB = document.getElementById('device-select-b');
+    selA.innerHTML = ''; selB.innerHTML = '';
+    for (const d of devices) {
+        const label = `${d.id} — ${d.description} (${d.freeMib} MiB free)`;
+        for (const sel of [selA, selB]) {
+            const opt = document.createElement('option');
+            opt.value = d.id; opt.textContent = label;
+            sel.appendChild(opt);
+        }
+    }
+    // Default to the first two *discrete* GPUs, not just list order -- an
+    // integrated GPU (e.g. an Intel iGPU alongside a laptop's dGPU) is almost
+    // never what you want in an A/B split by default, and can even report a
+    // deceptively large "VRAM" total via UMA/shared memory, so size isn't a
+    // reliable signal either. User can still override via the dropdowns.
+    if (devices.length > 1) {
+        const discreteIdx = devices.map((d, i) => i).filter(i => !/intel|iris|uhd graphics/i.test(devices[i].description));
+        const [idxA, idxB] = discreteIdx.length >= 2 ? discreteIdx : [0, 1];
+        selA.selectedIndex = idxA; selB.selectedIndex = idxB;
+    }
+}
+
+document.getElementById('btn-detect-devices').addEventListener('click', async () => {
+    const statusEl = document.getElementById('device-detect-status');
+    const dropdownRow = document.getElementById('device-dropdown-row');
+    statusEl.classList.remove('hidden');
+    statusEl.textContent = 'Detecting...';
+    try {
+        const res = await fetch('/api/devices');
+        const data = await res.json();
+        if (data.devices && data.devices.length > 0) {
+            renderDeviceOptions(data.devices);
+            dropdownRow.classList.remove('hidden');
+            statusEl.classList.add('hidden');
+            try { localStorage.setItem(LAST_DETECTED_DEVICES_KEY, JSON.stringify(data.devices)); } catch (e) {}
+        } else {
+            dropdownRow.classList.add('hidden');
+            statusEl.textContent = `Detection failed${data.error ? ` (${data.error})` : ''} — enter device ids manually below.`;
+        }
+    } catch (e) {
+        dropdownRow.classList.add('hidden');
+        statusEl.textContent = `Detection failed (${e.message}) — enter device ids manually below.`;
+    }
+});
+
+// On load: if a previous Detect Devices run succeeded, pre-populate the
+// dropdowns from cache so the user isn't forced to re-detect every page load
+// (detection talks to the Vulkan/CUDA loader, which can be slow or flaky --
+// see server4.js /api/devices).
+(function restoreCachedDevices() {
+    try {
+        const cached = JSON.parse(localStorage.getItem(LAST_DETECTED_DEVICES_KEY) || 'null');
+        if (cached && cached.length > 0) {
+            renderDeviceOptions(cached);
+            document.getElementById('device-dropdown-row').classList.remove('hidden');
+        }
+    } catch (e) {}
+})();
+
 // Initialize polling intervals
 workerStatusInterval = setInterval(updateWorkerStatus, 5000);
 updateWorkerStatus();
@@ -1412,12 +1569,15 @@ async function pollTelemetry() {
         } else if (banner) {
             banner.style.display = 'none';
         }
-        const rpcEnabled = document.getElementById('rpc-toggle').checked;
+        const isLocalMode = currentLaunchMode === 'local-multi-gpu';
+        const rpcEnabled = !isLocalMode && document.getElementById('rpc-toggle').checked;
         const workerSsh = rpcEnabled ? document.getElementById('worker-ssh').value : '';
+        // Local mode: "worker" slot is the second GPU on THIS machine (see
+        // monitor.py get_amd_stats()), not a remote SSH host.
         const res = await fetch('http://localhost:8081/stats', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker_ssh: workerSsh })
+            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: isLocalMode ? 'amd' : '' })
         });
         const stats = await res.json();
 
@@ -1489,15 +1649,17 @@ async function pollTelemetry() {
             if (isNum(currentBytes)) lastNetBytes = currentBytes;
         }
         
-        const workerReporting = !!(stats.worker && stats.worker.gpu_util !== undefined) && rpcEnabled;
+        const workerReporting = !!(stats.worker && stats.worker.gpu_util !== undefined) && (rpcEnabled || isLocalMode);
         if (workerReporting) {
             workerStatsMissingSince = null;
             workerPwr = stats.worker.gpu_pwr;
             workerTemp = stats.worker.gpu_temp;
-            
+
             document.getElementById('worker-vram-container').classList.remove('hidden');
-            document.getElementById('worker-ram-container').classList.remove('hidden');
-            
+            // RAM sub-panel stays hidden in local mode regardless (both GPUs
+            // share one CPU/RAM pool on this host -- see applyLaunchMode()).
+            if (!isLocalMode) document.getElementById('worker-ram-container').classList.remove('hidden');
+
             if (!workerBaseVram && stats.worker.vram_used > 500 && isModelLoaded) workerBaseVram = stats.worker.process_vram ?? stats.worker.vram_used; // capture base after load
 
             const workerProcessVram = stats.worker.process_vram ?? stats.worker.vram_used;
@@ -1562,12 +1724,17 @@ async function pollTelemetry() {
         document.querySelectorAll('.master-cpu-model').forEach(el => el.innerText = `(${mCpu})`);
         document.querySelectorAll('.worker-cpu-model').forEach(el => el.innerText = `(${wCpu})`);
         
-        // GPU Throttling UI Indicator — Item 9: granular throttle_reasons
-        // Thermal reasons → red pulse. Non-thermal (power cap, power brake) → informational only.
+        // GPU Throttling UI Indicator — Item 9/16: granular throttle_reasons
+        // Thermal reasons → temp card red pulse + badges. Power reasons (power cap,
+        // power brake) → power card red pulse + badges. Each category only reacts
+        // to its own graph, not the other's.
         const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
+        const powerReasons = new Set(['sw_power_cap', 'hw_power_brake_slowdown']);
         const mReasons = stats.master.throttle_reasons || [];
         const wReasons = (stats.worker && stats.worker.throttle_reasons) || [];
-        const hasThermal = [...mReasons, ...wReasons].some(r => thermalReasons.has(r));
+        const allReasons = [...mReasons, ...wReasons];
+        const hasThermal = allReasons.some(r => thermalReasons.has(r));
+        const hasPower = allReasons.some(r => powerReasons.has(r));
         const tempCard = document.getElementById('card-gpu-temp');
         if (hasThermal) {
             tempCard.classList.add('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
@@ -1576,40 +1743,53 @@ async function pollTelemetry() {
             tempCard.classList.remove('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
             tempCard.classList.add('bg-gray-800/50', 'border-gray-700/50');
         }
-        
-        // Render throttle badges in #throttle-badges (Item 16)
+        const pwrCard = document.getElementById('card-gpu-pwr');
+        if (hasPower) {
+            pwrCard.classList.add('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
+            pwrCard.classList.remove('bg-gray-800/50', 'border-gray-700/50');
+        } else {
+            pwrCard.classList.remove('bg-red-900/30', 'border-red-500/50', 'animate-pulse');
+            pwrCard.classList.add('bg-gray-800/50', 'border-gray-700/50');
+        }
+
+        // Render throttle badges — thermal reasons in #throttle-badges (temp card),
+        // power reasons in #throttle-badges-pwr (power card). Item 16.
         // Deduplicate across BOTH master and worker: same reason shown once with combined tooltip
         const badgeContainer = document.getElementById('throttle-badges');
+        const badgeContainerPwr = document.getElementById('throttle-badges-pwr');
         const throttleLabels = {
             'hw_thermal_slowdown': 'HW Thermal',
             'sw_thermal_slowdown': 'SW Thermal',
             'sw_power_cap': 'SW Power Cap',
             'hw_power_brake_slowdown': 'HW Power Brake'
         };
-        // Map reason -> {sources: Set<'master'|'worker'>, isThermal: bool}
+        // Map reason -> Set<'master'|'worker'>
         const reasonMap = new Map();
         for (const r of mReasons) {
-            if (!reasonMap.has(r)) reasonMap.set(r, { sources: new Set(), isThermal: thermalReasons.has(r) });
-            reasonMap.get(r).sources.add('master');
+            if (!reasonMap.has(r)) reasonMap.set(r, new Set());
+            reasonMap.get(r).add('master');
         }
         for (const r of wReasons) {
-            if (!reasonMap.has(r)) reasonMap.set(r, { sources: new Set(), isThermal: thermalReasons.has(r) });
-            reasonMap.get(r).sources.add('worker');
+            if (!reasonMap.has(r)) reasonMap.set(r, new Set());
+            reasonMap.get(r).add('worker');
         }
 
         let badgeHTML = '';
-        for (const [reason, info] of reasonMap) {
+        let badgeHTMLPwr = '';
+        for (const [reason, sources] of reasonMap) {
+            const isThermal = thermalReasons.has(reason);
             const label = throttleLabels[reason] || reason;
-            const sources = [...info.sources].join(' + ');
-            const tooltip = `${sources.charAt(0).toUpperCase() + sources.slice(1)}: ${label}`;
-            // Thermal reasons always red; non-thermal with worker involvement gets red tint
-            const hasWorker = info.sources.has('worker');
-            badgeHTML += `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${info.isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="${tooltip}">${label}</span>`;
+            const sourceList = [...sources].join(' + ');
+            const tooltip = `${sourceList.charAt(0).toUpperCase() + sourceList.slice(1)}: ${label}`;
+            const badge = `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="${tooltip}">${label}</span>`;
+            if (isThermal) badgeHTML += badge; else badgeHTMLPwr += badge;
         }
         badgeContainer.innerHTML = badgeHTML;
         // Item 16 Step 3: dynamic visibility — hide container when no throttle reasons
         badgeContainer.style.display = badgeHTML ? '' : 'none';
-        
+        badgeContainerPwr.innerHTML = badgeHTMLPwr;
+        badgeContainerPwr.style.display = badgeHTMLPwr ? '' : 'none';
+
         if (workerReporting) {
             document.getElementById('current-temp').innerHTML = `<span class="text-yellow-400">${fmtUnit(masterTemp, '°C')}</span> <span class="text-gray-500">/</span> <span class="text-red-400">${fmtUnit(workerTemp, '°C')}</span>`;
             document.getElementById('current-pwr').innerHTML = `<span class="text-yellow-400">${fmtUnit(masterPwr, 'W')}</span> <span class="text-gray-500">/</span> <span class="text-red-400">${fmtUnit(workerPwr, 'W')}</span>`;
@@ -2153,6 +2333,50 @@ window.expandChart = function(chartId, title) {
             });
         }
     }, 50);
+};
+
+// Expands the live per-response hardware chart (hw-chart-container) into the
+// shared #expand-modal. Distinct from expandChart() above because it plots
+// responseMetrics (per-answer samples), not the sidebar's rolling histories.
+window.expandHwChart = function() {
+    if (!responseMetrics || responseMetrics.length < 2) return;
+    const modal = document.getElementById('expand-modal');
+    const titleEl = document.getElementById('expand-modal-title');
+    const canvas = document.getElementById('expandedChartCanvas');
+
+    titleEl.innerText = 'Live Response Telemetry';
+    modal.classList.remove('hidden'); modal.classList.add('flex');
+
+    if (expandedChartInst) { expandedChartInst.destroy(); }
+
+    const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
+    const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
+
+    expandedChartInst = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: responseMetrics.map((_, i) => i),
+            datasets: [
+                { label: 'M-GPU W', data: responseMetrics.map(s => s.masterPwr), borderColor: 'rgba(250,204,21,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
+                { label: 'W-GPU W', data: responseMetrics.map(s => s.workerPwr), borderColor: 'rgba(248,113,113,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
+                { label: 'M-Temp °C', data: responseMetrics.map(s => s.masterTemp), borderColor: 'rgba(251,146,60,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+                { label: 'GPU Util %', data: responseMetrics.map(s => s.masterGpuUtil), borderColor: 'rgba(167,139,250,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+                { label: 'Net MB/s', data: responseMetrics.map(s => s.netMbps), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
+                { label: 'Tok/s', data: responseMetrics.map(s => s.genTps), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y2' },
+                { label: 'CPU %', data: responseMetrics.map(s => s.masterCpuUtil), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+            interaction: { intersect: false, mode: 'index' },
+            plugins: { legend: { display: true, labels: { color: '#6b7280', font: { size: 9 }, boxWidth: 10, padding: 6 } } },
+            scales: {
+                x: { display: false },
+                y: { position: 'left', grid: { color: 'rgba(55,65,81,0.4)' }, ticks: { color: '#6b7280', font: { size: 9 } } },
+                y2: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#6b7280', font: { size: 9 } }, min: 0, max: 100 }
+            }
+        }
+    });
 };
 
 // --- Sidebar Resizer ---
