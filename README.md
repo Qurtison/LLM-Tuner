@@ -1,3 +1,24 @@
+## Offline / no external dependencies
+
+The frontend used to load Tailwind, Chart.js, and marked from public CDNs, so
+the dashboard wouldn't render without internet access. Those are now vendored
+locally under `vendor/` (`vendor/chart.js`, `vendor/marked.min.js`,
+`vendor/tailwind.css`) and referenced from `index.html` via relative paths, so
+the site works fully offline once served by `server4.js`.
+
+`vendor/tailwind.css` is a pre-built, purged stylesheet (via the Tailwind CLI,
+config in `tailwind.config.js`) rather than the Tailwind CDN's in-browser JIT
+compiler. If you add new Tailwind classes to `index.html` or `script.js`,
+rebuild it:
+
+```bash
+npm install        # one-time, pulls in the tailwindcss dev dependency
+npm run build:css  # regenerates vendor/tailwind.css
+```
+
+This build step needs internet/npm; the resulting `vendor/tailwind.css` is
+committed so end users never need to run it themselves.
+
 # Running the dashboard under pm2
 
 `server4.js` is the dashboard backend. It's the process that spawns `monitor.py`

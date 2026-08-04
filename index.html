@@ -87,91 +87,24 @@
                         <button onclick="openHFModal()" class="text-[10px] text-indigo-400 hover:text-indigo-300 underline">Find Models (HF)</button>
                     </div>
                 </div>
+                <!-- Loads a saved profile (model, launch mode, devices, every field,
+                     the raw command) immediately on selection. Saving happens at the
+                     bottom of this panel, right above Load Model. -->
+                <div class="flex gap-1.5 items-center">
+                    <select id="load-profile-select" class="flex-1 bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-xs text-gray-400">
+                        <option value="">Load Saved Profile...</option>
+                    </select>
+                    <button type="button" id="btn-delete-profile" title="Delete selected profile" class="px-2 py-1.5 bg-red-900/30 hover:bg-red-900/50 border border-red-800/40 rounded text-[11px] text-red-400">×</button>
+                </div>
                 <select id="model-select" class="w-full bg-gray-800 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200">
                     <option>Loading models...</option>
                 </select>
-                <div class="grid grid-cols-2 gap-3">
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Context</label>
-                        <input type="number" id="server-ctx" value="110000" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">GPU Layers</label>
-                        <input type="number" id="server-ngl" value="999" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
-                    </div>
-                </div>
-                
-                <div class="grid grid-cols-2 gap-3 mb-2">
-                    <div>
-                        <label class="flex items-center gap-2 text-xs font-semibold text-gray-200 mt-5" title="Accelerates processing and reduces VRAM usage for long contexts (Requires Ampere+ GPU)">
-                            <input type="checkbox" id="server-fa" checked class="accent-indigo-500 rounded">
-                            Flash Attention <span class="text-indigo-400 cursor-help" title="Accelerates processing and reduces VRAM usage for long contexts (Requires Ampere+ GPU)">?</span>
-                        </label>
-                    </div>
-                </div>
 
-                <div class="grid grid-cols-2 gap-3 mb-3">
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Cache Type K</label>
-                        <select id="server-cache-k" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm text-gray-200">
-                            <option value="q8_0">q8_0</option>
-                            <option value="f16">f16</option>
-                            <option value="q4_0">q4_0</option>
-                            <option value="q4_1">q4_1</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Cache Type V</label>
-                        <select id="server-cache-v" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm text-gray-200">
-                            <option value="q8_0">q8_0</option>
-                            <option value="f16">f16</option>
-                            <option value="q4_0">q4_0</option>
-                            <option value="q4_1">q4_1</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="border border-gray-700/50 rounded-lg overflow-hidden">
-                    <button id="btn-advanced-toggle" type="button" class="w-full flex justify-between items-center px-3 py-2 bg-gray-800/50 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
-                        <span>Advanced (MTP / Logging)</span>
-                        <span id="advanced-icon" class="text-[9px] transition-transform">&#9654;</span>
-                    </button>
-                    <div id="advanced-panel" class="hidden p-3 space-y-3 bg-gray-800/20 border-t border-gray-700/50">
-                        <div class="space-y-2">
-                            <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
-                                <input type="checkbox" id="mtp-toggle" class="accent-indigo-500 rounded">
-                                Enable MTP (Speculative Draft) <span class="text-indigo-400 cursor-help" title="Uses the model's built-in MTP head for speculative decoding (--spec-type draft-mtp). Forces -np 1.">?</span>
-                            </label>
-                            <div id="mtp-draft-n-row" class="hidden pl-6">
-                                <label class="block text-[10px] text-gray-400 mb-1">Draft N Max</label>
-                                <input type="number" id="mtp-draft-n" value="2" min="1" max="6" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
-                            </div>
-                        </div>
-                        <div class="pt-2 border-t border-gray-700/40">
-                            <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
-                                <input type="checkbox" id="reasoning-preserve-toggle" class="accent-indigo-500 rounded">
-                                Reasoning Preserve <span class="text-indigo-400 cursor-help" title="Retains reasoning/thinking context from prior turns instead of stripping it (--reasoning-preserve)">?</span>
-                            </label>
-                        </div>
-                        <div class="pt-2 border-t border-gray-700/40">
-                            <label class="block text-[10px] text-gray-400 mb-1">Verbosity (-lv)</label>
-                            <input type="number" id="server-verbosity" value="0" min="0" max="5" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
-                        </div>
-                        <!-- Item 6: Raw extra args + saved configs -->
-                        <div class="pt-2 border-t border-gray-700/40 space-y-2">
-                            <div class="flex justify-between items-center">
-                                <label class="block text-[10px] text-gray-400">Extra llama-server args <span class="text-indigo-400 cursor-help" title="Raw arguments appended verbatim (space-separated). -m paths are auto-mapped.">?</span></label>
-                                <div class="flex gap-1">
-                                    <button type="button" id="btn-save-config" class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Save</button>
-                                    <button type="button" id="btn-load-configs" class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Load</button>
-                                </div>
-                            </div>
-                            <textarea id="extra-args" rows="2" placeholder="e.g. --ctx-cache-type k8 --flash-attn-offload" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] font-mono text-gray-200 resize-y"></textarea>
-                            <div id="saved-configs-list" class="hidden flex flex-wrap gap-1 max-h-20 overflow-y-auto"></div>
-                        </div>
-                    </div>
-                </div>
-
+                <!-- Launch Mode sits directly under the model selector: picking a
+                     model or switching launch mode auto-snaps every field below
+                     (and the raw command box) to the last config you ran with that
+                     exact combo, sourced from the CSV (see snapToLastUsedConfig()
+                     in script.js and config_json in server4.js). -->
                 <div class="p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg space-y-3">
                     <div class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
                         <label class="shrink-0">Launch Mode</label>
@@ -254,9 +187,167 @@
                         <input type="range" id="server-tensor-split" min="0" max="100" value="50" class="w-full accent-indigo-500 cursor-pointer">
                     </div>
                 </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Context</label>
+                        <input type="number" id="server-ctx" value="110000" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">GPU Layers</label>
+                        <input type="number" id="server-ngl" value="999" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 mb-2">
+                    <div>
+                        <label class="flex items-center gap-2 text-xs font-semibold text-gray-200 mt-5" title="Accelerates processing and reduces VRAM usage for long contexts (Requires Ampere+ GPU)">
+                            <input type="checkbox" id="server-fa" checked class="accent-indigo-500 rounded">
+                            Flash Attention <span class="text-indigo-400 cursor-help" title="Accelerates processing and reduces VRAM usage for long contexts (Requires Ampere+ GPU)">?</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Cache Type K</label>
+                        <select id="server-cache-k" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm text-gray-200">
+                            <option value="q8_0">q8_0</option>
+                            <option value="f16">f16</option>
+                            <option value="q4_0">q4_0</option>
+                            <option value="q4_1">q4_1</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Cache Type V</label>
+                        <select id="server-cache-v" class="w-full bg-gray-800 border border-gray-700 rounded-md px-2 py-1 text-sm text-gray-200">
+                            <option value="q8_0">q8_0</option>
+                            <option value="f16">f16</option>
+                            <option value="q4_0">q4_0</option>
+                            <option value="q4_1">q4_1</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="space-y-2 pt-1">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
+                        <input type="checkbox" id="mtp-toggle" class="accent-indigo-500 rounded">
+                        Enable MTP (Speculative Draft) <span class="text-indigo-400 cursor-help" title="Uses the model's built-in MTP head for speculative decoding (--spec-type draft-mtp). Forces -np 1.">?</span>
+                    </label>
+                    <div id="mtp-draft-n-row" class="hidden pl-6">
+                        <label class="block text-[10px] text-gray-400 mb-1">Draft N Max</label>
+                        <input type="number" id="mtp-draft-n" value="2" min="1" max="6" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    </div>
+                </div>
+                <div class="pt-2 border-t border-gray-700/40">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
+                        <input type="checkbox" id="reasoning-preserve-toggle" class="accent-indigo-500 rounded">
+                        Reasoning Preserve <span class="text-indigo-400 cursor-help" title="Retains reasoning/thinking context from prior turns instead of stripping it (--reasoning-preserve)">?</span>
+                    </label>
+                </div>
+                <div class="pt-2 border-t border-gray-700/40 space-y-2">
+                    <label class="block text-[10px] text-gray-400 font-semibold">Sampling</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Temp <span class="text-indigo-400 cursor-help" title="--temp N -- temperature (default: 0.80). Lower = more deterministic, higher = more random.">?</span></label>
+                            <input type="number" id="server-temp" value="0.80" min="0" step="0.05" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Top-K <span class="text-indigo-400 cursor-help" title="--top-k N -- top-k sampling (default: 40, 0 = disabled). Restricts sampling to the N most likely tokens.">?</span></label>
+                            <input type="number" id="server-top-k" value="40" step="1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Top-P <span class="text-indigo-400 cursor-help" title="--top-p N -- top-p sampling (default: 0.95, 1.0 = disabled). Restricts sampling to the smallest set of tokens whose cumulative probability exceeds N.">?</span></label>
+                            <input type="number" id="server-top-p" value="0.95" min="0" max="1" step="0.01" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Min-P <span class="text-indigo-400 cursor-help" title="--min-p N -- min-p sampling (default: 0.05, 0.0 = disabled). Discards tokens less likely than N times the most likely token.">?</span></label>
+                            <input type="number" id="server-min-p" value="0.05" min="0" max="1" step="0.01" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Presence Penalty <span class="text-indigo-400 cursor-help" title="--presence-penalty N -- repeat alpha presence penalty (default: 0.00, 0.0 = disabled). Flat penalty applied to any token that has appeared at all so far.">?</span></label>
+                            <input type="number" id="server-presence-penalty" value="0.00" step="0.05" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Repeat Penalty <span class="text-indigo-400 cursor-help" title="--repeat-penalty N -- penalize repeat sequence of tokens (default: 1.00, 1.0 = disabled). Scales down the probability of tokens already seen recently.">?</span></label>
+                            <input type="number" id="server-repeat-penalty" value="1.00" min="0" step="0.05" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        </div>
+                    </div>
+                </div>
+                <div class="pt-2 border-t border-gray-700/40">
+                    <label class="block text-[10px] text-gray-400 mb-1">N CPU MoE Layers <span class="text-indigo-400 cursor-help" title="-ncmoe/--n-cpu-moe N -- keep the Mixture of Experts (MoE) weights of the first N layers in the CPU. Only relevant for MoE models; frees VRAM at the cost of CPU-offloaded expert compute. Leave blank to omit the flag entirely.">?</span></label>
+                    <input type="number" id="server-n-cpu-moe" placeholder="none" min="0" step="1" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                </div>
+                <div class="pt-2 border-t border-gray-700/40 space-y-2">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
+                        <input type="checkbox" id="jinja-toggle" class="accent-indigo-500 rounded">
+                        Jinja Template Engine <span class="text-indigo-400 cursor-help" title="--jinja -- whether to use the jinja template engine for chat (default: disabled). Required to use a custom chat template file below, unless it's one of llama.cpp's built-in templates.">?</span>
+                    </label>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Chat Template File <span class="text-indigo-400 cursor-help" title="--chat-template-file PATH -- set a custom jinja chat template file (default: template taken from the model's own metadata). Enable Jinja above unless this is one of llama.cpp's built-in template names.">?</span></label>
+                        <input type="text" id="server-chat-template-file" placeholder="/path/to/template.jinja" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[11px] font-mono">
+                    </div>
+                </div>
+                <div class="pt-2 border-t border-gray-700/40">
+                    <label class="block text-[10px] text-gray-400 mb-1">Load Mode <span class="text-indigo-400 cursor-help" title="-lm/--load-mode MODE (default: mmap). none: no special loading mode. mmap: memory-map the model file. mlock: force the model to stay resident in RAM, never swapped/compressed. mmap+mlock: both. dio: use DirectIO if available.">?</span></label>
+                    <select id="server-load-mode" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        <option value="">Default (mmap)</option>
+                        <option value="none">none</option>
+                        <option value="mmap">mmap</option>
+                        <option value="mlock">mlock</option>
+                        <option value="mmap+mlock">mmap+mlock</option>
+                        <option value="dio">dio (DirectIO)</option>
+                    </select>
+                </div>
+                <div class="pt-2 border-t border-gray-700/40">
+                    <label class="block text-[10px] text-gray-400 mb-1">Verbosity (-lv) <span class="text-indigo-400 cursor-help" title="-lv/--verbosity N -- log verbosity threshold. 3=info (default), 4=trace, 5=debug -- each shows everything the level below it does, plus more detail. Floor is 3: this dashboard's status detection (model loaded/ready) and telemetry capture (Monitor Mode, per-request CSV logging) both parse llama-server's INFO-level log lines, which llama-server itself suppresses below verbosity 3 -- going lower silently breaks the dashboard, not just quiets it.">?</span></label>
+                    <select id="server-verbosity" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                        <option value="3">3 (info)</option>
+                        <option value="4">4 (trace)</option>
+                        <option value="5">5 (debug)</option>
+                    </select>
+                </div>
+
+                <div class="border border-gray-700/50 rounded-lg overflow-hidden">
+                    <button id="btn-advanced-toggle" type="button" class="w-full flex justify-between items-center px-3 py-2 bg-gray-800/50 hover:bg-gray-800 text-xs font-semibold text-gray-300 transition-colors">
+                        <span>Advanced (Extra Args / Launch Command)</span>
+                        <span id="advanced-icon" class="text-[9px] transition-transform">&#9660;</span>
+                    </button>
+                    <div id="advanced-panel" class="p-3 space-y-3 bg-gray-800/20 border-t border-gray-700/50">
+                        <div class="space-y-2">
+                            <div class="flex justify-between items-center">
+                                <label class="block text-[10px] text-gray-400">Extra llama-server args <span class="text-indigo-400 cursor-help" title="Raw arguments appended verbatim (space-separated). -m paths are auto-mapped. Anything the GUI above doesn't expose goes here -- it's the only free-text field that actually persists across profile loads and reboots.">?</span></label>
+                                <button type="button" id="btn-flag-reference" class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Flags</button>
+                            </div>
+                            <textarea id="extra-args" rows="2" placeholder="e.g. --ctx-cache-type k8 --flash-attn-offload" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] font-mono text-gray-200 resize-y"></textarea>
+                        </div>
+                        <!-- Raw launch command: READ-ONLY preview of the literal command
+                             that will be spawned (see server4.js /api/start's rawCommand
+                             branch -- it sends this box's text verbatim, so it's always
+                             exactly what runs). Auto-regenerated from every field in this
+                             panel, including Extra llama-server args above. It used to be
+                             directly hand-editable, but any flag typed only into this box
+                             (e.g. a custom jinja chat-template path) had nowhere to persist
+                             and got silently wiped the next time anything regenerated it
+                             (a GUI field change, a saved-profile load, ...). Anything the
+                             GUI doesn't expose now belongs in Extra llama-server args above,
+                             which IS a real persisted field the box always incorporates. -->
+                        <div class="space-y-1 pt-2 border-t border-gray-700/40">
+                            <div class="flex justify-between items-center">
+                                <label class="block text-[10px] text-gray-400">Launch Command <span class="text-indigo-400 cursor-help" title="Read-only preview of the literal command that will run, auto-regenerated from every field in this panel (including Extra llama-server args above). To add a flag the GUI doesn't expose, use Extra llama-server args above, not this box.">?</span></label>
+                                <span id="raw-command-status" class="text-[9px] text-gray-600"></span>
+                            </div>
+                            <textarea id="raw-launch-command" rows="4" spellcheck="false" readonly class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1.5 text-[10px] font-mono text-gray-400 resize-y leading-snug cursor-text"></textarea>
+                        </div>
+                    </div>
+                </div>
                 <div class="flex flex-col gap-2">
+                    <!-- Saves the ENTIRE current setup (model, launch mode, devices, every
+                         field, the raw command box) as a named profile -- loading happens
+                         from the dropdown at the top of this panel. -->
+                    <button type="button" id="btn-save-config" class="w-full px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-md text-xs text-gray-300">Save Profile <span class="text-indigo-400 cursor-help" title="Saves this entire setup (model, launch mode, devices, all fields, the launch command) as a named profile, loadable from the dropdown at the top.">?</span></button>
                     <div class="flex gap-2">
-                        <button id="btn-start-server" class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors">Boot Cluster</button>
+                        <button id="btn-start-server" class="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md text-sm font-medium transition-colors">Load Model</button>
                     </div>
                     <div id="boot-timer" class="text-[10px] text-gray-500 text-center font-mono hidden mt-1">Boot Time: 0.0s</div>
                     <!-- Item 15c: Historical stats summary — populated from /api/logs/summary -->
@@ -311,6 +402,92 @@
     </aside>
 
     <main class="flex-1 flex flex-col min-w-0 bg-gray-950 relative">
+        <!-- Interactive (this dashboard's own chat) vs Monitor (this browser
+             session only, live) vs History (every request ever logged, from
+             CSV) -- all three are client-agnostic: they show requests from
+             this dashboard's chat, opencode, Cline, curl, anything that hits
+             llama-server. See server4.js logCompletedRequest() for the
+             capture side. -->
+        <div class="flex border-b border-gray-800 bg-gray-900/50 shrink-0">
+            <button type="button" id="tab-interactive" class="px-4 py-2 text-xs font-semibold text-indigo-400 border-b-2 border-indigo-500">Interactive</button>
+            <button type="button" id="tab-monitor" class="px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300">Monitor</button>
+            <button type="button" id="tab-history" class="px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300">History</button>
+        </div>
+
+        <!-- Monitor: THIS SESSION ONLY (nothing backfilled from CSV -- only
+             completions that have arrived over the live COMPLETION SSE
+             stream since this page was loaded). Leads with a continuously-
+             updating omni graph (GPU + prefill/gen tps), independent of any
+             single request, fed every telemetry poll tick regardless of which
+             tab is active. -->
+        <div id="monitor-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" id="session-omni-card" title="Click to expand and see all session activity since page load">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Session Activity <span class="text-gray-600 normal-case font-normal">(last 2 min -- click to expand full session)</span></h3>
+                </div>
+                <div class="h-48"><canvas id="sessionOmniChart"></canvas></div>
+            </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Tokens/sec — this session</h3>
+                </div>
+                <div class="h-64"><canvas id="monitorTpsChart"></canvas></div>
+            </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider p-4 pb-2">Requests This Session</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs">
+                        <thead>
+                            <tr class="text-gray-500 border-b border-gray-800">
+                                <th class="text-left font-medium px-4 py-2">Time</th>
+                                <th class="text-left font-medium px-4 py-2">Model</th>
+                                <th class="text-right font-medium px-4 py-2">Prompt tok</th>
+                                <th class="text-right font-medium px-4 py-2">Prompt t/s</th>
+                                <th class="text-right font-medium px-4 py-2">Gen tok</th>
+                                <th class="text-right font-medium px-4 py-2">Gen t/s</th>
+                                <th class="text-right font-medium px-4 py-2">Wall (s)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="monitor-requests-body" class="text-gray-300"></tbody>
+                    </table>
+                    <div id="monitor-requests-empty" class="hidden text-center text-gray-600 text-sm py-8">No requests yet this session.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- History: every request ever logged, backfilled from the CSV --
+             what "Monitor" used to be before it split into session-only +
+             all-time. -->
+        <div id="history-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Tokens/sec — every completed request</h3>
+                    <span id="history-chart-status" class="text-[10px] text-gray-600"></span>
+                </div>
+                <div class="h-64"><canvas id="historyTpsChart"></canvas></div>
+            </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+                <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider p-4 pb-2">Recent Requests</h3>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs">
+                        <thead>
+                            <tr class="text-gray-500 border-b border-gray-800">
+                                <th class="text-left font-medium px-4 py-2">Time</th>
+                                <th class="text-left font-medium px-4 py-2">Model</th>
+                                <th class="text-right font-medium px-4 py-2">Prompt tok</th>
+                                <th class="text-right font-medium px-4 py-2">Prompt t/s</th>
+                                <th class="text-right font-medium px-4 py-2">Gen tok</th>
+                                <th class="text-right font-medium px-4 py-2">Gen t/s</th>
+                                <th class="text-right font-medium px-4 py-2">Wall (s)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="history-requests-body" class="text-gray-300"></tbody>
+                    </table>
+                    <div id="history-requests-empty" class="hidden text-center text-gray-600 text-sm py-8">No requests logged yet.</div>
+                </div>
+            </div>
+        </div>
+
         <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
             <!-- Boot Animation Overlay -->
             <div id="boot-overlay" class="hidden flex-col items-center justify-center h-full text-center">
@@ -351,7 +528,7 @@
             </div>
         </div>
 
-        <div class="bg-gray-900 border-t border-gray-800 p-4">
+        <div id="chat-input-bar" class="bg-gray-900 border-t border-gray-800 p-4">
             <div class="relative flex flex-col gap-2">
                 <div class="flex justify-between items-center px-1">
                     <span class="text-xs text-gray-500">System Prompt:</span>
@@ -446,7 +623,7 @@
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50 space-y-3">
             <div>
                 <div class="flex justify-between text-xs mb-1">
-                    <span class="text-gray-300">Master VRAM <span class="text-gray-500 cursor-help ml-1" title="Weights vs Context Cache vs Background">?</span></span>
+                    <span class="text-gray-300"><span class="node-a-label">Master</span> VRAM <span class="text-gray-500 cursor-help ml-1" title="Weights vs Context Cache vs Background">?</span></span>
                     <span id="master-vram-text" class="text-gray-400 font-mono">-- MB</span>
                 </div>
                 <div class="w-full bg-gray-900 rounded-full h-2 flex overflow-hidden">
@@ -511,7 +688,7 @@
                 <div class="flex flex-col items-start gap-1">
                     <span class="text-xs text-gray-300">GPU Temp <span class="text-gray-500 cursor-help ml-1" title="Temperature of the Master and Worker GPUs">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> <span class="node-a-label">Master</span> <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                     <div id="throttle-badges" class="flex flex-wrap gap-1 mt-1 min-h-[1.25rem]"></div>
@@ -526,7 +703,7 @@
                 <div class="flex flex-col items-start gap-1">
                     <span class="text-xs text-gray-300">GPU Power <span class="text-gray-500 cursor-help ml-1" title="Power Draw of the Master and Worker GPUs in Watts">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> <span class="node-a-label">Master</span> <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                     <div id="throttle-badges-pwr" class="flex flex-wrap gap-1 mt-1 min-h-[1.25rem]"></div>
@@ -541,7 +718,7 @@
                 <div class="flex flex-col items-start gap-1">
                     <span class="text-xs text-gray-300">GPU Util <span class="text-gray-500 cursor-help ml-1" title="GPU Core Utilization">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> <span class="node-a-label">Master</span> <span class="master-gpu-model text-gray-500 truncate min-w-0"></span></span>
                         <span class="flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-gpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
@@ -555,7 +732,7 @@
                 <div class="flex flex-col items-start gap-1">
                     <span class="text-xs text-gray-300">CPU Util <span class="text-gray-500 cursor-help ml-1" title="CPU Utilization of Master and Worker">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> <span class="node-a-label">Master</span> <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
                         <span class="node-b-cpu-row flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
@@ -569,7 +746,7 @@
                 <div class="flex flex-col items-start gap-1">
                     <span class="text-xs text-gray-300">CPU Temp <span class="text-gray-500 cursor-help ml-1" title="CPU Temperature">?</span></span>
                     <div class="flex flex-col gap-1 text-[9px] text-gray-400">
-                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> Master <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
+                        <span class="flex items-center gap-1"><div class="w-2 h-2 border border-yellow-400 shrink-0"></div> <span class="node-a-label">Master</span> <span class="master-cpu-model text-gray-500 truncate min-w-0"></span></span>
                         <span class="node-b-cpu-row flex items-center gap-1"><div class="w-2 h-2 border border-red-400 shrink-0"></div> <span class="node-b-label">Worker</span> <span class="worker-cpu-model text-gray-500 truncate min-w-0"></span></span>
                     </div>
                 </div>
@@ -582,11 +759,32 @@
     <div id="expand-modal" class="fixed inset-0 bg-black/95 hidden flex-col z-50 p-6">
         <div class="flex justify-between items-center mb-4">
             <h2 id="expand-modal-title" class="text-lg font-bold text-white">Expanded Chart</h2>
-            <button onclick="document.getElementById('expand-modal').classList.add('hidden'); document.getElementById('expand-modal').classList.remove('flex'); expandedChartInst?.destroy(); expandedChartInst = null;" class="text-gray-400 hover:text-white">✕ Close</button>
+            <button onclick="closeExpandModal()" class="text-gray-400 hover:text-white">✕ Close</button>
         </div>
-        <div class="flex-1 bg-gray-900 border border-gray-700 rounded-xl relative w-full h-full p-4">
+        <!-- Height capped at 50% of width (aspect-ratio 2/1), not the full modal
+             height -- a full-viewport-tall chart is unreadable. max-height keeps
+             it from overflowing on a narrow/tall window where width/2 would still
+             be too much. -->
+        <div class="flex-1 flex items-start justify-center overflow-auto">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl relative w-full p-4" style="aspect-ratio: 2 / 1; max-height: 100%;">
             <canvas id="expandedChartCanvas"></canvas>
         </div>
+        </div>
+    </div>
+
+    <!-- Flag reference: searchable browse-and-insert list parsed from
+         `llama-server --help` (see server4.js GET /api/flags). Click a flag
+         to insert it into the raw launch command box at the cursor -- the box
+         stays the single source of truth, this is purely a discoverability aid. -->
+    <div id="flag-reference-modal" class="fixed inset-0 bg-black/80 hidden flex-col z-50 p-6">
+        <div class="flex justify-between items-center mb-3">
+            <h2 class="text-lg font-bold text-white">llama-server Flag Reference</h2>
+            <button id="btn-flag-reference-close" class="text-gray-400 hover:text-white">✕ Close</button>
+        </div>
+        <input type="text" id="flag-reference-search" placeholder="Search flags and descriptions..." autocomplete="off"
+            class="w-full max-w-2xl bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-sm text-gray-200 mb-3">
+        <div id="flag-reference-status" class="text-xs text-gray-500 mb-2"></div>
+        <div id="flag-reference-list" class="flex-1 overflow-y-auto max-w-3xl space-y-1 pr-2"></div>
     </div>
 
     <div id="csv-modal" class="fixed inset-0 bg-black/90 hidden flex-col z-50 p-6">

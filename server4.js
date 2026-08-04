@@ -170,6 +170,56 @@ async function cleanupPort(port) {
 // for a directly-spawned local process. `deviceArgs` is the mode-specific device/split
 // selection (--rpc+--split-mode for Docker RPC, or -dev+--split-mode for local Vulkan),
 // injected at the same position the old RPC-only block used to occupy.
+// --- FLAG REFERENCE (searchable popover in the UI) ---
+// Parses `llama-server --help`'s output into {flags, description, section,
+// insertText, primaryFlag} entries. Description text is column-aligned at a
+// fixed indent (verified against real output: 40 chars) rather than "first
+// big gap after the flag names", which breaks on short/long alias pairs like
+// "-c,    --ctx-size N" (the gap between "-c," and "--ctx-size" would
+// otherwise look like the flags/description boundary). A flag-name group that
+// overflows past that column with no room for a trailing padding gap (e.g.
+// "--prefill-assistant, --no-prefill-assistant") has no description on its
+// own line -- the actual description is the following indented line(s),
+// handled by the continuation-line branch below.
+const HELP_DESC_COLUMN = 40;
+let cachedFlagReference = null; // help text is static per binary; no need to re-parse every request
+function parseHelpFlags(helpText) {
+    const lines = helpText.split('\n');
+    const entries = [];
+    let currentSection = 'general';
+    for (const rawLine of lines) {
+        const line = rawLine.replace(/\r$/, '');
+        if (/^-{3,}.*-{3,}$/.test(line.trim())) {
+            currentSection = line.trim().replace(/^-+\s*/, '').replace(/\s*-+$/, '');
+            continue;
+        }
+        if (!line.trim()) continue;
+        if (!/^\s/.test(line)) {
+            const candidateFlagPart = line.slice(0, HELP_DESC_COLUMN);
+            let flagPart, descPart;
+            if (candidateFlagPart.trimEnd().length < HELP_DESC_COLUMN) {
+                flagPart = candidateFlagPart.trim();
+                descPart = line.slice(HELP_DESC_COLUMN).trim();
+            } else {
+                flagPart = line.trim();
+                descPart = '';
+            }
+            entries.push({ flags: flagPart, description: descPart, section: currentSection });
+        } else if (entries.length > 0) {
+            const last = entries[entries.length - 1];
+            last.description = (last.description ? last.description + ' ' : '') + line.trim();
+        }
+    }
+    for (const e of entries) {
+        const flagTokens = e.flags.match(/--?[\w-]+/g) || [];
+        const longForm = [...flagTokens].reverse().find(t => t.startsWith('--')) || flagTokens[flagTokens.length - 1] || '';
+        const withoutFlags = e.flags.replace(/^(-{1,2}[\w-]+,?\s*)+/, '').trim();
+        e.insertText = withoutFlags ? `${longForm} ` : longForm;
+        e.primaryFlag = longForm;
+    }
+    return entries;
+}
+
 function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
     const args = ['-m', mapModelPath(config.modelPath),
         '-c', config.ctx.toString(), '-ngl', config.ngl.toString(),
@@ -192,6 +242,20 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
     if (config.reasoningPreserve) {
         args.push('--reasoning-preserve');
     }
+    if (config.temp != null && !Number.isNaN(config.temp)) args.push('--temp', config.temp.toString());
+    if (config.topK != null && !Number.isNaN(config.topK)) args.push('--top-k', config.topK.toString());
+    if (config.topP != null && !Number.isNaN(config.topP)) args.push('--top-p', config.topP.toString());
+    if (config.minP != null && !Number.isNaN(config.minP)) args.push('--min-p', config.minP.toString());
+    if (config.presencePenalty != null && !Number.isNaN(config.presencePenalty)) args.push('--presence-penalty', config.presencePenalty.toString());
+    if (config.repeatPenalty != null && !Number.isNaN(config.repeatPenalty)) args.push('--repeat-penalty', config.repeatPenalty.toString());
+    if (config.nCpuMoe != null && !Number.isNaN(config.nCpuMoe)) args.push('--n-cpu-moe', config.nCpuMoe.toString());
+    // --jinja must precede --chat-template-file -- llama.cpp only accepts a
+    // custom (non-built-in) template file when --jinja was already set by the
+    // time it processes this flag (see arg.cpp's --chat-template-file help text).
+    if (config.jinja) args.push('--jinja');
+    if (config.chatTemplateFile) args.push('--chat-template-file', config.chatTemplateFile);
+    if (config.loadMode) args.push('-lm', config.loadMode);
+    if (config.verbosity != null && !Number.isNaN(config.verbosity)) args.push('-lv', config.verbosity.toString());
     // Item 6: pass-through raw arg string (takes priority when provided)
     if (config.argString && config.argString.trim().length > 0) {
         const rawTokens = config.argString.trim().split(/\s+/);
@@ -205,6 +269,75 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
         }
     }
     return args;
+}
+
+// --- LAUNCH COMMAND RESOLUTION (structured config -> command + args) ---
+// Mode-specific base command/device-selection logic, shared by /api/preview-command
+// (which only needs the resolved command/args to show the user, never spawns
+// anything) and /api/start's fallback path (used when the raw-command box is
+// empty). This is the "convenience generator" for the box's starting content --
+// once a user has edited the box, THIS function is no longer consulted for that
+// launch; see the rawCommand branch in /api/start.
+function resolveLaunchCommand(config, launchMode) {
+    let command, baseArgs, mapModelPath, deviceArgs;
+
+    if (launchMode === 'local-multi-gpu') {
+        command = getLlamaServerBinary();
+        baseArgs = [];
+        mapModelPath = (p) => p; // raw host path, no container mount to remap into
+        deviceArgs = [];
+        if (config.deviceA && config.deviceB) {
+            deviceArgs.push('--split-mode', 'layer', '-dev', `${config.deviceA},${config.deviceB}`);
+            if (config.tensorSplit && config.tensorSplit < 100) {
+                deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
+            }
+        }
+    } else {
+        command = 'docker';
+        baseArgs = ['compose', '-f', 'docker-compose.master.yml', 'run', '--rm', '--service-ports', 'master-node', '/app/llama-server'];
+        mapModelPath = toContainerPath;
+        deviceArgs = [];
+        if (config.rpcTarget) {
+            deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`, '--split-mode', 'layer');
+            if (config.tensorSplit && config.tensorSplit < 100) {
+                deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
+            }
+        }
+    }
+
+    const args = [...baseArgs, ...buildLlamaArgs(config, { mapModelPath, deviceArgs })];
+    return { command, args };
+}
+
+// Shell-quote args containing whitespace so the displayed/broadcast command is
+// copy-pasteable and unambiguous about argument boundaries.
+function formatCommand(command, args) {
+    return command + ' ' + args.map(a => /\s/.test(a) ? JSON.stringify(a) : a).join(' ');
+}
+
+// Minimal shell-lite tokenizer for the raw-command box: splits on whitespace,
+// respecting single/double-quoted spans (no escape-sequence support -- good
+// enough for llama-server flags and JSON args like --chat-template-kwargs
+// '{"preserve_thinking": true}', which is the actual case this needs to handle).
+function tokenizeCommand(str) {
+    const tokens = [];
+    let current = '';
+    let quoteChar = null;
+    for (let i = 0; i < str.length; i++) {
+        const c = str[i];
+        if (quoteChar) {
+            if (c === quoteChar) quoteChar = null;
+            else current += c;
+        } else if (c === '"' || c === "'") {
+            quoteChar = c;
+        } else if (/\s/.test(c)) {
+            if (current.length > 0) { tokens.push(current); current = ''; }
+        } else {
+            current += c;
+        }
+    }
+    if (current.length > 0) tokens.push(current);
+    return tokens;
 }
 
 // --- SHARED PROCESS SPAWN + LIFECYCLE ---
@@ -255,6 +388,14 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 }
                 broadcastState();
             }
+            else if (line.includes('launch_slot_:') && line.includes('processing task')) {
+                // Unconditional per-request start signal -- unlike the progress
+                // lines below (llama.cpp only prints those once n_decoded >= 100
+                // or t_prompt_processing >= 3000ms internally), this always fires,
+                // so it's the only reliable way to start Monitor Mode's telemetry
+                // sampling for short/fast requests that never cross those thresholds.
+                markRequestActivity();
+            }
             else if (line.includes('prompt processing, n_tokens =')) {
                 const nTokensMatch = line.match(/n_tokens =\s*(\d+)/);
                 const progressMatch = line.match(/progress = (0\.\d+|1\.00)/);
@@ -263,6 +404,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                     const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
                     const tps = tpsMatch ? tpsMatch[1] : '0';
                     broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
+                    markRequestActivity();
                 }
             }
             else if (line.includes('print_timing:')) {
@@ -270,6 +412,40 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
                 if (nDecodedMatch && tpsMatch) {
                     broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
+                    markRequestActivity();
+                }
+
+                // Per-request completion summary (Monitor Mode / Item 12): three
+                // lines per request, tagged by task id, arriving in this order --
+                // "prompt eval time", "eval time", "total time" (the last of which
+                // triggers the actual log+broadcast). The segment after the LAST
+                // '|' distinguishes them; "prompt eval time" would otherwise also
+                // match a plain /eval time/ substring check.
+                const idTaskMatch = line.match(/id\s+(\d+)\s*\|\s*task\s+(\d+)/);
+                if (idTaskMatch) {
+                    const taskId = idTaskMatch[2];
+                    const segments = line.split('|');
+                    const lastSegment = segments[segments.length - 1].trim();
+                    if (lastSegment.startsWith('prompt eval time')) {
+                        const m = lastSegment.match(/=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens[^)]*?([\d.]+)\s*tokens per second/);
+                        if (m) {
+                            const existing = taskTimingsByTaskId.get(taskId) || {};
+                            taskTimingsByTaskId.set(taskId, { ...existing, promptMs: parseFloat(m[1]), promptTokens: parseInt(m[2], 10), promptTps: parseFloat(m[3]) });
+                        }
+                    } else if (lastSegment.startsWith('eval time')) {
+                        const m = lastSegment.match(/=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens[^)]*?([\d.]+)\s*tokens per second/);
+                        if (m) {
+                            const existing = taskTimingsByTaskId.get(taskId) || {};
+                            taskTimingsByTaskId.set(taskId, { ...existing, genMs: parseFloat(m[1]), genTokens: parseInt(m[2], 10), genTps: parseFloat(m[3]) });
+                        }
+                    } else if (lastSegment.startsWith('total time')) {
+                        const m = lastSegment.match(/=\s*([\d.]+)\s*ms/);
+                        const timing = taskTimingsByTaskId.get(taskId) || {};
+                        taskTimingsByTaskId.delete(taskId);
+                        if (m) {
+                            logCompletedRequest({ ...timing, wallTimeS: (parseFloat(m[1]) / 1000).toFixed(2) }).catch(() => { });
+                        }
+                    }
                 }
             }
             else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
@@ -319,7 +495,12 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
 // Schema v2 (Item #24): Removed Category, Metric, Quant (never populated by client).
 // Added run_id (auto-generated), model_name (short), prompt_tokens, arg_string.
 // All string fields are quoted in output to handle commas in paths/args.
-const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time\n";
+// Schema v4: added config_json (col 32) -- the full structured launch config
+// (buildConfigFromUI() shape + rawCommand) that actually booted the server for
+// this row, as JSON. Lets a later model-select/launch-mode change look up
+// "what did I run last time for this exact combo" and restore it exactly,
+// rather than reconstructing a guess from the scattered individual columns.
+const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json\n";
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
 
@@ -338,6 +519,295 @@ function csvQuote(val) {
         return '"' + s.replace(/"/g, '""') + '"';
     }
     return s;
+}
+
+// Minimal CSV parser that respects double-quoted fields with embedded commas
+// -- shared by /api/logs/summary and /api/logs/recent.
+function splitCsvLine(line) {
+    const cols = [];
+    let i = 0;
+    while (i < line.length) {
+        if (line[i] === '"') {
+            // Quoted field: find closing quote (escaped quotes are "")
+            let end = line.indexOf('"', i + 1);
+            let field = '';
+            while (end < line.length && line[end + 1] === '"') {
+                field += line.slice(i + 1, end).replace(/""/g, '"');
+                i = end + 2;
+                end = line.indexOf('"', i + 1);
+            }
+            field += line.slice(i + 1, end);
+            cols.push(field);
+            i = end + 2; // skip closing quote
+            if (line[i] === ',') i++; // skip comma
+        } else {
+            // Unquoted field
+            const comma = line.indexOf(',', i);
+            if (comma === -1) { cols.push(line.slice(i)); break; }
+            else { cols.push(line.slice(i, comma)); i = comma + 1; }
+        }
+    }
+    return cols;
+}
+
+// Shared by the /api/log HTTP route and logCompletedRequest() (server-side,
+// client-agnostic completion capture -- see that function). `data` uses the
+// same key names the old frontend-only /api/log payload used, so both
+// callers can share this without a translation layer.
+async function appendBenchmarkRow(data) {
+    await fs.mkdir(LOGS_DIR, { recursive: true }); // self-healing: ensure dir exists even if lost mid-run
+    const timestamp = new Date().toISOString();
+    const runId = generateRunId();
+    const modelPath = data.model || '';
+    const modelName = modelPath.split('/').pop();
+    // Nullish coalescing (??), not ||, for every numeric field below -- `||`
+    // treats a genuine 0 (idle GPU util, 0% CPU, a card with no throttle,
+    // etc.) as falsy and silently substitutes '', making a real "zero"
+    // reading indistinguishable from "field never populated" in the CSV.
+    const fields = [
+        timestamp,
+        runId,
+        csvQuote(modelName),
+        csvQuote(modelPath),
+        data.ctx ?? '',
+        data.ngl ?? '',
+        data.rpc || '',
+        csvQuote(data.transport || ''),
+        csvQuote(data.argString || ''),
+        csvQuote(data.launchCommand || ''),
+        data.promptTps ?? '',
+        data.genTps ?? '',
+        data.promptLatency ?? '',
+        data.promptTokens ?? '',
+        data.gpuUtil ?? '',
+        data.gpuPwr ?? '',
+        data.masterGpuTemp ?? '',
+        data.cpuUtil ?? '',
+        data.masterCpuTemp ?? '',
+        data.gpuMem ?? '',
+        data.ramUsage ?? '',
+        data.workerGpuUtil ?? '',
+        data.workerGpuPwr ?? '',
+        data.workerGpuTemp ?? '',
+        data.workerCpuTemp ?? '',
+        data.workerVram ?? '',
+        data.workerRam ?? '',
+        data.netThroughput ?? '',
+        data.genTokens ?? '',
+        data.reasonTokens ?? '',
+        data.wallTime ?? '',
+        data.loadTime ?? '',
+        csvQuote(data.configJson || '')
+    ];
+    await fs.appendFile(CSV_FILE, fields.join(',') + '\n');
+    return runId;
+}
+
+// --- CLIENT-AGNOSTIC REQUEST COMPLETION CAPTURE (Monitor Mode) ---
+// llama-server logs a `slot print_timing:` block for EVERY completed request
+// regardless of which client sent it (this dashboard's chat, opencode, Cline,
+// curl, anything hitting the OpenAI-compatible endpoint directly) -- three
+// lines per request: "prompt eval time", "eval time", "total time", each
+// tagged with `id <slot> | task <id>`. Since the server runs multiple slots
+// concurrently (n_slots = 4 by default), several requests' lines can
+// interleave in the stdout stream, so *timing* accumulation is keyed by task
+// id, not a single shared buffer.
+const taskTimingsByTaskId = new Map();
+
+// Per-request telemetry sampling for Monitor Mode's "omni graph" (GPU
+// power/temp/util over the course of a request, not just the final tps
+// summary). Deliberately a SINGLE shared sample buffer, not per-task like the
+// timing map above -- properly isolating samples per concurrent task would
+// mean tagging each monitor.py poll to whichever task(s) were active at that
+// instant, which is real complexity for a case (multiple truly-simultaneous
+// requests from different clients) that's rare in this dashboard's actual
+// usage (one interactive user, occasional external tool calls). Overlapping
+// requests share the same sample series rather than each getting a perfectly
+// isolated one -- an acceptable simplification, not a correctness issue for
+// the timing/CSV data itself (only for how the graph looks under overlap).
+// Activity-timeout heuristic rather than precise increment/decrement pairing:
+// the prefill progress log line doesn't reliably carry a task id the way the
+// print_timing lines do, so there's no clean per-task "this request just
+// started" signal to count against later. Instead, any progress line (prefill
+// or gen) just bumps lastActivityTimestamp; the sampling loop keeps running
+// as long as something was seen recently, and stops itself after a quiet
+// period. Simpler and self-healing (never gets stuck "active" forever from a
+// missed decrement) at the cost of the same overlapping-requests imprecision
+// already noted above.
+let activeRequestSamples = [];
+let lastActivityTimestamp = 0;
+let telemetrySamplingTimer = null;
+const SAMPLE_INTERVAL_MS = 1000;
+const ACTIVITY_TIMEOUT_MS = 3000;
+const MAX_SAMPLES_PER_REQUEST = 300; // ~5 min at 1s/sample; caps memory for a pathologically long request
+
+// Guards against overlapping calls piling up -- fetchCurrentTelemetry can now
+// take up to 10s (see its own comment), but the sampling interval below still
+// ticks every 1s regardless of whether the previous call finished. Without
+// this, a slow monitor.py would accumulate multiple concurrent in-flight
+// requests to it, adding more load to the exact thing that's already slow.
+let telemetrySampleInFlight = false;
+async function takeOneTelemetrySample() {
+    if (telemetrySampleInFlight) return;
+    telemetrySampleInFlight = true;
+    try {
+        const stats = await fetchCurrentTelemetry();
+        if (!stats) return;
+        activeRequestSamples.push({
+            t: Date.now(),
+            masterPwr: stats.master?.gpu_pwr ?? 0, masterTemp: stats.master?.gpu_temp ?? 0,
+            masterGpuUtil: stats.master?.gpu_util ?? 0, masterCpuUtil: stats.master?.cpu_util ?? 0,
+            workerPwr: stats.worker?.gpu_pwr ?? 0, workerTemp: stats.worker?.gpu_temp ?? 0,
+            workerGpuUtil: stats.worker?.gpu_util ?? 0,
+        });
+        if (activeRequestSamples.length > MAX_SAMPLES_PER_REQUEST) activeRequestSamples.shift();
+    } finally {
+        telemetrySampleInFlight = false;
+    }
+}
+
+function markRequestActivity() {
+    lastActivityTimestamp = Date.now();
+    if (!telemetrySamplingTimer) {
+        // Sample immediately rather than waiting for the first interval tick --
+        // short requests (a few hundred ms) can finish before a 1s-spaced tick
+        // ever fires, which previously meant zero samples for the common case.
+        takeOneTelemetrySample();
+        telemetrySamplingTimer = setInterval(async () => {
+            if (Date.now() - lastActivityTimestamp > ACTIVITY_TIMEOUT_MS) {
+                clearInterval(telemetrySamplingTimer);
+                telemetrySamplingTimer = null;
+                return; // leave activeRequestSamples as-is; takeRequestSamples() below reads it
+            }
+            await takeOneTelemetrySample();
+        }, SAMPLE_INTERVAL_MS);
+    }
+}
+
+// Called on a request's "total time" line -- hands back whatever samples have
+// accumulated since the last call and resets for whatever comes next.
+function takeRequestSamples() {
+    const samples = activeRequestSamples;
+    activeRequestSamples = [];
+    return samples;
+}
+
+// Bounded ring buffer of the last N requests' full sample series, keyed by
+// run_id -- lets Monitor Mode's request table show the omni graph for a
+// recently-completed request even if that specific client wasn't connected
+// (missed the COMPLETION broadcast) when it finished. Not persisted to disk;
+// a dashboard restart loses these (the CSV row / summary stats survive fine,
+// just not the per-request sample series).
+const recentRequestSamples = new Map(); // run_id -> samples[]
+const MAX_RECENT_REQUEST_SAMPLES = 30;
+function rememberRequestSamples(runId, samples) {
+    if (!samples || samples.length === 0) return;
+    recentRequestSamples.set(runId, samples);
+    if (recentRequestSamples.size > MAX_RECENT_REQUEST_SAMPLES) {
+        const oldestKey = recentRequestSamples.keys().next().value;
+        recentRequestSamples.delete(oldestKey);
+    }
+}
+
+async function fetchCurrentTelemetry() {
+    try {
+        const body = {};
+        if (isLocalMode()) {
+            body.local_second_gpu = 'amd';
+        } else if (currentLaunchConfig?.rpcTarget) {
+            body.worker_ssh = currentLaunchConfig.rpcTarget;
+        }
+        const res = await fetch('http://localhost:8081/stats', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            // monitor.py shells out to nvidia-smi/amdgpu_top per call, which
+            // can genuinely take several seconds under heavy GPU/CPU load --
+            // confirmed live at 5.5s+ while a model was actively generating.
+            // This used to time out at 3s, meaning every sample attempt
+            // during a real generation silently failed and Monitor's
+            // per-request telemetry graphs were empty for every single
+            // request. 3s was tuned for an idle system, not a busy one.
+            signal: AbortSignal.timeout(10000)
+        });
+        return await res.json();
+    } catch {
+        return null; // best-effort -- a slow/unreachable monitor.py shouldn't block logging
+    }
+}
+
+// Fires once per completed request (on that task's "total time" line). Logs a
+// CSV row and broadcasts a COMPLETION SSE event so any connected client
+// (Monitor Mode) can update live -- independent of whether this dashboard's
+// own chat UI happened to be the one that sent the request.
+async function logCompletedRequest(timing) {
+    try {
+        // Grab this request's sample series (see markRequestActive/takeRequestSamples
+        // above) before anything else -- it's a shared buffer that stops
+        // accumulating once activeRequestCount hits 0, so pull it now.
+        const samples = takeRequestSamples();
+        // Split the sample series into a prefill-phase line and a gen-phase
+        // line using the real, completion-time-computed durations (not a live
+        // per-sample estimate, which we have no way to get server-side --
+        // llama.cpp's own progress lines are rate-limited, see markRequestActivity's
+        // comment). genMs is the actual generation-phase duration, so counting
+        // back from "now" (right after the total-time log line) gives a real
+        // prefill/gen boundary timestamp to split the samples on.
+        if (samples.length > 0 && timing.genMs != null) {
+            const prefillEndTime = Date.now() - timing.genMs;
+            for (const s of samples) {
+                if (s.t < prefillEndTime) {
+                    s.prefillTps = timing.promptTps ?? null;
+                    s.genTps = null;
+                } else {
+                    s.prefillTps = null;
+                    s.genTps = timing.genTps ?? null;
+                }
+            }
+        }
+        const stats = await fetchCurrentTelemetry();
+        const master = stats?.master || {};
+        const worker = stats?.worker || {};
+        const cfg = currentLaunchConfig || {};
+        const local = isLocalMode();
+        const runId = await appendBenchmarkRow({
+            model: cfg.modelPath || '',
+            ctx: cfg.ctx || '',
+            ngl: cfg.ngl || '',
+            rpc: (!local && cfg.rpcTarget) ? 'yes' : 'no',
+            transport: local ? 'Local' : (cfg.transport || ''),
+            argString: cfg.argString || '',
+            launchCommand: currentLaunchCommand,
+            promptTps: timing.promptTps ?? '',
+            genTps: timing.genTps ?? '',
+            promptLatency: timing.promptMs != null ? (timing.promptMs / 1000).toFixed(2) : '',
+            promptTokens: timing.promptTokens ?? '',
+            gpuUtil: master.gpu_util, gpuPwr: master.gpu_pwr, masterGpuTemp: master.gpu_temp,
+            cpuUtil: master.cpu_util, masterCpuTemp: master.cpu_temp,
+            gpuMem: master.vram_used, ramUsage: master.process_ram ?? master.ram_used,
+            workerGpuUtil: worker.gpu_util, workerGpuPwr: worker.gpu_pwr, workerGpuTemp: worker.gpu_temp,
+            workerCpuTemp: worker.cpu_temp, workerVram: worker.vram_used, workerRam: worker.process_ram ?? worker.ram_used,
+            genTokens: timing.genTokens ?? '',
+            wallTime: timing.wallTimeS ?? '',
+            loadTime: finalLoadTime || '',
+            configJson: currentLaunchConfig ? JSON.stringify(currentLaunchConfig) : ''
+            // netThroughput/reasonTokens are frontend-only concepts (a client-side
+            // delta calc, and reasoning-token counting from rendered content) --
+            // left blank here, same as any other row missing optional fields.
+        });
+        rememberRequestSamples(runId, samples);
+        broadcastState(`COMPLETION:${JSON.stringify({
+            runId,
+            timestamp: Date.now(),
+            model: (cfg.modelPath || '').split('/').pop(),
+            promptTps: timing.promptTps, genTps: timing.genTps,
+            promptTokens: timing.promptTokens, genTokens: timing.genTokens,
+            wallTime: timing.wallTimeS,
+            metrics: samples
+        })}`);
+    } catch (err) {
+        console.error('Failed to log completed request:', err);
+    }
 }
 
 async function initLogsDir() {
@@ -440,57 +910,13 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
-        // --- BENCHMARK LOG (Schema v2, Item #24) ---
+        // --- BENCHMARK LOG (manual/external logging; the dashboard's own chat no
+        // longer calls this automatically -- see logCompletedRequest() for the
+        // client-agnostic capture that replaced it, Item 12/Monitor Mode) ---
         else if (req.url === '/api/log' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
-
-            // Self-healing: ensure dir exists even if lost mid-run
-            await fs.mkdir(LOGS_DIR, { recursive: true });
-
-            const timestamp = new Date().toISOString();
-            const runId = generateRunId();
-            // Extract short model name from path
-            const modelPath = body.model || '';
-            const modelName = modelPath.split('/').pop();
-            // Build the row using csvQuote to safely handle commas in paths/args
-            const fields = [
-                timestamp,
-                runId,
-                csvQuote(modelName),
-                csvQuote(modelPath),
-                body.ctx || '',
-                body.ngl || '',
-                body.rpc || '',
-                csvQuote(body.transport || ''),
-                csvQuote(body.argString || ''),
-                csvQuote(body.launchCommand || ''),
-                body.promptTps || '',
-                body.genTps || '',
-                body.promptLatency || '',
-                body.promptTokens || '',
-                body.gpuUtil || '',
-                body.gpuPwr || '',
-                body.masterGpuTemp || '',
-                body.cpuUtil || '',
-                body.masterCpuTemp || '',
-                body.gpuMem || '',
-                body.ramUsage || '',
-                body.workerGpuUtil || '',
-                body.workerGpuPwr || '',
-                body.workerGpuTemp || '',
-                body.workerCpuTemp || '',
-                body.workerVram || '',
-                body.workerRam || '',
-                body.netThroughput || '',
-                body.genTokens || '',
-                body.reasonTokens || '',
-                body.wallTime || '',
-                body.loadTime || ''
-            ];
-            const row = fields.join(',') + '\n';
-
-            await fs.appendFile(CSV_FILE, row);
+            const runId = await appendBenchmarkRow(body);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ success: true, run_id: runId }));
         }
@@ -507,44 +933,93 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // --- PER-REQUEST OMNI GRAPH SAMPLES (Monitor Mode) ---
+        // Backs the "expand" view on a Monitor Mode table row -- returns the
+        // GPU power/temp/util sample series collected while that specific
+        // request was in flight (see markRequestActivity/takeRequestSamples).
+        // Only available for requests still in the in-memory ring buffer
+        // (recentRequestSamples, capped at MAX_RECENT_REQUEST_SAMPLES) -- older
+        // ones simply have no sample data to show, same as CSV rows from
+        // before this feature existed.
+        else if (req.url.startsWith('/api/logs/samples') && req.method === 'GET') {
+            const queryParams = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '');
+            const runId = queryParams.get('runId') || '';
+            const samples = recentRequestSamples.get(runId) || [];
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ samples }));
+        }
+
+        // --- IN-PROGRESS REQUEST SAMPLES (Monitor's live rolling graph) ---
+        // A read-only peek at activeRequestSamples -- NOT takeRequestSamples(),
+        // which would drain the buffer that logCompletedRequest still needs at
+        // completion time. Lets Monitor's "last 2 minutes" graph show something
+        // while a request is still streaming, rather than only ever updating
+        // once a request finishes (which could be minutes away for a long
+        // generation, making the graph look dead despite real activity).
+        else if (req.url === '/api/logs/active-samples' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ samples: activeRequestSamples }));
+        }
+
+        // --- RECENT COMPLETED REQUESTS (Monitor Mode backfill) ---
+        // Structured (not raw CSV text) so the frontend doesn't need its own
+        // CSV parser just to backfill the Monitor Mode chart/table on load --
+        // the live stream after that comes from COMPLETION SSE events (see
+        // logCompletedRequest's broadcastState call).
+        else if (req.url.startsWith('/api/logs/recent') && req.method === 'GET') {
+            try {
+                const queryParams = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '');
+                const limit = Math.max(1, Math.min(parseInt(queryParams.get('limit'), 10) || 50, 500));
+
+                const csv = await fs.readFile(CSV_FILE, 'utf-8');
+                const lines = csv.trim().split('\n').slice(1).filter(l => l.trim());
+                const recentLines = lines.slice(-limit);
+
+                const rows = [];
+                for (const line of recentLines) {
+                    const cols = splitCsvLine(line);
+                    if (cols.length < 32) continue; // only schema v3+ rows have model_name/transport at known offsets
+                    rows.push({
+                        timestamp: cols[0],
+                        runId: cols[1],
+                        model: cols[2],
+                        transport: cols[7],
+                        promptTps: parseFloat(cols[10]) || null,
+                        genTps: parseFloat(cols[11]) || null,
+                        promptTokens: parseInt(cols[13], 10) || null,
+                        genTokens: parseInt(cols[28], 10) || null,
+                        wallTime: parseFloat(cols[30]) || null,
+                    });
+                }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ rows }));
+            } catch {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ rows: [] }));
+            }
+        }
+
         // --- LOGS SUMMARY (Item 15b + Item #24 Schema v2) ---
         // Returns aggregate stats from the benchmarks CSV so the UI can
         // display "Best Gen Speed", "Avg Prefill", etc. without parsing
         // CSV on the client side.
-        else if (req.url === '/api/logs/summary' && req.method === 'GET') {
+        else if (req.url.startsWith('/api/logs/summary') && req.method === 'GET') {
             try {
+                // Optional ?model=<basename>&transport=<Local|WiFi|TB4> filters --
+                // "historical performance of THIS model + card(s) + connection
+                // mode", not one global blended average across every run ever
+                // logged (which is nearly meaningless once you've tried more than
+                // one model/config).
+                const queryString = req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '';
+                const queryParams = new URLSearchParams(queryString);
+                const filterModel = queryParams.get('model') || '';
+                const filterTransport = queryParams.get('transport') || '';
+
                 const csv = await fs.readFile(CSV_FILE, 'utf-8');
                 const lines = csv.trim().split('\n').slice(1); // skip header
                 if (lines.length <= 1) {
                     // empty or header-only
                     return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ count: 0 }));
-                }
-                // Minimal CSV parser that respects double-quoted fields with embedded commas
-                function splitCsvLine(line) {
-                    const cols = [];
-                    let i = 0;
-                    while (i < line.length) {
-                        if (line[i] === '"') {
-                            // Quoted field: find closing quote (escaped quotes are "")
-                            let end = line.indexOf('"', i + 1);
-                            let field = '';
-                            while (end < line.length && line[end + 1] === '"') {
-                                field += line.slice(i + 1, end).replace(/""/g, '"');
-                                i = end + 2;
-                                end = line.indexOf('"', i + 1);
-                            }
-                            field += line.slice(i + 1, end);
-                            cols.push(field);
-                            i = end + 2; // skip closing quote
-                            if (line[i] === ',') i++; // skip comma
-                        } else {
-                            // Unquoted field
-                            const comma = line.indexOf(',', i);
-                            if (comma === -1) { cols.push(line.slice(i)); break; }
-                            else { cols.push(line.slice(i, comma)); i = comma + 1; }
-                        }
-                    }
-                    return cols;
                 }
                 // Schema v3 columns (0-indexed, 32 cols with launch_command):
                 //  10=promptTps, 11=genTps, 12=promptLatency, 13=promptTokens,
@@ -553,11 +1028,37 @@ const server = http.createServer(async (req, res) => {
                 // Old schema (30 cols): 8=promptTps, 9=genTps, 10=promptLatency, 28=wallTime, 29=loadTime
                 let n = 0, sumPromptTps = 0, sumGenTps = 0, sumPromptLat = 0, sumWallTime = 0, sumLoadTime = 0;
                 let bestPromptTps = 0, bestGenTps = 0, bestPromptLat = Infinity, bestWallTime = Infinity, bestLoadTime = Infinity;
+                // Rows are chronological (append-only CSV), so the last matching row
+                // processed is the most recent run -- track its own actual values
+                // (timestamp + its own prompt/gen tps + load time), not an average.
+                // "Runs: N" still reports how many historical rows matched, but the
+                // headline numbers are "what happened last time", not a blend.
+                let lastModel = null, lastTimestamp = null, lastPromptTps = null, lastGenTps = null, lastLoadTime = null, lastConfig = null;
                 for (const line of lines) {
                     if (!line.trim()) continue;
                     const cols = splitCsvLine(line);
                     // Need at least 25 cols to have the core metrics; auto-detect schema
                     if (cols.length < 25) continue;
+
+                    // model_name (col 2) / Transport (col 7) only exist from schema v3
+                    // onward (32+ cols) -- older rows have neither, so filters simply
+                    // never match them (correctly excluded: we can't know what config
+                    // produced them).
+                    if (cols.length >= 32) {
+                        const rowModel = cols[2];
+                        const rowTransport = cols[7];
+                        if (filterModel && rowModel !== filterModel) continue;
+                        if (filterTransport && rowTransport !== filterTransport) continue;
+                        lastModel = rowModel;
+                        lastTimestamp = cols[0];
+                        // config_json (col 32) only exists from schema v4 onward (33 cols)
+                        if (cols.length >= 33 && cols[32]) {
+                            try { lastConfig = JSON.parse(cols[32]); } catch { /* older/malformed row -- skip */ }
+                        }
+                    } else if (filterModel || filterTransport) {
+                        continue; // can't match a filter against a schema that has no model/transport columns
+                    }
+
                     let pTps, gTps, pLat, wTime, lTime;
                     if (cols.length >= 32) {
                         // v3: 32 cols with launch_command
@@ -581,31 +1082,64 @@ const server = http.createServer(async (req, res) => {
                         wTime = parseFloat(cols[28]);
                         lTime = parseFloat(cols[29]);
                     }
-                    if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; }
-                    if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; }
+                    if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; lastPromptTps = pTps; }
+                    if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; lastGenTps = gTps; }
                     if (Number.isFinite(pLat))  { sumPromptLat += pLat; if (pLat < bestPromptLat)   bestPromptLat = pLat; }
                     if (Number.isFinite(wTime)) { sumWallTime += wTime; if (wTime < bestWallTime)   bestWallTime = wTime; }
-                    if (Number.isFinite(lTime)) { sumLoadTime += lTime; if (lTime < bestLoadTime)   bestLoadTime = lTime; }
+                    if (Number.isFinite(lTime)) { sumLoadTime += lTime; if (lTime < bestLoadTime)   bestLoadTime = lTime; lastLoadTime = lTime; }
                     n++;
                 }
-                const avg = (v, c) => c > 0 ? (v / c) : 0;
+                // Round to 1 decimal -- raw division produces long floats like
+                // 22.101066666666674 which is noise, not information, at this precision.
+                const avg = (v, c) => c > 0 ? Math.round((v / c) * 10) / 10 : 0;
+                const round1 = (v) => Number.isFinite(v) ? Math.round(v * 10) / 10 : 0;
                 res.writeHead(200, { 'Content-Type': 'application/json' });
+                if (n === 0) {
+                    // Item 15 Step 3: no matching history for this exact
+                    // model/transport combo -- say so rather than showing a
+                    // misleading zero.
+                    return res.end(JSON.stringify({ count: 0, filtered: !!(filterModel || filterTransport) }));
+                }
                 return res.end(JSON.stringify({
                     count: n,
+                    lastModel,
+                    lastConfig,
+                    lastTimestamp,
+                    lastPromptTps: round1(lastPromptTps),
+                    lastGenTps: round1(lastGenTps),
+                    lastLoadTime: round1(lastLoadTime),
+                    filtered: !!(filterModel || filterTransport),
                     avgPromptTps: avg(sumPromptTps, n),
                     avgGenTps: avg(sumGenTps, n),
                     avgPromptLatency: avg(sumPromptLat, n),
                     avgWallTime: avg(sumWallTime, n),
                     avgLoadTime: avg(sumLoadTime, n),
-                    bestPromptTps: bestPromptTps || 0,
-                    bestGenTps: bestGenTps || 0,
-                    bestPromptLatency: isFinite(bestPromptLat) ? bestPromptLat : 0,
-                    bestWallTime: isFinite(bestWallTime) ? bestWallTime : 0,
-                    bestLoadTime: isFinite(bestLoadTime) ? bestLoadTime : 0,
+                    bestPromptTps: round1(bestPromptTps),
+                    bestGenTps: round1(bestGenTps),
+                    bestPromptLatency: isFinite(bestPromptLat) ? round1(bestPromptLat) : 0,
+                    bestWallTime: isFinite(bestWallTime) ? round1(bestWallTime) : 0,
+                    bestLoadTime: isFinite(bestLoadTime) ? round1(bestLoadTime) : 0,
                 }));
             } catch {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ count: 0 }));
+            }
+        }
+
+        // --- FLAG REFERENCE (searchable popover) ---
+        else if (req.url === '/api/flags' && req.method === 'GET') {
+            if (cachedFlagReference) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ flags: cachedFlagReference }));
+            }
+            try {
+                const { stdout } = await execFileAsync(getLlamaServerBinary(), ['--help'], { timeout: 8000, maxBuffer: 1024 * 1024 });
+                cachedFlagReference = parseHelpFlags(stdout);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ flags: cachedFlagReference }));
+            } catch (err) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ flags: [], error: err.message }));
             }
         }
 
@@ -632,6 +1166,28 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // --- PREVIEW LAUNCH COMMAND (raw-command-as-source-of-truth UI) ---
+        // Same structured-config -> command resolution /api/start uses, minus
+        // actually spawning anything. The frontend calls this on every GUI field
+        // change to keep the editable raw-command textarea in sync; whatever text
+        // sits in that box at Boot time is what actually gets tokenized and run
+        // (see the rawCommand branch in /api/start below) -- this endpoint only
+        // generates the *starting point* for editing, it is not itself the source
+        // of truth once the user starts typing in the box.
+        else if (req.url === '/api/preview-command' && req.method === 'POST') {
+            let body;
+            try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
+            try {
+                const launchMode = body.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
+                const { command, args } = resolveLaunchCommand(body, launchMode);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ command: formatCommand(command, args) }));
+            } catch (err) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ command: '', error: err.message }));
+            }
+        }
+
         // --- START SERVER ---
         else if (req.url === '/api/start' && req.method === 'POST') {
             let body;
@@ -651,42 +1207,28 @@ const server = http.createServer(async (req, res) => {
             masterLogBuffer = [];
             broadcastState();
 
-            let command, baseArgs, mapModelPath, deviceArgs, onErrorCleanup;
-
-            if (launchMode === 'local-multi-gpu') {
-                // No Docker involved -- spawn the Vulkan-enabled llama-server binary
-                // directly, matching the raw command this mode is built to replace.
-                command = getLlamaServerBinary();
-                baseArgs = [];
-                mapModelPath = (p) => p; // raw host path, no container mount to remap into
-                deviceArgs = [];
-                if (config.deviceA && config.deviceB) {
-                    deviceArgs.push('--split-mode', 'layer', '-dev', `${config.deviceA},${config.deviceB}`);
-                    if (config.tensorSplit && config.tensorSplit < 100) {
-                        deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
-                    }
-                }
-                onErrorCleanup = null; // proc.kill() is sufficient -- no container to tear down
+            // The raw command box is the actual source of truth for what runs --
+            // structured `config` fields are used for display/CSV/Item-22-restore
+            // purposes and to seed the box's initial content (via /api/preview-command
+            // above), but everything actually executed comes from tokenizing
+            // whatever text the user left in that box. Only fall back to
+            // reconstructing from structured fields if it's empty (e.g. a client
+            // that hasn't loaded the new UI, or the box genuinely wasn't touched).
+            let command, args;
+            if (config.rawCommand && config.rawCommand.trim().length > 0) {
+                const tokens = tokenizeCommand(config.rawCommand.trim());
+                command = tokens[0];
+                args = tokens.slice(1);
             } else {
-                await runDockerCompose('down --remove-orphans');
-                command = 'docker';
-                baseArgs = ['compose', '-f', 'docker-compose.master.yml', 'run', '--rm', '--service-ports', 'master-node', '/app/llama-server'];
-                mapModelPath = toContainerPath;
-                deviceArgs = [];
-                if (isRpc) {
-                    deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`, '--split-mode', 'layer');
-                    if (config.tensorSplit && config.tensorSplit < 100) {
-                        deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
-                    }
-                }
-                onErrorCleanup = () => runDockerCompose('down --remove-orphans');
+                ({ command, args } = resolveLaunchCommand(config, launchMode));
             }
 
-            const args = [...baseArgs, ...buildLlamaArgs(config, { mapModelPath, deviceArgs })];
+            const onErrorCleanup = launchMode === 'docker-rpc' ? () => runDockerCompose('down --remove-orphans') : null;
+            if (launchMode === 'docker-rpc') {
+                await runDockerCompose('down --remove-orphans');
+            }
 
-            currentLaunchCommand = command + ' ' + args.map(a =>
-                /\s/.test(a) ? JSON.stringify(a) : a
-            ).join(' ');
+            currentLaunchCommand = formatCommand(command, args);
             console.log('LAUNCHING:', currentLaunchCommand);
             broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
 

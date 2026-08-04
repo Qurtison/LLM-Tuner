@@ -1,0 +1,16 @@
+{
+  "name": "dashboard",
+  "version": "1.0.0",
+  "description": "Cluster Command Center dashboard (server4.js backend + static frontend).",
+  "main": "ecosystem.config.js",
+  "scripts": {
+    "build:css": "tailwindcss -i ./tailwind.src.css -o ./vendor/tailwind.css --minify",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

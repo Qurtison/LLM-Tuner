@@ -684,6 +684,19 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             "nvidia_smi_error": nvidia_smi_error
         }
 
-socketserver.TCPServer.allow_reuse_address = True
-with socketserver.TCPServer(("", PORT), HardwareMonitorHandler) as httpd:
+# TCPServer is single-threaded by default -- it can only ever process one
+# request at a time, so a single slow amdgpu_top/nvidia-smi call (or an
+# eGPU-in-a-bad-state hang) blocks every OTHER caller behind it, including
+# unrelated ones. This matters here because there are always at least two
+# independent pollers hitting this server concurrently: the dashboard's own
+# per-request telemetry sampler (server4.js) and the browser's sidebar poll
+# (script.js), both roughly once a second. Under any real load this caused
+# requests to queue up and eventually just time out / fail to connect at all
+# (confirmed live: curl connections timing out after 2.5s+ trying to even
+# reach the port). ThreadingTCPServer handles each request on its own thread;
+# nothing in HardwareMonitorHandler touches shared mutable module state (no
+# globals written in do_POST), so there's no new race condition introduced.
+socketserver.ThreadingTCPServer.allow_reuse_address = True
+socketserver.ThreadingTCPServer.daemon_threads = True
+with socketserver.ThreadingTCPServer(("", PORT), HardwareMonitorHandler) as httpd:
     httpd.serve_forever()

@@ -32,6 +32,18 @@ let masterBaseVram = 0;
 // panel is shown, what pollTelemetry's POST body looks like, and whether the
 // "worker" telemetry slot means "remote RPC node" or "second local GPU".
 let currentLaunchMode = 'docker-rpc';
+// Declared here (not down with the rest of the worker-logs-toggle state,
+// see "Worker Docker Control & Polling Logic" below) because applyLaunchMode()
+// references it and can run as early as page-load via restoreLastLaunchConfig()
+// -- a `let` declared later in the file is in the temporal dead zone until its
+// own declaration line executes, so referencing it that early throws a
+// ReferenceError even though the reference is inside a function (only the
+// function's *call* needs to happen after the declaration, and that call can
+// happen before script evaluation reaches line 1250 or wherever it now lives).
+let workerLogsInterval = null;
+// Same early-declaration reasoning as workerLogsInterval above -- restoreCachedDevices()
+// (moved to run before restoreLastLaunchConfig(), see that call site) references this.
+const LAST_DETECTED_DEVICES_KEY = 'last_detected_devices';
 
 // Active Session Trackers for CSV
 let sessionData = {};
@@ -217,6 +229,7 @@ document.getElementById('server-tensor-split').addEventListener('input', (e) => 
     const masterPct = e.target.value;
     const workerPct = 100 - masterPct;
     document.getElementById('ts-val-display').innerText = `${masterPct}% / ${workerPct}%`;
+    refreshCommandPreview();
 });
 
 // --- Advanced panel toggle ---
@@ -228,6 +241,7 @@ document.getElementById('btn-advanced-toggle').addEventListener('click', () => {
 });
 document.getElementById('mtp-toggle').addEventListener('change', (e) => {
     document.getElementById('mtp-draft-n-row').classList.toggle('hidden', !e.target.checked);
+    refreshCommandPreview();
 });
 
 // --- Fetch Local Models ---
@@ -247,26 +261,100 @@ async function fetchModels() {
         });
     } catch (e) {}
 }
-fetchModels();
+// Exposed so applyConfigToUI() can await it before touching #model-select's
+// value -- see that function for why (a bare fetchModels() call here isn't
+// enough since callers of applyConfigToUI can run before this resolves).
+const modelsLoadedPromise = fetchModels();
+
+// --- Auto-snap to last-used config for this model + launch mode ---
+// Triggered only by model-select and launch-mode-select changes -- the two
+// "which setup am I in" selections the user actually asked for ("whenever I
+// select a model, or when I select a launch mode"). Deliberately NOT wired to
+// finer controls within the launch-mode panel (device pickers, tensor split):
+// those don't change the model+transport lookup key for local-multi-gpu mode
+// (transport is always 'Local' regardless of which specific 2 GPUs are
+// chosen), so re-snapping there would just re-fetch the same historical
+// config and silently revert whatever device pairing the user just picked.
+let isApplyingHistoricalSnap = false;
+// Bumped by both this function and refreshCommandPreview() on every tracked
+// field change. snapToLastUsedConfig's fetch is a real network+file-read round
+// trip -- if the user edits something else (e.g. drags the tensor-split
+// slider) while it's in flight, applying the historical config once it
+// resolves would silently clobber that fresher edit. Capturing the generation
+// before the await and checking it's still current after is a standard
+// stale-response guard for exactly this race (confirmed live: without this,
+// a tensor-split drag right after a model-select change got overwritten back
+// to the old historical -ts value once the snap's fetch finally resolved).
+let configOperationGeneration = 0;
+async function snapToLastUsedConfig() {
+    if (isApplyingHistoricalSnap) return; // reentrancy guard -- applyConfigToUI's own
+    // change-event dispatches (model-select, tensor-split) would otherwise re-trigger this
+    const myGeneration = ++configOperationGeneration;
+    try {
+        const modelPath = document.getElementById('model-select').value;
+        const modelBasename = modelPath ? modelPath.split('/').pop() : '';
+        if (!modelBasename) return;
+        const isLocal = currentLaunchMode === 'local-multi-gpu';
+        const transport = isLocal ? 'Local' : document.getElementById('transport-type').value;
+        const params = new URLSearchParams({ model: modelBasename, transport: transport || '' });
+        const res = await fetch(`/api/logs/summary?${params.toString()}`);
+        const data = await res.json();
+        if (myGeneration !== configOperationGeneration) return; // something newer happened while this was in flight
+        if (data && data.lastConfig) {
+            isApplyingHistoricalSnap = true;
+            try {
+                await applyConfigToUI(data.lastConfig);
+            } finally {
+                isApplyingHistoricalSnap = false;
+            }
+        }
+    } catch (e) {
+        // Best-effort -- leave current fields alone on any failure.
+    }
+}
 
 // --- Item 15c: Load historical stats summary from server ---
+// Filtered by the currently-selected model + connection mode ("the card(s),
+// and if RPC, wifi vs TB4") -- a single global average across every model
+// you've ever tried is close to meaningless once you've tried more than one.
 async function loadHistoricalStats() {
     const el = document.getElementById('historical-stats');
     try {
-        const res = await fetch('/api/logs/summary');
+        const modelPath = document.getElementById('model-select').value;
+        const modelBasename = modelPath ? modelPath.split('/').pop() : '';
+        // Never fall through to an unfiltered query -- if we can't tell what
+        // model is actually selected (e.g. the dropdown hasn't finished
+        // populating yet), showing the *global* blended/last-row stats with
+        // no indication they're unfiltered looked exactly like "stats for the
+        // wrong model" (in practice, whatever was logged most recently
+        // server-side, regardless of what's selected here).
+        if (!modelBasename) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+        const isLocal = currentLaunchMode === 'local-multi-gpu';
+        const transport = isLocal ? 'Local' : document.getElementById('transport-type').value;
+        const params = new URLSearchParams({ model: modelBasename });
+        if (transport) params.set('transport', transport);
+
+        const res = await fetch(`/api/logs/summary?${params.toString()}`);
         const data = await res.json();
-        if (!data || data.runs === 0) {
-            el.classList.add('hidden');
-            el.innerHTML = '';
+        if (!data || data.count === 0) {
+            if (data && data.filtered) {
+                el.innerHTML = `<div class="text-gray-600 italic">No history yet for this model/connection.</div>`;
+                el.classList.remove('hidden');
+            } else {
+                el.classList.add('hidden');
+                el.innerHTML = '';
+            }
             return;
         }
-        const avgLoad = data.avgLoadTime != null ? `${data.avgLoadTime}s` : 'N/A';
-        const avgGen = data.avgGenTps != null ? `${data.avgGenTps} t/s` : 'N/A';
-        const avgPrompt = data.avgPromptTps != null ? `${data.avgPromptTps} t/s` : 'N/A';
-        const lastModel = data.lastModel ? data.lastModel.replace(/^.*\//, '') : 'N/A';
+        // Headline numbers are the LAST run's own actual values, not an average
+        // across history -- "what happened last time", not a blend of every run.
+        const lastLoad = data.lastLoadTime != null ? `${data.lastLoadTime}s` : 'N/A';
+        const lastGen = data.lastGenTps != null ? `${data.lastGenTps} t/s` : 'N/A';
+        const lastPrompt = data.lastPromptTps != null ? `${data.lastPromptTps} t/s` : 'N/A';
+        const lastWhen = data.lastTimestamp ? new Date(data.lastTimestamp).toLocaleString() : 'N/A';
         el.innerHTML = `
-            <div>Runs: <span class="text-gray-300">${data.runs}</span> | Last: <span class="text-gray-300">${lastModel}</span></div>
-            <div>Avg Load: <span class="text-gray-300">${avgLoad}</span> | Avg Prefill: <span class="text-gray-300">${avgPrompt}</span> | Avg Gen: <span class="text-gray-300">${avgGen}</span></div>
+            <div>Runs: <span class="text-gray-300">${data.count}</span> | Last: <span class="text-gray-300">${lastWhen}</span></div>
+            <div>Load: <span class="text-gray-300">${lastLoad}</span> | Prefill: <span class="text-gray-300">${lastPrompt}</span> | Gen: <span class="text-gray-300">${lastGen}</span></div>
         `;
         el.classList.remove('hidden');
     } catch {
@@ -292,9 +380,17 @@ function setHardwareConfigLocked(locked) {
 
 // --- THE SSE HANDLER ---
 let lastLaunchCommand = '';
+// Tracks the config that actually booted the currently-running server (as
+// opposed to buildConfigFromUI(), which reflects *current* GUI state and can
+// drift from it -- the GUI is locked while running, but this is the
+// authoritative source). Always kept current (not one-shot like
+// populateLaunchConfig), since it's what gets written to the CSV's
+// config_json column per completed prompt -- see the /api/log call site.
+let lastKnownLaunchConfig = null;
 eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
     if (data.launchCommand) lastLaunchCommand = data.launchCommand;
+    if (data.launchConfig) lastKnownLaunchConfig = data.launchConfig;
     if (data.launchConfig) populateLaunchConfig(data.launchConfig);
     const badge = document.getElementById('engine-status');
     const input = document.getElementById('user-prompt');
@@ -321,6 +417,27 @@ eventSource.onmessage = (e) => {
             const tps = parseFloat(parts[1]);
             const nDecoded = parseInt(parts[2]);
             handleGenProgress(tps, nDecoded);
+        }
+        else if (data.log.startsWith('COMPLETION:')) {
+            // Server-side, client-agnostic completion capture (Monitor Mode) --
+            // fires for EVERY finished request regardless of which client sent
+            // it, not just this dashboard's own chat. See logCompletedRequest()
+            // in server4.js.
+            try {
+                const payload = JSON.parse(data.log.slice('COMPLETION:'.length));
+                handleMonitorCompletion(payload);
+                // Avg Speed used to only update from this dashboard's own chat
+                // stream-reading code (submitPrompt), so it silently stayed at
+                // 0.0 for any request that came from elsewhere (opencode, Cline,
+                // curl, ...) even though Live Speed updated fine (that's driven
+                // by the separate, already-client-agnostic PREFILL_PROGRESS/
+                // GEN_PROGRESS broadcasts). This event fires for every completed
+                // request regardless of origin with real server-computed tps, so
+                // it's the one place that can drive Avg Speed correctly for all
+                // of them -- submitPrompt's own calls were removed in favor of
+                // this single source.
+                saveMetricsToAverages(payload.promptTps, payload.genTps);
+            } catch (e) { /* malformed payload -- ignore this one, not worth breaking the SSE handler over */ }
         }
     }
 
@@ -412,25 +529,42 @@ eventSource.onmessage = (e) => {
         // Item 15c: Refresh historical stats after each run
         loadHistoricalStats();
     
-    } else if (data.state === 'starting' || data.state === 'loading') {
+    } else if (data.state === 'starting' || data.state === 'loading' || data.state === 'stopping') {
         setHardwareConfigLocked(true);
 
         // Item 4: Reset avg speed at boot time so each new run starts fresh
         resetRunningAverages();
 
         badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-yellow-900/20 border border-yellow-800 text-yellow-400 text-xs font-semibold';
-        badge.innerHTML = `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> ${data.state === 'loading' ? 'LOADING MODEL' : 'BOOTING...'}`;
-        document.getElementById('btn-start-server').classList.add('hidden'); 
+        badge.innerHTML = data.state === 'stopping'
+            ? `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> STOPPING...`
+            : `<span class="h-2 w-2 rounded-full bg-yellow-500 animate-pulse"></span> ${data.state === 'loading' ? 'LOADING MODEL' : 'BOOTING...'}`;
+        // Keep "Load Model" visible-but-grayed (via setHardwareConfigLocked's
+        // disabled+opacity above) instead of hiding it outright -- it used to
+        // vanish during boot/stop and only reappear once fully 'stopped',
+        // which read as a missing button rather than a busy one.
+        document.getElementById('btn-start-server').classList.remove('hidden');
         document.getElementById('btn-stop-server').classList.remove('hidden');
 
 
     // } else if (!isModelLoaded) { 
     // note: this part fixed by kyle.
     } else if (data.state === 'ready') {
-        isModelLoaded = true; 
+        isModelLoaded = true;
         // Capture real load time from server (fixes Item 15a: was always "N/A")
         if (data.finalLoadTime) currentLoadTime = data.finalLoadTime;
-        setTimeout(() => { masterBaseVram = currentVramSnapshot; }, 2000); 
+        setTimeout(() => { masterBaseVram = currentVramSnapshot; }, 2000);
+
+        // Bug: a client that connects (or refreshes) while the server is
+        // ALREADY 'ready' jumps straight into this branch, skipping the
+        // 'starting'/'loading' branch above entirely -- which is the only
+        // place that showed the Kill button and locked the hardware config.
+        // Without this, a fresh connect to an already-running server left the
+        // Kill button permanently hidden and the config panel unlocked, even
+        // though a model was actively running.
+        document.getElementById('btn-start-server').classList.add('hidden');
+        document.getElementById('btn-stop-server').classList.remove('hidden');
+        setHardwareConfigLocked(true);
 
         // to test:
         // remove 'disabled' from the #user-prompt and the #submit-btn
@@ -493,8 +627,13 @@ function saveLastLaunchConfig(config) {
 // fallback below, and the SSE-driven populateLaunchConfig() (which restores
 // from the server's own authoritative in-memory config -- more reliable since
 // it reflects what's *actually running*, not just what this browser last sent).
-function applyConfigToUI(config) {
-    // Restore model selection
+async function applyConfigToUI(config) {
+    // Restore model selection -- wait for fetchModels() to have actually
+    // populated the <option> elements first. Without this, setting .value
+    // on a <select> with no matching <option> yet (fetchModels() is async and
+    // may still be in flight) silently no-ops and leaves the default model
+    // selected, which is what was happening here before this await was added.
+    await modelsLoadedPromise;
     const modelSelect = document.getElementById('model-select');
     if (config.modelPath && modelSelect) {
         modelSelect.value = config.modelPath;
@@ -541,11 +680,45 @@ function applyConfigToUI(config) {
     document.getElementById('mtp-toggle').checked = mtpEnabled;
     if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
 
-    // Restore verbosity
-    if (config.verbosity != null) document.getElementById('server-verbosity').value = config.verbosity;
+    // Restore sampling params -- ?? not || since 0 is a valid, meaningful value
+    // for several of these (top-k/presence-penalty disabled, etc).
+    document.getElementById('server-temp').value = config.temp ?? 0.80;
+    document.getElementById('server-top-k').value = config.topK ?? 40;
+    document.getElementById('server-top-p').value = config.topP ?? 0.95;
+    document.getElementById('server-min-p').value = config.minP ?? 0.05;
+    document.getElementById('server-presence-penalty').value = config.presencePenalty ?? 0.00;
+    document.getElementById('server-repeat-penalty').value = config.repeatPenalty ?? 1.00;
+
+    // Restore MoE CPU offload (optional -- blank omits the flag entirely)
+    document.getElementById('server-n-cpu-moe').value = config.nCpuMoe ?? '';
+
+    // Restore jinja + chat template file
+    document.getElementById('jinja-toggle').checked = !!config.jinja;
+    document.getElementById('server-chat-template-file').value = config.chatTemplateFile || '';
+
+    // Restore load mode
+    document.getElementById('server-load-mode').value = config.loadMode || '';
+
+    // Restore verbosity -- floor of 3 (info). Below that, llama-server itself
+    // suppresses the log lines this dashboard's status detection and telemetry
+    // capture parse (see the field's own tooltip), so a config saved before
+    // that floor existed (the old default was 0) gets clamped up rather than
+    // silently breaking the dashboard on restore.
+    const verbosityRestore = Number(config.verbosity);
+    document.getElementById('server-verbosity').value = (Number.isFinite(verbosityRestore) && verbosityRestore >= 3) ? verbosityRestore : 3;
 
     // Restore extra args
-    if (config.argString) document.getElementById('extra-args').value = config.argString;
+    document.getElementById('extra-args').value = config.argString || '';
+
+    // The launch command box is read-only and always regenerated from the
+    // fields just restored above (including extra-args) -- it's no longer
+    // possible to hand-edit it directly, so there's nothing else to restore
+    // here. See the box's own comment for why (a stored literal rawCommand
+    // used to get shown here instead, which could hold flags -- e.g. a custom
+    // jinja chat template -- that lived nowhere else and silently vanished
+    // the moment anything regenerated the box, such as snapToLastUsedConfig
+    // firing off this same function's model-select change-event dispatch).
+    refreshCommandPreview();
 
     // Re-render saved configs for the restored model
     renderSavedConfigs();
@@ -555,7 +728,11 @@ function restoreLastLaunchConfig() {
     try {
         const saved = localStorage.getItem(LAST_LAUNCH_CONFIG_KEY);
         if (!saved) return;
-        applyConfigToUI(JSON.parse(saved));
+        // applyConfigToUI is async -- a synchronous try/catch around a bare call
+        // to it would NOT catch anything it throws (async functions convert
+        // throws into promise rejections, not synchronous exceptions), so this
+        // needs its own .catch() rather than relying on the try/catch below.
+        applyConfigToUI(JSON.parse(saved)).catch(e => console.warn('Failed to restore last launch config:', e));
     } catch(e) {
         console.warn('Failed to restore last launch config:', e);
     }
@@ -573,13 +750,18 @@ function populateLaunchConfig(config) {
     if (hasAppliedServerConfig || !config) return;
     hasAppliedServerConfig = true;
     try {
-        applyConfigToUI(config);
+        // Same async/.catch() note as restoreLastLaunchConfig() above.
+        applyConfigToUI(config).catch(e => console.warn('Failed to populate launch config from server:', e));
     } catch (e) {
         console.warn('Failed to populate launch config from server:', e);
     }
 }
 
-document.getElementById('btn-start-server').addEventListener('click', () => {
+// Builds the structured config object from the current GUI field values.
+// Shared by the Boot Cluster click handler and refreshCommandPreview() --
+// used to seed the raw-command box's content, NOT as the thing actually sent
+// to run the server (see the rawCommand branch in server4.js /api/start).
+function buildConfigFromUI() {
     const mtpEnabled = document.getElementById('mtp-toggle').checked;
     const verbosityVal = parseInt(document.getElementById('server-verbosity').value);
     const isLocal = currentLaunchMode === 'local-multi-gpu';
@@ -587,7 +769,7 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
     // still selected, otherwise fall back to whatever's in the manual text field.
     const deviceA = isLocal ? (document.getElementById('device-select-a').value || document.getElementById('device-manual-a').value.trim() || null) : null;
     const deviceB = isLocal ? (document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim() || null) : null;
-    const config = {
+    return {
         modelPath: document.getElementById('model-select').value, // full host path, not just filename
         ctx: parseInt(document.getElementById('server-ctx').value),
         ngl: parseInt(document.getElementById('server-ngl').value),
@@ -601,83 +783,301 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
         specType: mtpEnabled ? 'draft-mtp' : null,
         specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
+        temp: parseFloat(document.getElementById('server-temp').value),
+        topK: parseInt(document.getElementById('server-top-k').value),
+        topP: parseFloat(document.getElementById('server-top-p').value),
+        minP: parseFloat(document.getElementById('server-min-p').value),
+        presencePenalty: parseFloat(document.getElementById('server-presence-penalty').value),
+        repeatPenalty: parseFloat(document.getElementById('server-repeat-penalty').value),
+        nCpuMoe: document.getElementById('server-n-cpu-moe').value.trim() !== '' ? parseInt(document.getElementById('server-n-cpu-moe').value) : null,
+        jinja: document.getElementById('jinja-toggle').checked,
+        chatTemplateFile: document.getElementById('server-chat-template-file').value.trim() || null,
+        loadMode: document.getElementById('server-load-mode').value || null,
         verbosity: Number.isFinite(verbosityVal) ? verbosityVal : null,
         argString: document.getElementById('extra-args').value.trim() || null
     };
+}
+
+// --- Flag Reference (searchable popover, click-to-insert) ---
+let flagReferenceCache = null;
+async function openFlagReference() {
+    const modal = document.getElementById('flag-reference-modal');
+    const statusEl = document.getElementById('flag-reference-status');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    document.getElementById('flag-reference-search').focus();
+    if (!flagReferenceCache) {
+        statusEl.textContent = 'Loading...';
+        try {
+            const res = await fetch('/api/flags');
+            const data = await res.json();
+            flagReferenceCache = data.flags || [];
+            statusEl.textContent = data.error ? `Failed to load: ${data.error}` : '';
+        } catch (e) {
+            statusEl.textContent = `Failed to load: ${e.message}`;
+            flagReferenceCache = [];
+        }
+    }
+    renderFlagReference('');
+}
+
+function insertFlagIntoCommand(insertText) {
+    // Inserts into Extra llama-server args, not the (read-only) launch command
+    // box -- that box is always regenerated from the structured fields plus
+    // this one, so it's the only place a manually-picked flag can actually
+    // persist across a profile load / model-select snap / page refresh.
+    const box = document.getElementById('extra-args');
+    const start = box.selectionStart ?? box.value.length;
+    const end = box.selectionEnd ?? box.value.length;
+    const before = box.value.slice(0, start);
+    const after = box.value.slice(end);
+    // Separate from adjacent text with a space unless we're at a boundary that
+    // already has one (start of box, or already-whitespace neighbor).
+    const needsLeadingSpace = before.length > 0 && !/\s$/.test(before);
+    const insert = (needsLeadingSpace ? ' ' : '') + insertText;
+    box.value = before + insert + after;
+    const cursor = (before + insert).length;
+    box.focus();
+    box.setSelectionRange(cursor, cursor);
+    document.getElementById('flag-reference-modal').classList.add('hidden');
+    document.getElementById('flag-reference-modal').classList.remove('flex');
+    refreshCommandPreview();
+}
+
+function renderFlagReference(query) {
+    const list = document.getElementById('flag-reference-list');
+    const q = query.trim().toLowerCase();
+    const entries = !q ? flagReferenceCache : flagReferenceCache.filter(e =>
+        e.flags.toLowerCase().includes(q) || e.description.toLowerCase().includes(q));
+    list.innerHTML = '';
+    if (!entries || entries.length === 0) {
+        list.innerHTML = '<div class="text-gray-600 italic text-sm">No matching flags.</div>';
+        return;
+    }
+    let currentSection = null;
+    for (const e of entries) {
+        if (!q && e.section !== currentSection) {
+            currentSection = e.section;
+            const header = document.createElement('div');
+            header.className = 'text-[10px] uppercase tracking-wider text-gray-500 font-semibold pt-2 first:pt-0';
+            header.textContent = currentSection;
+            list.appendChild(header);
+        }
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'w-full text-left px-2 py-1.5 rounded hover:bg-gray-800 border border-transparent hover:border-gray-700 transition-colors';
+        row.innerHTML = `<div class="font-mono text-xs text-indigo-300">${escapeHtml(e.flags)}</div><div class="text-[11px] text-gray-500 mt-0.5">${escapeHtml(e.description)}</div>`;
+        row.addEventListener('click', () => insertFlagIntoCommand(e.insertText));
+        list.appendChild(row);
+    }
+}
+
+document.getElementById('btn-flag-reference').addEventListener('click', openFlagReference);
+document.getElementById('btn-flag-reference-close').addEventListener('click', () => {
+    document.getElementById('flag-reference-modal').classList.add('hidden');
+    document.getElementById('flag-reference-modal').classList.remove('flex');
+});
+document.getElementById('flag-reference-search').addEventListener('input', (e) => renderFlagReference(e.target.value));
+
+// --- Raw launch command box: a read-only, always-regenerated preview of what
+// will actually be spawned (see server4.js /api/start's rawCommand branch --
+// it still sends this box's literal text, so what you see here is exactly
+// what runs). GUI fields regenerate it via /api/preview-command on any change;
+// the box itself can't be hand-edited, so anything not exposed by a GUI field
+// (a custom flag, a jinja chat-template path, ...) belongs in Extra
+// llama-server args instead, which IS a real persisted field.
+let rawCommandRefreshTimer = null;
+function refreshCommandPreview() {
+    // Invalidate any in-flight snapToLastUsedConfig() -- see that function's
+    // comment on configOperationGeneration for why (this is the "user edited
+    // something else" signal it checks for before applying a late result).
+    configOperationGeneration++;
+    clearTimeout(rawCommandRefreshTimer);
+    rawCommandRefreshTimer = setTimeout(async () => {
+        // Piggyback the historical-stats lookup on the same debounce -- it's
+        // driven by the same model/connection-mode fields.
+        loadHistoricalStats();
+        const box = document.getElementById('raw-launch-command');
+        // Don't clobber an in-progress hand-edit -- if the user is focused in
+        // the box, a GUI field change (however that happened) shouldn't yank
+        // their cursor/selection out from under them.
+        if (document.activeElement === box) return;
+        const statusEl = document.getElementById('raw-command-status');
+        try {
+            const res = await fetch('/api/preview-command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildConfigFromUI())
+            });
+            const data = await res.json();
+            if (data.command) {
+                box.value = data.command;
+                statusEl.textContent = '';
+            } else {
+                statusEl.textContent = data.error || 'preview failed';
+            }
+        } catch (e) {
+            statusEl.textContent = 'preview failed (' + e.message + ')';
+        }
+    }, 300);
+}
+
+document.getElementById('btn-start-server').addEventListener('click', () => {
+    const config = buildConfigFromUI();
+    // The raw command box is what actually runs -- see server4.js /api/start.
+    config.rawCommand = document.getElementById('raw-launch-command').value.trim();
     // Save config for page refresh restoration (Item #22)
     saveLastLaunchConfig(config);
     fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
 });
 
+// Any GUI field that feeds buildConfigFromUI() regenerates the command preview.
+['model-select', 'server-ctx', 'server-ngl', 'worker-ssh', 'server-fa',
+ 'server-cache-k', 'server-cache-v', 'mtp-draft-n', 'reasoning-preserve-toggle',
+ 'server-verbosity', 'extra-args', 'device-select-a', 'device-select-b',
+ 'device-manual-a', 'device-manual-b',
+ 'server-temp', 'server-top-k', 'server-top-p', 'server-min-p',
+ 'server-presence-penalty', 'server-repeat-penalty', 'server-n-cpu-moe',
+ 'jinja-toggle', 'server-chat-template-file', 'server-load-mode'
+].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', refreshCommandPreview);
+});
+
+// Model selection additionally snaps the whole setup to the last config used
+// with this model (see snapToLastUsedConfig's comment for why this is scoped
+// to model-select/launch-mode-select only, not every field above).
+document.getElementById('model-select').addEventListener('change', snapToLastUsedConfig);
+
+// Must run before restoreLastLaunchConfig() -- see restoreCachedDevices()'s
+// own comment for why (device dropdown options need to exist before
+// applyConfigToUI() tries to select one of them).
+restoreCachedDevices();
+
 // Restore last launch config on page load (Item #22)
 restoreLastLaunchConfig();
+// Also regenerate the preview once models have loaded, in case restore found
+// nothing saved and the box would otherwise stay empty until the user touches
+// a field.
+modelsLoadedPromise.then(refreshCommandPreview);
+// Populate the profile dropdown unconditionally -- applyConfigToUI() (called
+// via restoreLastLaunchConfig above) also does this, but only runs at all if
+// there's something saved to restore; without this, a fresh browser with
+// saved profiles but no last-launch-config would show an empty dropdown.
+renderSavedConfigs();
 
-// --- Item 6: Saved Configs (localStorage) ---
-function getArgConfigs() {
-    try { return JSON.parse(localStorage.getItem('arg_configs') || '{}'); } catch { return {}; }
+// --- Launch Profiles (localStorage) ---
+// Saves the ENTIRE launch setup (model, launch mode, devices, every field,
+// the raw command) as a named profile -- not just the extra-args box, which
+// is what the old per-model "arg_configs" version did (and which required a
+// non-empty extra-args box to save anything at all, so saving a plain
+// model+ctx+mode setup with no extra flags was simply impossible). Profiles
+// are global (not nested per-model) since the model choice is itself part of
+// what a profile restores.
+const LAUNCH_PROFILES_KEY = 'launch_profiles';
+function getLaunchProfiles() {
+    try { return JSON.parse(localStorage.getItem(LAUNCH_PROFILES_KEY) || '[]'); } catch { return []; }
 }
-function saveArgConfigs(cfg) { localStorage.setItem('arg_configs', JSON.stringify(cfg)); }
+function saveLaunchProfiles(profiles) { localStorage.setItem(LAUNCH_PROFILES_KEY, JSON.stringify(profiles)); }
 
 function saveCurrentConfig() {
-    const modelPath = document.getElementById('model-select').value;
-    const argString = document.getElementById('extra-args').value.trim();
-    if (!argString) { alert('Nothing to save — enter args first.'); return; }
-    const name = prompt('Config name:', 'default');
+    const modelLabel = document.getElementById('model-select').selectedOptions[0]?.textContent.replace(/\s*\(.*/, '') || 'profile';
+    const name = prompt('Profile name:', modelLabel);
     if (!name) return;
-    const cfgs = getArgConfigs();
-    if (!cfgs[modelPath]) cfgs[modelPath] = [];
-    // Replace existing entry with same name
-    const existing = cfgs[modelPath].find(c => c.name === name);
-    if (existing) { existing.argString = argString; existing.lastUsed = Date.now(); }
-    else { cfgs[modelPath].push({ name, argString, lastUsed: Date.now() }); }
-    saveArgConfigs(cfgs);
+    const config = buildConfigFromUI();
+    config.rawCommand = document.getElementById('raw-launch-command').value.trim();
+    const profiles = getLaunchProfiles();
+    const existingIdx = profiles.findIndex(p => p.name === name);
+    const entry = { name, config, savedAt: Date.now() };
+    if (existingIdx >= 0) profiles[existingIdx] = entry; else profiles.push(entry);
+    saveLaunchProfiles(profiles);
+    renderSavedConfigs();
+    document.getElementById('load-profile-select').value = name;
+}
+
+function loadLaunchProfile(name) {
+    const profiles = getLaunchProfiles();
+    const entry = profiles.find(p => p.name === name);
+    if (!entry) return;
+    // Track separately from savedAt -- the dropdown sorts by most-recently-USED,
+    // not most-recently-saved (a profile you saved once ages ago but load every
+    // day should stay near the top, not sink below one you tweaked-and-saved
+    // yesterday but haven't actually used since).
+    entry.lastLoadedAt = Date.now();
+    saveLaunchProfiles(profiles);
+    // Reuse snapToLastUsedConfig's reentrancy guard: applyConfigToUI sets
+    // model-select's value and dispatches a 'change' event on it (to drive
+    // downstream listeners), which is the SAME event snapToLastUsedConfig is
+    // wired to. Without this guard, that dispatch fires a competing snap
+    // fetch that resolves shortly after and overwrites the profile just
+    // loaded with "last used config for this model" instead -- looked like
+    // the profile's settings flashing in and then vanishing a moment later.
+    isApplyingHistoricalSnap = true;
+    applyConfigToUI(entry.config)
+        .catch(e => console.warn('Failed to load profile:', e))
+        .finally(() => { isApplyingHistoricalSnap = false; });
+    renderSavedConfigs();
+    document.getElementById('load-profile-select').value = name;
+}
+
+function deleteLaunchProfile(name) {
+    saveLaunchProfiles(getLaunchProfiles().filter(p => p.name !== name));
     renderSavedConfigs();
 }
 
-function loadConfigEntry(modelPath, entry) {
-    document.getElementById('extra-args').value = entry.argString;
-    const cfgs = getArgConfigs();
-    if (cfgs[modelPath]) {
-        const e = cfgs[modelPath].find(c => c.name === entry.name);
-        if (e) e.lastUsed = Date.now();
-        saveArgConfigs(cfgs);
-    }
-    renderSavedConfigs();
-}
-
-function deleteConfigEntry(modelPath, name) {
-    const cfgs = getArgConfigs();
-    if (cfgs[modelPath]) {
-        cfgs[modelPath] = cfgs[modelPath].filter(c => c.name !== name);
-        saveArgConfigs(cfgs);
-        renderSavedConfigs();
-    }
-}
-
+// Renders into #load-profile-select (a dropdown at the top of the panel --
+// selecting a profile loads it immediately) rather than the old per-model
+// button list, which also required a non-empty extra-args box to save
+// anything and is why saving "never quite worked properly".
 function renderSavedConfigs() {
-    const modelPath = document.getElementById('model-select').value;
-    const list = document.getElementById('saved-configs-list');
-    const cfgs = getArgConfigs();
-    const entries = (cfgs[modelPath] || []).sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
-    if (entries.length === 0) { list.classList.add('hidden'); list.innerHTML = ''; return; }
-    list.classList.remove('hidden');
-    list.innerHTML = entries.map(e => `
-        <span class="inline-flex items-center gap-1">
-            <button onclick='loadConfigEntry(${JSON.stringify(modelPath)}, ${JSON.stringify(e)})' 
-                class="px-1.5 py-0.5 bg-indigo-900/40 hover:bg-indigo-800/60 border border-indigo-700/50 rounded text-[9px] text-indigo-300 cursor-pointer">
-                ${e.name}
-            </button>
-            <button onclick='deleteConfigEntry(${JSON.stringify(modelPath)}, ${JSON.stringify(e.name)})' 
-                class="px-1 py-0.5 bg-red-900/30 hover:bg-red-800/50 border border-red-800/40 rounded text-[9px] text-red-400 cursor-pointer" title="Delete">×</button>
-        </span>
-    `).join('');
+    const select = document.getElementById('load-profile-select');
+    const previousValue = select.value;
+    // Most-recently-loaded first; a profile never explicitly (re)loaded since
+    // being saved falls back to its save time, so a brand new profile still
+    // shows up near the top rather than at the bottom.
+    const profiles = getLaunchProfiles().sort((a, b) => (b.lastLoadedAt || b.savedAt || 0) - (a.lastLoadedAt || a.savedAt || 0));
+    select.innerHTML = '<option value="">Load Saved Profile...</option>';
+    for (const p of profiles) {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        const isLocalProfile = p.config.launchMode === 'local-multi-gpu';
+        opt.textContent = `${p.name} — ${isLocalProfile ? 'Local' : 'RPC'} · ${(p.config.modelPath || '').split('/').pop()}`;
+        select.appendChild(opt);
+    }
+    // Keep the current selection if it still exists (e.g. after a save/delete
+    // elsewhere), rather than always resetting to the placeholder.
+    if (profiles.some(p => p.name === previousValue)) select.value = previousValue;
 }
 
 document.getElementById('btn-save-config').addEventListener('click', saveCurrentConfig);
-document.getElementById('btn-load-configs').addEventListener('click', renderSavedConfigs);
-// Re-render saved configs when model changes
-document.getElementById('model-select').addEventListener('change', () => { renderSavedConfigs(); });
-document.getElementById('btn-stop-server').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+document.getElementById('load-profile-select').addEventListener('change', (e) => {
+    if (e.target.value) loadLaunchProfile(e.target.value);
+});
+document.getElementById('btn-delete-profile').addEventListener('click', () => {
+    const select = document.getElementById('load-profile-select');
+    if (select.value) deleteLaunchProfile(select.value);
+});
+document.getElementById('btn-stop-server').addEventListener('click', async () => {
+    try {
+        await fetch('/api/stop', { method: 'POST' });
+    } catch (e) {}
+    // Apply the "stopped" UI state directly from this click, rather than
+    // waiting on the SSE broadcast alone -- reported as sometimes sticking on
+    // "RUNNING" until a manual page refresh, which points at that broadcast
+    // occasionally not landing (or landing before the badge element it needs
+    // even exists, e.g. if this fires during a brief reconnect). /api/stop's
+    // response confirms the server-side stop already happened, so it's safe
+    // to reflect that immediately; the SSE branch still runs redundantly
+    // whenever its own message does arrive, applying the same end state.
+    const badge = document.getElementById('engine-status');
+    badge.className = 'flex items-center gap-2 px-3 py-2 rounded-lg bg-red-900/20 border border-red-800 text-red-400 text-xs font-semibold';
+    badge.innerHTML = '<span class="h-2 w-2 rounded-full bg-red-500"></span> ENGINE STOPPED';
+    document.getElementById('btn-start-server').classList.remove('hidden');
+    document.getElementById('btn-stop-server').classList.add('hidden');
+    document.getElementById('user-prompt').disabled = true;
+    document.getElementById('submit-btn').disabled = true;
+    setHardwareConfigLocked(false);
+});
 
 // --- HF Modal Logic ---
 function openHFModal() { document.getElementById('hf-modal').classList.remove('hidden'); document.getElementById('hf-modal').classList.add('flex'); }
@@ -732,6 +1132,43 @@ function toggleReasoning(headerEl) {
     }
 }
 
+// Long chat messages (prompts or responses) collapse to a preview height with
+// a fade-out + "Show more" toggle, same visual language as the existing
+// reasoning-trace collapse above. Applied post-hoc (not during live streaming
+// -- see the two call sites) so the collapse boundary doesn't jump around
+// while a response is still being read live.
+const MSG_COLLAPSE_HEIGHT = 320; // px -- roughly a 12-15 line preview
+function applyMessageCollapse(el) {
+    if (!el || el.dataset.collapseChecked) return;
+    el.dataset.collapseChecked = '1';
+    const naturalHeight = el.scrollHeight;
+    if (naturalHeight <= MSG_COLLAPSE_HEIGHT + 40) return; // not worth collapsing
+    el.classList.add('fade-bottom');
+    el.style.maxHeight = MSG_COLLAPSE_HEIGHT + 'px';
+    el.style.overflow = 'hidden';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'msg-collapse-toggle block text-[11px] text-indigo-400 hover:text-indigo-300 mt-1.5 font-medium';
+    btn.textContent = 'Show more ▾';
+    btn.addEventListener('click', () => {
+        const isCollapsed = el.style.maxHeight === MSG_COLLAPSE_HEIGHT + 'px';
+        if (isCollapsed) {
+            el.style.maxHeight = naturalHeight + 'px';
+            el.classList.remove('fade-bottom');
+            btn.textContent = 'Show less ▴';
+        } else {
+            el.style.maxHeight = MSG_COLLAPSE_HEIGHT + 'px';
+            el.classList.add('fade-bottom');
+            btn.textContent = 'Show more ▾';
+            el.scrollIntoView({ block: 'nearest' });
+        }
+    });
+    el.insertAdjacentElement('afterend', btn);
+}
+function collapseLongMessagesIn(containerEl) {
+    containerEl.querySelectorAll('.msg-content').forEach(applyMessageCollapse);
+}
+
 let currentVramSnapshot = 0;
 let chatContext = []; // Stores conversation history for the API
 // isColdStart removed - all prompts now logged to CSV
@@ -746,11 +1183,14 @@ function handlePrefillProgress(progress, tps, nTokens) {
     if (!isNaN(progress) && !isNaN(tps)) {
         activePrefillSamples.push({ progress, tps });
     }
-    const elapsed = ((Date.now() - (window.__promptStartTime || Date.now())) / 1000).toFixed(1);
     const pct = isNaN(progress) ? 0 : (progress * 100).toFixed(1);
-    document.getElementById('status-indicator').innerText = isNaN(tps)
-        ? `Prefilling (${pct}%)... [${elapsed}s]`
-        : `Prefilling (${pct}%, ${tps.toFixed(0)} t/s)... [${elapsed}s]`;
+    // status-indicator's ticking text is owned solely by submitPrompt's own
+    // tpsLoop (1s interval) -- it used to also get overwritten from here,
+    // racing against tpsLoop at a different cadence (this fires whenever a
+    // PREFILL_PROGRESS broadcast happens to arrive, which is rate-limited
+    // server-side and not on a fixed schedule) and visibly flickering between
+    // the two independently-worded strings. This function still owns the
+    // sidebar metric/loading-bar/sparkline below, just not that one element.
 
     // Live prefill speed in the sidebar card, updated as real samples arrive
     if (!isNaN(tps)) {
@@ -790,10 +1230,8 @@ function hidePrefillLoadingBar() {
 // Handle live generation progress from server's print_timing SSE events (item 7 Step 2)
 // Format: GEN_PROGRESS:<tps>:<nDecoded>:<nTokens>
 function handleGenProgress(tps, nDecoded) {
-    const elapsed = ((Date.now() - (window.__promptStartTime || Date.now())) / 1000).toFixed(1);
-    document.getElementById('status-indicator').innerText = isNaN(tps)
-        ? `Generating... [${elapsed}s]`
-        : `Generating (${tps.toFixed(1)} t/s, ${nDecoded} tokens)... [${elapsed}s]`;
+    // status-indicator is owned by submitPrompt's tpsLoop -- see the matching
+    // note in handlePrefillProgress above.
 
     // Live gen speed in the sidebar card
     if (!isNaN(tps)) {
@@ -853,6 +1291,12 @@ async function submitPrompt() {
     const inputEl = document.getElementById('user-prompt');
     const text = inputEl.value.trim();
     if (!text) return;
+    // Clear immediately on send, not at completion -- clearing at completion
+    // both delayed the visual feedback of having sent (the box kept showing
+    // the just-submitted text for the whole generation) and blew away
+    // whatever the user had typed in the meantime if they'd started drafting
+    // their next message before this one finished.
+    inputEl.value = '';
 
     const timestamp = new Date().toLocaleTimeString();
     chatContext.push({ role: 'user', content: text, timestamp });
@@ -908,7 +1352,7 @@ async function submitPrompt() {
                         <div class="prefill-bar-fill bg-gradient-to-r from-yellow-600 to-yellow-400 h-full rounded-full transition-all duration-150 ease-out" style="width: 0%"></div>
                     </div>
                 </div>
-                <div class="hw-chart-container hidden mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-2 cursor-pointer" style="height:140px" onclick="expandHwChart()">
+                <div class="hw-chart-container hidden mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-2 cursor-pointer" style="height:140px" onclick="expandHwChart(this)">
                     <canvas class="hw-chart-canvas"></canvas>
                 </div>
             </div>
@@ -923,6 +1367,10 @@ async function submitPrompt() {
         </div>
     `;
     chatBox.scrollTop = chatBox.scrollHeight;
+    // The user bubble's content is static from the moment it's inserted, so
+    // it can be collapse-checked immediately (unlike the assistant bubble
+    // below, which is still empty and will stream in over time).
+    applyMessageCollapse(document.getElementById('active-ast').previousElementSibling.querySelector('.msg-content'));
     const astEl = document.getElementById('active-ast');
     const timelineEls = {
         container: astEl.querySelector('.metrics-timeline-container'),
@@ -952,6 +1400,16 @@ async function submitPrompt() {
     hwChartInst = null;
     hwChartContainer = astEl.querySelector('.hw-chart-container');
     hwChartCanvas = astEl.querySelector('.hw-chart-canvas');
+    // Attach this message's metrics array to ITS OWN container by reference
+    // (not a copy -- keeps growing as responseMetrics is pushed to while this
+    // is the active/streaming message). expandHwChart() reads from whichever
+    // container was actually clicked instead of always reading the shared
+    // module-level `responseMetrics`, which only ever reflects the latest
+    // message -- without this, clicking an older message's chart expanded
+    // using the wrong (newer, or empty) data, which is why it "seemed
+    // inconsistent" (worked right after that message finished, before the
+    // module-level variable got reassigned to the next one, broke after).
+    hwChartContainer.__hwMetrics = responseMetrics;
 
     // Start CSV Data payload
     sessionData = {
@@ -994,9 +1452,13 @@ async function submitPrompt() {
             const slots = await res.json();
             if (slots && slots.length > 0) {
                 const slot = slots.find(s => s.state === 1) || slots[0];
-                if (slot.n_prompt_tokens > 0) {
-                    const pct = Math.min((slot.n_decoded / slot.n_prompt_tokens) * 100, 100).toFixed(1);
-                    window.lastSlotProgress = `${slot.n_decoded} / ${slot.n_prompt_tokens} (${pct}%)`;
+                // n_decoded lives under next_token in llama-server's /slots
+                // response, not as a top-level field -- reading slot.n_decoded
+                // directly was always undefined, hence "undefined / N (NaN%)".
+                const nDecoded = slot.next_token?.n_decoded;
+                if (slot.n_prompt_tokens > 0 && nDecoded != null) {
+                    const pct = Math.min((nDecoded / slot.n_prompt_tokens) * 100, 100).toFixed(1);
+                    window.lastSlotProgress = `${nDecoded} / ${slot.n_prompt_tokens} (${pct}%)`;
                 }
             }
         } catch (e) {}
@@ -1012,6 +1474,7 @@ async function submitPrompt() {
         // Full history for expand modal
         tpsHistoryFull.push({ time: new Date().toLocaleTimeString(), tps });
         if (tpsHistoryFull.length > 200) tpsHistoryFull.shift();
+        refreshExpandedChartLive();
         
         tpsChart.data.labels = tpsHistory.map(h => h.time); 
         tpsChart.data.datasets[0].data = tpsHistory.map(h => null);
@@ -1092,10 +1555,26 @@ async function submitPrompt() {
                         // End of stream Usage metrics
                         if (data.usage) {
                             sessionData.genTokens = data.usage.completion_tokens;
-                            sessionData.reasonTokens = reasoningTokenCount; 
+                            sessionData.reasonTokens = reasoningTokenCount;
                             sessionData.promptTokens = data.usage.prompt_tokens;
+
+                            // Correct the live prefill estimate with the server's real
+                            // prompt_tokens count. The live value (set when the first
+                            // token arrived, above) divides an ESTIMATED new-message
+                            // token count by timeToFirstToken -- correct only when the
+                            // whole prior context is cache-hit and skipped. Whenever it
+                            // isn't (slot switch, cache eviction, first turn), the real
+                            // prompt_tokens llama-server actually processed is far larger
+                            // than the estimate, so the estimate-based tps reads far too
+                            // low (e.g. "1.5 t/s" for a request that really ran ~400 t/s).
+                            // Recompute from ground truth now that usage is known.
+                            if (timeToFirstToken > 0) {
+                                const realPromptTps = (data.usage.prompt_tokens / timeToFirstToken).toFixed(1);
+                                prefillMetrics = { time: timeToFirstToken.toFixed(1), tokens: data.usage.prompt_tokens, tps: realPromptTps };
+                                timelineEls.pLbl.innerHTML = `Prefill: <span class="val text-gray-200">${prefillMetrics.time}s | ${prefillMetrics.tokens}t | ${prefillMetrics.tps} t/s</span>`;
+                            }
                             sessionData.promptTps = prefillMetrics.tps;
-                            
+
                             const finalAnsTime = ((Date.now() - startTime) / 1000) - timeToFirstToken - timeToFirstContent;
                             answerMetrics = { time: finalAnsTime.toFixed(1), tokens: answerTokenCount, tps: (answerTokenCount/finalAnsTime).toFixed(1) };
                             timelineEls.aLbl.innerHTML = `Answer: <span class="val text-gray-200">${answerMetrics.time}s | ${answerMetrics.tokens}t | ${answerMetrics.tps} t/s</span>`;
@@ -1116,8 +1595,12 @@ async function submitPrompt() {
                             document.getElementById('metric-gen').innerText = `${sessionData.genTps} t/s`;
                             document.getElementById('metric-gen-tokens').innerText = `${data.usage.completion_tokens} tokens`;
 
-                            // Save to running averages
-                            saveMetricsToAverages(sessionData.promptTps, sessionData.genTps);
+                            // Running averages are now updated from the server's
+                            // client-agnostic COMPLETION broadcast (see the SSE
+                            // handler), not here -- this dashboard's own requests
+                            // trigger that same broadcast (server4.js's log-tailing
+                            // sees every request hitting llama-server, including
+                            // this one), so updating it here too would double-count.
 
                             // Lock in exact context tokens
                             currentContextTokens = data.usage.prompt_tokens + data.usage.completion_tokens;
@@ -1191,6 +1674,11 @@ async function submitPrompt() {
             }
         }
         chatContext.push({ role: 'assistant', content: fullContent, reasoning: fullReasoning, timestamp: new Date().toLocaleTimeString(), prefillMetrics, thinkMetrics, answerMetrics, responseMetrics, prefillSamples: activePrefillSamples });
+        // Now that streaming is done and fullContent is final, check whether
+        // this response is long enough to collapse -- checking mid-stream
+        // would mean the collapse boundary jumping around under the user's
+        // eyes while they're still reading the live response.
+        applyMessageCollapse(contentBody);
         currentContextTokens = estimatedPromptTokens + totalTokensGenerated;
         // Reset active chart references so pollTelemetry stops feeding them
         responseMetrics = [];
@@ -1204,14 +1692,18 @@ async function submitPrompt() {
         // Stop UI state
         clearInterval(tpsLoop);
         clearInterval(slotsLoop);
-        document.getElementById('submit-btn').disabled = false; document.getElementById('abort-btn').classList.add('hidden'); document.getElementById('status-indicator').classList.add('hidden'); inputEl.disabled = false; inputEl.value = ''; inputEl.focus();
-        
-        // Save averages to local storage at the end
-        saveMetricsToAverages(sessionData.promptTps, sessionData.genTps);
+        document.getElementById('submit-btn').disabled = false; document.getElementById('abort-btn').classList.add('hidden'); document.getElementById('status-indicator').classList.add('hidden'); inputEl.disabled = false; inputEl.focus();
 
         // Write to CSV
         try {
-            const logPayload = { ...sessionData, launchCommand: lastLaunchCommand };
+            const logPayload = {
+                ...sessionData,
+                launchCommand: lastLaunchCommand,
+                // Full config that actually booted this server (not current GUI
+                // state, which can drift) -- lets a later model-select/launch-mode
+                // change look up "what did I run last time" and restore it exactly.
+                configJson: lastKnownLaunchConfig ? JSON.stringify(lastKnownLaunchConfig) : ''
+            };
             await fetch('/api/log', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(logPayload) });
         } catch(e) {}
         
@@ -1247,13 +1739,24 @@ document.getElementById('server-ctx').addEventListener('input', (e) => {
 // --- Worker Docker Control & Polling Logic ---
 let showWorkerLogs = false;
 let workerStatusInterval = null;
-let workerLogsInterval = null;
+// workerLogsInterval declared near the top of the file (see comment there) --
+// applyLaunchMode() needs it to exist before this point during page load.
 
 async function updateWorkerStatus() {
+    // This is Docker+RPC-specific (SSH-polls the remote worker's docker compose
+    // status). It runs on a 5s interval regardless of launch mode -- without this
+    // guard, in local-multi-gpu mode it kept firing every 5s anyway (rpc-toggle
+    // defaults checked, worker-ssh has a default value, so the early-return
+    // below never triggered), polling a worker_ssh that isn't even relevant and
+    // periodically re-hiding #tensor-split-container out from under
+    // applyLaunchMode's unconditional "show it" for local mode -- which is why
+    // the tensor split slider would appear on refresh and vanish a few seconds
+    // later.
+    if (currentLaunchMode === 'local-multi-gpu') return;
     const workerSsh = document.getElementById('worker-ssh').value.trim();
     const rpcEnabled = document.getElementById('rpc-toggle').checked;
     const badge = document.getElementById('worker-status-badge');
-    
+
     if (!workerSsh || !rpcEnabled) {
         badge.className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500';
         badge.innerText = 'DISABLED';
@@ -1440,10 +1943,12 @@ document.getElementById('rpc-toggle').addEventListener('change', () => {
         document.getElementById('worker-status-badge').className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500';
         document.getElementById('worker-status-badge').innerText = 'DISABLED';
     }
+    updateSecondNodeVisibility();
+    refreshCommandPreview();
 });
 
 // --- Launch Mode: Docker+RPC Worker vs Local Multi-GPU (Vulkan) ---
-const LAST_DETECTED_DEVICES_KEY = 'last_detected_devices';
+// LAST_DETECTED_DEVICES_KEY declared near the top of the file -- see comment there.
 
 function applyLaunchMode(mode) {
     currentLaunchMode = mode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
@@ -1462,22 +1967,43 @@ function applyLaunchMode(mode) {
         updateWorkerStatus();
     }
 
-    // Worker Logs panel is meaningless in local mode -- there's no separate
-    // remote process to fetch logs from, it's all one process's stdout.
-    document.getElementById('worker-logs-container').classList.toggle('hidden', isLocal);
-    if (isLocal && workerLogsInterval) { clearInterval(workerLogsInterval); workerLogsInterval = null; }
+    updateSecondNodeVisibility();
 
-    // Both GPUs share one CPU/RAM pool on this host in local mode, so a
-    // duplicate "Worker" CPU/RAM reading would just be redundant.
-    document.getElementById('worker-ram-container').classList.toggle('hidden', isLocal);
-    document.querySelectorAll('.node-b-cpu-row').forEach(el => el.classList.toggle('hidden', isLocal));
-
+    // "GPU A"/"GPU B" now correctly corresponds to real data everywhere this
+    // is used (tensor split, telemetry legends, VRAM headers) -- pollTelemetry
+    // detects which vendor is actually in the GPU A dropdown and swaps
+    // stats.master/stats.worker to match before anything downstream reads
+    // them, so these labels and the data behind them stay consistent.
     document.querySelectorAll('.node-a-label').forEach(el => { el.textContent = isLocal ? 'GPU A' : 'Master'; });
-    document.querySelectorAll('.node-b-label').forEach(el => { el.textContent = isLocal ? 'GPU B (AMD)' : 'Worker'; });
+    document.querySelectorAll('.node-b-label').forEach(el => { el.textContent = isLocal ? 'GPU B' : 'Worker'; });
+}
+
+// Worker Logs / Worker RAM / the CPU-chart "Worker" legend row only make sense
+// when a second node is actually part of the current setup: always true in
+// local-multi-gpu mode, but in Docker+RPC mode only when the RPC toggle is
+// actually checked -- these used to be gated on isLocal alone, so switching
+// into Docker+RPC mode (or just leaving rpc-toggle at its default-checked
+// state with no real worker configured) showed a "Worker" row/panel that
+// would never have real data. Called from applyLaunchMode() (mode switches)
+// and the rpc-toggle listener (toggling it within Docker+RPC mode).
+function updateSecondNodeVisibility() {
+    // These three panels are specifically about a SEPARATE HOST's logs/RAM/CPU
+    // -- meaningless in local-multi-gpu mode (both GPUs share this one host's
+    // RAM/CPU/log stream, there's no second host) and meaningless in
+    // Docker+RPC mode when RPC isn't actually enabled (no second host
+    // configured at all). Only show them for an actual remote RPC worker.
+    const isLocal = currentLaunchMode === 'local-multi-gpu';
+    const showWorkerSecondary = !isLocal && document.getElementById('rpc-toggle').checked;
+    document.getElementById('worker-logs-container').classList.toggle('hidden', !showWorkerSecondary);
+    document.getElementById('worker-ram-container').classList.toggle('hidden', !showWorkerSecondary);
+    document.querySelectorAll('.node-b-cpu-row').forEach(el => el.classList.toggle('hidden', !showWorkerSecondary));
+    if (!showWorkerSecondary && workerLogsInterval) { clearInterval(workerLogsInterval); workerLogsInterval = null; }
 }
 
 document.getElementById('launch-mode-select').addEventListener('change', (e) => {
     applyLaunchMode(e.target.value);
+    refreshCommandPreview();
+    snapToLastUsedConfig();
 });
 
 function renderDeviceOptions(devices) {
@@ -1515,14 +2041,18 @@ document.getElementById('btn-detect-devices').addEventListener('click', async ()
         if (data.devices && data.devices.length > 0) {
             renderDeviceOptions(data.devices);
             dropdownRow.classList.remove('hidden');
+            document.getElementById('device-manual-row').classList.add('hidden');
             statusEl.classList.add('hidden');
             try { localStorage.setItem(LAST_DETECTED_DEVICES_KEY, JSON.stringify(data.devices)); } catch (e) {}
+            refreshCommandPreview();
         } else {
             dropdownRow.classList.add('hidden');
+            document.getElementById('device-manual-row').classList.remove('hidden');
             statusEl.textContent = `Detection failed${data.error ? ` (${data.error})` : ''} — enter device ids manually below.`;
         }
     } catch (e) {
         dropdownRow.classList.add('hidden');
+        document.getElementById('device-manual-row').classList.remove('hidden');
         statusEl.textContent = `Detection failed (${e.message}) — enter device ids manually below.`;
     }
 });
@@ -1530,16 +2060,21 @@ document.getElementById('btn-detect-devices').addEventListener('click', async ()
 // On load: if a previous Detect Devices run succeeded, pre-populate the
 // dropdowns from cache so the user isn't forced to re-detect every page load
 // (detection talks to the Vulkan/CUDA loader, which can be slow or flaky --
-// see server4.js /api/devices).
-(function restoreCachedDevices() {
+// see server4.js /api/devices). Declared as a plain function (not a
+// self-invoking one) and called explicitly near the top of the file, before
+// restoreLastLaunchConfig() -- that function tries to set the device
+// dropdowns' .value, which silently no-ops if the matching <option> doesn't
+// exist yet, same race as the fetchModels() one (see applyConfigToUI).
+function restoreCachedDevices() {
     try {
         const cached = JSON.parse(localStorage.getItem(LAST_DETECTED_DEVICES_KEY) || 'null');
         if (cached && cached.length > 0) {
             renderDeviceOptions(cached);
             document.getElementById('device-dropdown-row').classList.remove('hidden');
+            document.getElementById('device-manual-row').classList.add('hidden');
         }
     } catch (e) {}
-})();
+}
 
 // Initialize polling intervals
 workerStatusInterval = setInterval(updateWorkerStatus, 5000);
@@ -1555,7 +2090,17 @@ let telemetryHadFailures = false; // track if we ever had failures in this sessi
 const TELEMETRY_BASE_INTERVAL = 1000;
 const TELEMETRY_MAX_BACKOFF = 10000; // cap at 10s
 
+// monitor.py shells out to nvidia-smi/amdgpu_top per call, which can take
+// several real seconds under heavy GPU/CPU load (confirmed live at 5.5s+
+// during an active generation). Without a timeout, a slow response just made
+// this poll slow; without this in-flight guard, the interval below (fires
+// every pollingRate ms, default 1s) would pile up multiple concurrent
+// requests on top of an already-slow monitor.py, making it slower still.
+let telemetryPollInFlight = false;
+let lastPolledTelemetry = null; // { t, stats } -- see its own assignment below for why
 async function pollTelemetry() {
+    if (telemetryPollInFlight) return;
+    telemetryPollInFlight = true;
     try {
         // Reset consecutive failure counter on success
         const wasFailing = telemetryConsecutiveFailures > 0;
@@ -1577,9 +2122,30 @@ async function pollTelemetry() {
         const res = await fetch('http://localhost:8081/stats', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: isLocalMode ? 'amd' : '' })
+            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: isLocalMode ? 'amd' : '' }),
+            signal: AbortSignal.timeout(10000)
         });
         const stats = await res.json();
+
+        // monitor.py always queries nvidia-smi into the "master" slot and
+        // amdgpu_top into the "worker" slot, regardless of which physical
+        // device the user assigned to GPU A vs GPU B in the launch config --
+        // those two things were completely unlinked, so every telemetry card
+        // showed the NVIDIA card as "Master"/GPU A even when the user had
+        // picked it as GPU B. Detect which vendor is actually in the GPU A
+        // dropdown and swap the two stat objects to match, so everything
+        // downstream (which already just reads stats.master/stats.worker)
+        // lines up with what the user actually selected. Only possible when
+        // device detection succeeded (the dropdown's option text carries the
+        // vendor name); manual device-id entry has no vendor info to go on,
+        // so it's left as the historical nvidia=master default in that case.
+        if (isLocalMode && stats.worker) {
+            const gpuASelect = document.getElementById('device-select-a');
+            const gpuASelectedText = (gpuASelect && gpuASelect.selectedOptions[0]) ? gpuASelect.selectedOptions[0].textContent : '';
+            if (/amd|radeon/i.test(gpuASelectedText)) {
+                const tmp = stats.master; stats.master = stats.worker; stats.worker = tmp;
+            }
+        }
 
         // Guard: if the monitor didn't return master data at all, bail out
         // cleanly instead of throwing partway through a bunch of DOM writes.
@@ -1587,6 +2153,16 @@ async function pollTelemetry() {
             document.getElementById('worker-status-badge').innerText = 'NO DATA';
             return;
         }
+
+        // Cached for Monitor's rolling omni graph (see renderSessionOmniPreview)
+        // to fill in the idle lulls between requests -- GPU power/temp/util
+        // don't stop existing just because nothing's generating, but the
+        // per-request sample buffer (activeRequestSamples) only accumulates
+        // while a request is actually in flight, so without this the graph
+        // had real data during generation and a dead gap in between, making
+        // distant timestamps jump straight from one cluster of points to the
+        // next instead of a continuous idle line.
+        lastPolledTelemetry = { t: Date.now(), stats };
         
         let masterPwr = 0, masterTemp = 0, workerPwr = 0, workerTemp = 0;
 
@@ -1645,11 +2221,19 @@ async function pollTelemetry() {
                 // Full history for expand modal
                 netHistoryFull.push({ time: new Date().toLocaleTimeString(), value: mbs });
                 if (netHistoryFull.length > 200) netHistoryFull.shift();
+                refreshExpandedChartLive();
             }
             if (isNum(currentBytes)) lastNetBytes = currentBytes;
         }
         
-        const workerReporting = !!(stats.worker && stats.worker.gpu_util !== undefined) && (rpcEnabled || isLocalMode);
+        // `gpu_util !== undefined` alone isn't a reliable "is this real data" check --
+        // monitor.py's Offline/unreachable fallback dict (SSH failed, or amdgpu_top
+        // failed) still sets gpu_util: 0, which is defined. Without also checking the
+        // error flags, an unreachable RPC worker (rpc-toggle checked but nothing
+        // actually running) rendered a flat "worker" line on every chart at 0 instead
+        // of no line at all.
+        const workerDataIsReal = !!stats.worker && !stats.worker.nvidia_smi_error && !stats.worker.amdgpu_top_error;
+        const workerReporting = workerDataIsReal && (rpcEnabled || isLocalMode);
         if (workerReporting) {
             workerStatsMissingSince = null;
             workerPwr = stats.worker.gpu_pwr;
@@ -1827,22 +2411,33 @@ async function pollTelemetry() {
             gpuUtilHistory.push({ time: now, master: stats.master.gpu_util, worker: null });
             cpuTempHistory.push({ time: now, master: stats.master.cpu_temp ?? 0, worker: null });
 
+            // Dataset[1] (the worker/GPU-B line) must still be cleared here, not
+            // just left unset -- otherwise it keeps rendering whatever stale data
+            // it last had from before workerReporting went false (e.g. a
+            // transient blip, or simply never having been cleared since boot),
+            // which is why a "worker" line kept appearing on these charts even
+            // with no second node actually reporting.
             const tSlice = tempHistory.slice(-30);
-            tempChart.data.labels = tSlice.map(h => h.time); tempChart.data.datasets[0].data = tSlice.map(h => h.master); tempChart.update('none');
+            tempChart.data.labels = tSlice.map(h => h.time); tempChart.data.datasets[0].data = tSlice.map(h => h.master); tempChart.data.datasets[1].data = tSlice.map(h => h.worker); tempChart.update('none');
             const pSlice = pwrHistory.slice(-30);
-            pwrChart.data.labels = pSlice.map(h => h.time); pwrChart.data.datasets[0].data = pSlice.map(h => h.master); pwrChart.update('none');
+            pwrChart.data.labels = pSlice.map(h => h.time); pwrChart.data.datasets[0].data = pSlice.map(h => h.master); pwrChart.data.datasets[1].data = pSlice.map(h => h.worker); pwrChart.update('none');
             const cSlice = cpuHistory.slice(-30);
-            cpuChart.data.labels = cSlice.map(h => h.time); cpuChart.data.datasets[0].data = cSlice.map(h => h.master); cpuChart.update('none');
+            cpuChart.data.labels = cSlice.map(h => h.time); cpuChart.data.datasets[0].data = cSlice.map(h => h.master); cpuChart.data.datasets[1].data = cSlice.map(h => h.worker); cpuChart.update('none');
             const guSlice = gpuUtilHistory.slice(-30);
-            gpuUtilChart.data.labels = guSlice.map(h => h.time); gpuUtilChart.data.datasets[0].data = guSlice.map(h => h.master); gpuUtilChart.update('none');
+            gpuUtilChart.data.labels = guSlice.map(h => h.time); gpuUtilChart.data.datasets[0].data = guSlice.map(h => h.master); gpuUtilChart.data.datasets[1].data = guSlice.map(h => h.worker); gpuUtilChart.update('none');
             const ctSlice = cpuTempHistory.slice(-30);
-            cpuTempChart.data.labels = ctSlice.map(h => h.time); cpuTempChart.data.datasets[0].data = ctSlice.map(h => h.master); cpuTempChart.update('none');
+            cpuTempChart.data.labels = ctSlice.map(h => h.time); cpuTempChart.data.datasets[0].data = ctSlice.map(h => h.master); cpuTempChart.data.datasets[1].data = ctSlice.map(h => h.worker); cpuTempChart.update('none');
         }
+        refreshExpandedChartLive();
         // --- Feed active response hw chart ---
         if (typeof responseMetrics !== 'undefined' && hwChartCanvas) {
-            // Capture current generation t/s from the live sidebar metric
-            const genTpsText = document.getElementById('metric-gen').innerText;
-            const genTpsVal = parseFloat(genTpsText) || 0;
+            // Split into a prefill-phase line and a gen-phase line, same idea as
+            // the server-side per-request samples: only one of the two is ever
+            // populated for a given sample, based on which phase was active when
+            // it was taken, so they render as two distinct non-overlapping lines.
+            const isPrefillPhase = currentResponsePhase === 'prefill';
+            const prefillTpsVal = parseFloat(document.getElementById('metric-prefill').innerText) || 0;
+            const genTpsVal = parseFloat(document.getElementById('metric-gen').innerText) || 0;
             const snap = {
                 t: Date.now(),
                 masterPwr: stats.master ? stats.master.gpu_pwr : 0,
@@ -1851,57 +2446,38 @@ async function pollTelemetry() {
                 masterCpuUtil: stats.master ? stats.master.cpu_util : 0,
                 workerPwr: workerReporting ? stats.worker.gpu_pwr : 0,
                 workerTemp: workerReporting ? stats.worker.gpu_temp : 0,
+                workerGpuUtil: workerReporting ? stats.worker.gpu_util : 0,
                 netMbps: parseFloat(sessionData.netThroughput) || 0,
-                genTps: genTpsVal
+                prefillTps: isPrefillPhase ? prefillTpsVal : null,
+                genTps: isPrefillPhase ? null : genTpsVal
             };
             responseMetrics.push(snap);
+            refreshExpandedHwChartLive();
 
             // Phase-dependent color for the Tokens/Sec line
             const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
             const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
 
             if (hwChartInst) {
-                const labels = responseMetrics.map((_, i) => i);
-                hwChartInst.data.labels = labels;
-                hwChartInst.data.datasets[0].data = responseMetrics.map(s => s.masterPwr);
-                hwChartInst.data.datasets[1].data = responseMetrics.map(s => s.workerPwr);
-                hwChartInst.data.datasets[2].data = responseMetrics.map(s => s.masterTemp);
-                hwChartInst.data.datasets[3].data = responseMetrics.map(s => s.masterGpuUtil);
-                hwChartInst.data.datasets[4].data = responseMetrics.map(s => s.netMbps);
-                // Tokens/Sec line (dataset 5) — update color to match current phase
-                hwChartInst.data.datasets[5].data = responseMetrics.map(s => s.genTps);
-                hwChartInst.data.datasets[5].borderColor = tpsLineColor;
-                // CPU Util line (dataset 6)
-                hwChartInst.data.datasets[6].data = responseMetrics.map(s => s.masterCpuUtil);
+                hwChartInst.data.datasets = buildOmniDatasets(responseMetrics, tpsLineColor);
                 hwChartInst.update('none');
             } else if (responseMetrics.length >= 2 && hwChartContainer) {
                 hwChartContainer.classList.remove('hidden');
+                // Compact options for this small inline preview -- no axis
+                // titles/time labels (not enough room to be legible at this
+                // size), but the same color-matched tooltip and per-GPU/
+                // prefill-vs-gen data as the full expand-modal version. Click
+                // through to the expand modal (onclick="expandHwChart(this)"
+                // on the container) for the fully-labeled reading.
+                const compactOptions = buildOmniOptions();
+                compactOptions.scales.x.display = false;
+                compactOptions.scales.x.title.display = false;
+                compactOptions.scales.y.title.display = false;
+                compactOptions.scales.y2.title.display = false;
                 hwChartInst = new Chart(hwChartCanvas.getContext('2d'), {
                     type: 'line',
-                    data: {
-                        labels: responseMetrics.map((_, i) => i),
-                        datasets: [
-                            { label: 'M-GPU W', data: responseMetrics.map(s => s.masterPwr), borderColor: 'rgba(250,204,21,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                            { label: 'W-GPU W', data: responseMetrics.map(s => s.workerPwr), borderColor: 'rgba(248,113,113,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                            { label: 'M-Temp °C', data: responseMetrics.map(s => s.masterTemp), borderColor: 'rgba(251,146,60,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                            { label: 'GPU Util %', data: responseMetrics.map(s => s.masterGpuUtil), borderColor: 'rgba(167,139,250,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                            { label: 'Net MB/s', data: responseMetrics.map(s => s.netMbps), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                            // New: Tokens/Sec with dynamic phase color on y2 (0-100 range shared with GPU util)
-                            { label: 'Tok/s', data: responseMetrics.map(s => s.genTps), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y2' },
-                            // New: CPU Util % on y2
-                            { label: 'CPU %', data: responseMetrics.map(s => s.masterCpuUtil), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
-                        ]
-                    },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
-                        interaction: { intersect: false, mode: 'index' },
-                        plugins: { legend: { display: true, labels: { color: '#6b7280', font: { size: 9 }, boxWidth: 10, padding: 6 } } },
-                        scales: {
-                            x: { display: false },
-                            y: { position: 'left', grid: { color: 'rgba(55,65,81,0.4)' }, ticks: { color: '#6b7280', font: { size: 9 } } },
-                            y2: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#6b7280', font: { size: 9 } }, min: 0, max: 100 }
-                        }
-                    }
+                    data: { datasets: buildOmniDatasets(responseMetrics, tpsLineColor) },
+                    options: compactOptions
                 });
             }
         }
@@ -1924,6 +2500,8 @@ async function pollTelemetry() {
             const backoffInterval = Math.min(TELEMETRY_BASE_INTERVAL * (2 ** Math.min(telemetryConsecutiveFailures - 1, 4)), TELEMETRY_MAX_BACKOFF);
             setTelemetryInterval(backoffInterval);
         }
+    } finally {
+        telemetryPollInFlight = false;
     }
 }
 
@@ -2020,16 +2598,16 @@ function renderChatSession(messages, scrollToIndex = -1) {
                             ${msg.thinkMetrics ? `<div class="label-think text-blue-500/80 font-mono">Think: <span class="val text-gray-200">${msg.thinkMetrics.time}s | ${msg.thinkMetrics.tokens}t | ${msg.thinkMetrics.tps} t/s</span></div>` : ''}
                             ${msg.answerMetrics ? `<div class="label-answer text-green-500/80 font-mono">Answer: <span class="val text-gray-200">${msg.answerMetrics.time}s | ${msg.answerMetrics.tokens}t | ${msg.answerMetrics.tps} t/s</span></div>` : ''}
                         </div>
-                        ${(msg.responseMetrics && msg.responseMetrics.length >= 2) ? `<div class="hw-history-chart-wrapper mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-1" style="height:90px"><canvas class="hw-history-chart" data-metrics='${JSON.stringify(msg.responseMetrics).replace(/'/g, "&#39;")}'></canvas></div>` : ''}
+                        ${(msg.responseMetrics && msg.responseMetrics.length >= 2) ? `<div class="hw-history-chart-wrapper mt-2 border border-gray-800/60 rounded-lg bg-gray-950/50 p-1 cursor-pointer" style="height:90px" onclick="expandHwChart(this)"><canvas class="hw-history-chart" data-metrics='${JSON.stringify(msg.responseMetrics).replace(/'/g, "&#39;")}'></canvas></div>` : ''}
                     </div>
                     ` : ''}
                     ${msg.reasoning ? `
                     <div class="reasoning-container border border-gray-800 rounded-lg bg-gray-950/50 mb-3 mt-2">
                         <div class="flex justify-between px-3 py-1.5 bg-gray-800/30 text-[10px] text-gray-400 border-b border-gray-800 cursor-pointer hover:bg-gray-800/50 transition-colors" onclick="toggleReasoning(this)">
                             <span>🧠 Reasoning Trace <span class="r-tokens text-gray-500 ml-1">(~${Math.ceil(msg.reasoning.length/4)} tokens)</span></span>
-                            <span class="r-icon">▲</span>
+                            <span class="r-icon">▼</span>
                         </div>
-                        <div class="reasoning-body text-xs text-gray-500 font-mono p-3 overflow-x-auto overflow-y-hidden relative cursor-pointer" onclick="toggleReasoning(this.previousElementSibling)">${escapeHtml(msg.reasoning)}</div>
+                        <div class="reasoning-body text-xs text-gray-500 font-mono p-3 overflow-x-auto overflow-y-hidden relative cursor-pointer fade-bottom" style="max-height: 4.5rem;" onclick="toggleReasoning(this.previousElementSibling)">${escapeHtml(msg.reasoning)}</div>
                     </div>
                     ` : ''}
                     <div class="msg-content prose prose-invert max-w-none text-sm overflow-x-auto break-words">${marked.parse(msg.content)}</div>
@@ -2038,6 +2616,7 @@ function renderChatSession(messages, scrollToIndex = -1) {
         }
     });
     
+    collapseLongMessagesIn(chatBox);
     setTimeout(() => {
         if (scrollToIndex >= 0) {
             const target = document.getElementById(`msg-${scrollToIndex}`);
@@ -2050,6 +2629,12 @@ function renderChatSession(messages, scrollToIndex = -1) {
             try {
                 const metrics = JSON.parse(canvas.dataset.metrics);
                 if (!metrics || metrics.length < 2) return;
+                // Attach to the clickable wrapper (see the onclick="expandHwChart(this)"
+                // added above) so clicking a historical session's mini-chart expands it
+                // the same way a live message's does -- these previously had no
+                // expand handler wired up at all.
+                const wrapper = canvas.closest('.hw-history-chart-wrapper');
+                if (wrapper) wrapper.__hwMetrics = metrics;
                 new Chart(canvas.getContext('2d'), {
                     type: 'line',
                     data: {
@@ -2090,14 +2675,21 @@ function renderChatHistory() {
         
         const header = document.createElement('div');
         header.className = 'p-2 cursor-pointer hover:bg-gray-800 text-indigo-300 font-medium flex justify-between items-center';
-        header.innerHTML = `<span>Session: ${date}</span><span class="text-[10px] text-gray-500">${session.messages.length / 2} pairs</span>`;
+        header.innerHTML = `<span>Session: ${date}</span><span class="text-[10px] text-gray-500">${session.messages.length} msgs</span>`;
         
         const msgList = document.createElement('div');
         msgList.className = 'hidden flex-col divide-y divide-gray-700/30 bg-gray-900 border-t border-gray-700/50';
         
         session.messages.filter(m => m.role === 'user').forEach(msg => {
             const row = document.createElement('div');
-            row.className = 'p-2 pl-4 text-[10px] text-gray-400 truncate hover:text-gray-200 cursor-pointer';
+            // min-w-0 is required for truncate to actually take effect here --
+            // row is a flex item (msgList is flex-col when expanded), and flex
+            // items default to min-width:auto, which lets them grow to fit
+            // their full text content regardless of the parent's width,
+            // silently defeating text-overflow:ellipsis. Without it these were
+            // rendering at full length (visually clipped raggedly by an
+            // ancestor's overflow-hidden at best), not truncated to one line.
+            row.className = 'p-2 pl-4 text-[10px] text-gray-400 truncate w-full min-w-0 hover:text-gray-200 cursor-pointer';
             row.innerText = msg.content;
             row.onclick = () => { 
                 if (session.id !== currentSessionId) {
@@ -2231,22 +2823,39 @@ document.getElementById('close-csv-btn').addEventListener('click', () => {
 // --- Expand Chart Modal ---
 window.chartEvents = [];
 let expandedChartInst = null;
-window.expandChart = function(chartId, title) {
+// Which chart (if any) is currently open in the expand modal -- checked by
+// refreshExpandedChartLive(), called from every place the underlying history
+// arrays get a new data point, so the modal updates in real time instead of
+// showing a static snapshot from the moment it was opened.
+let currentExpandedChartId = null;
+let currentExpandedIsHw = false;
+
+function closeExpandModal() {
     const modal = document.getElementById('expand-modal');
-    const titleEl = document.getElementById('expand-modal-title');
-    const canvas = document.getElementById('expandedChartCanvas');
-    
-    titleEl.innerText = title;
-    modal.classList.remove('hidden'); modal.classList.add('flex');
-    
-    // Re-render chart with full history
-    let fullLabels = [];
-    let fullData0 = [];
-    let fullData1 = [];
-    let isSingleLine = false;
-    let singleColor = null;
-    let singleLabel = '';
-    
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+    expandedChartInst?.destroy();
+    expandedChartInst = null;
+    currentExpandedChartId = null;
+    currentExpandedIsHw = false;
+    currentExpandedHwMetricsRef = null;
+    currentExpandedMonitorRunId = null;
+}
+window.closeExpandModal = closeExpandModal;
+document.getElementById('expand-modal').addEventListener('click', (e) => {
+    // Only the backdrop itself, not a click that bubbled up from the header,
+    // chart, or close button -- those already have their own handling (or
+    // shouldn't close the modal at all, e.g. clicking the chart to hover it).
+    if (e.target === e.currentTarget) closeExpandModal();
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !document.getElementById('expand-modal').classList.contains('hidden')) {
+        closeExpandModal();
+    }
+});
+
+function getExpandChartData(chartId) {
+    let fullLabels = [], fullData0 = [], fullData1 = [], isSingleLine = false, singleColor = null, singleLabel = '';
     if (chartId === 'tempChart') { fullLabels = tempHistory.map(h=>h.time); fullData0 = tempHistory.map(h=>h.master); fullData1 = tempHistory.map(h=>h.worker); }
     else if (chartId === 'pwrChart') { fullLabels = pwrHistory.map(h=>h.time); fullData0 = pwrHistory.map(h=>h.master); fullData1 = pwrHistory.map(h=>h.worker); }
     else if (chartId === 'cpuChart') { fullLabels = cpuHistory.map(h=>h.time); fullData0 = cpuHistory.map(h=>h.master); fullData1 = cpuHistory.map(h=>h.worker); }
@@ -2260,11 +2869,40 @@ window.expandChart = function(chartId, title) {
         fullLabels = tpsHistoryFull.map(h=>h.time); fullData0 = tpsHistoryFull.map(h=>h.tps);
         isSingleLine = true; singleColor = 'rgba(74, 222, 128, 1)'; singleLabel = 'Tokens/sec';
     }
-    else return;
+    else return null;
+    return { fullLabels, fullData0, fullData1, isSingleLine, singleColor, singleLabel };
+}
+
+// Called from every history-array push site (see call sites) -- no-ops
+// unless the currently-open modal chart matches, so it's safe to call
+// unconditionally from all of them.
+function refreshExpandedChartLive() {
+    if (!currentExpandedChartId || currentExpandedIsHw || !expandedChartInst) return;
+    const data = getExpandChartData(currentExpandedChartId);
+    if (!data) return;
+    expandedChartInst.data.labels = data.fullLabels;
+    expandedChartInst.data.datasets[0].data = data.fullData0;
+    if (!data.isSingleLine) expandedChartInst.data.datasets[1].data = data.fullData1;
+    expandedChartInst.update('none');
+}
+
+window.expandChart = function(chartId, title) {
+    const modal = document.getElementById('expand-modal');
+    const titleEl = document.getElementById('expand-modal-title');
+    const canvas = document.getElementById('expandedChartCanvas');
+
+    titleEl.innerText = title;
+    modal.classList.remove('hidden'); modal.classList.add('flex');
+    currentExpandedChartId = chartId;
+    currentExpandedIsHw = false;
+
+    const chartData = getExpandChartData(chartId);
+    if (!chartData) return;
+    const { fullLabels, fullData0, fullData1, isSingleLine, singleColor, singleLabel } = chartData;
 
     setTimeout(() => {
         if (expandedChartInst) { expandedChartInst.destroy(); }
-        
+
         const verticalLinePlugin = {
             id: 'verticalLines',
             afterDraw: chart => {
@@ -2335,49 +2973,603 @@ window.expandChart = function(chartId, title) {
     }, 50);
 };
 
-// Expands the live per-response hardware chart (hw-chart-container) into the
-// shared #expand-modal. Distinct from expandChart() above because it plots
-// responseMetrics (per-answer samples), not the sidebar's rolling histories.
-window.expandHwChart = function() {
-    if (!responseMetrics || responseMetrics.length < 2) return;
+// Expands a per-response hardware chart (hw-chart-container) into the shared
+// #expand-modal. Distinct from expandChart() above because it plots
+// per-answer samples, not the sidebar's rolling histories.
+//
+// `containerEl` is the specific .hw-chart-container that was clicked (see the
+// `onclick="expandHwChart(this)"` in the message template) -- reads that
+// element's OWN __hwMetrics array (attached by reference when that message
+// started streaming) rather than the shared module-level `responseMetrics`,
+// which only ever reflects the CURRENT/latest message. Without this, clicking
+// an older message's chart expanded using whatever the newest message's data
+// happened to be (or nothing, if no new message had started yet) -- which is
+// why it "seemed inconsistent, but mostly worked": right after a message
+// finished it happened to still be the one `responseMetrics` pointed at, and
+// broke as soon as a new message started.
+let currentExpandedHwMetricsRef = null;
+
+// Shared Chart.js construction for every "omni graph" in the dashboard --
+// the inline mini chart in a live/historical chat bubble (hwChartInst), the
+// expand-modal version (renderOmniChartCore, used by both that and
+// expandMonitorRequestChart's Monitor/History table rows), and the rolling
+// session-wide graph (sessionOmniPreviewChart). One dataset builder + one
+// options builder means a labeling/color/axis fix here applies everywhere at
+// once instead of drifting across four near-duplicate chart configs.
+//
+// netMbps/prefillTps/genTps are frontend-observed-only metrics for chat-
+// message-sourced samples (a client-side delta calc and the live sidebar
+// readout respectively) -- server-sourced samples (any Monitor/History row or
+// session-omni sample, backed by markRequestActivity's capture rather than a
+// chat message's own responseMetrics) simply won't have netMbps, so that one
+// line renders as a gap for those, while everything else populates normally.
+function formatOmniTimeLabel(t) {
+    return t ? new Date(t).toLocaleTimeString([], { hour12: false }) : '';
+}
+
+// {x,y} point objects (x = real epoch ms) plus a linear x-scale, rather than
+// a plain value array plotted against a shared category-label array. With a
+// category axis, a chart's whole horizontal scale is spaced by POINT COUNT,
+// not real time -- on a sliding window (Monitor's "last 2 minutes" preview)
+// the point count changes on every tick as samples age in/out, so the entire
+// line visibly rescaled/wobbled each refresh even though nothing about the
+// underlying data was unstable. Linear x keeps each point pinned to its
+// actual timestamp, so the shape only changes where the data actually did.
+function toPoints(metrics, key) {
+    return metrics.map(s => ({ x: s.t, y: s[key] ?? null }));
+}
+
+function buildOmniDatasets(metrics, tpsLineColor) {
+    return [
+        { label: 'GPU A Power (W)', data: toPoints(metrics, 'masterPwr'), borderColor: 'rgba(250,204,21,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
+        { label: 'GPU B Power (W)', data: toPoints(metrics, 'workerPwr'), borderColor: 'rgba(248,113,113,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
+        { label: 'GPU A Temp (°C)', data: toPoints(metrics, 'masterTemp'), borderColor: 'rgba(251,146,60,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+        { label: 'GPU B Temp (°C)', data: toPoints(metrics, 'workerTemp'), borderColor: 'rgba(244,63,94,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+        { label: 'GPU A Util (%)', data: toPoints(metrics, 'masterGpuUtil'), borderColor: 'rgba(167,139,250,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
+        { label: 'GPU B Util (%)', data: toPoints(metrics, 'workerGpuUtil'), borderColor: 'rgba(217,70,239,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
+        { label: 'Net MB/s', data: toPoints(metrics, 'netMbps'), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
+        // Prefill and gen tps are mutually exclusive per-sample (each sample is
+        // only ever in one phase), so these render as two distinct
+        // non-overlapping segments rather than one line switching color.
+        { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y2', spanGaps: false },
+        { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y2', spanGaps: false },
+        { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
+    ];
+}
+
+// Draws each visible line's current value directly next to its point at the
+// hovered x position, color-matched to that line -- the built-in tooltip box
+// lists every value in one stacked column, which is hard to tie back to which
+// line is which at a glance. This runs alongside the normal tooltip (kept on,
+// with color-matched text -- see buildOmniTooltipOptions) rather than
+// replacing it, so exact values are still available in one place too.
+const omniPointLabelsPlugin = {
+    id: 'omniPointLabels',
+    afterDraw(chart) {
+        const tooltip = chart.tooltip;
+        if (!tooltip || !tooltip.opacity || !tooltip.dataPoints || tooltip.dataPoints.length === 0) return;
+        const idx = tooltip.dataPoints[0].dataIndex;
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.font = '10px ui-monospace, monospace';
+        ctx.textBaseline = 'middle';
+        chart.data.datasets.forEach((ds, dsIndex) => {
+            const meta = chart.getDatasetMeta(dsIndex);
+            if (meta.hidden) return;
+            const point = meta.data[idx];
+            const val = ds.data[idx]?.y;
+            if (!point || val == null || isNaN(val)) return;
+            const text = Number(val).toFixed(1);
+            const x = point.x + 6;
+            const y = point.y;
+            const w = ctx.measureText(text).width + 6;
+            ctx.fillStyle = 'rgba(17,24,39,0.85)';
+            ctx.fillRect(x - 2, y - 7, w, 14);
+            ctx.fillStyle = ds.borderColor;
+            ctx.fillText(text, x, y);
+        });
+        ctx.restore();
+    }
+};
+
+function buildOmniOptions() {
+    return {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+        interaction: { intersect: false, mode: 'index' },
+        plugins: {
+            legend: { display: true, labels: { color: '#9ca3af', font: { size: 9 }, boxWidth: 10, padding: 6 } },
+            tooltip: {
+                titleFont: { size: 10 }, bodyFont: { size: 11 }, padding: 8,
+                usePointStyle: true, boxWidth: 8, boxHeight: 8,
+                // Color each tooltip line's TEXT to match its line, not just the
+                // small swatch -- the default white-on-dark text made every row
+                // look the same regardless of which line it belonged to.
+                callbacks: {
+                    // Linear x-axis title defaults to the raw epoch-ms number --
+                    // format it back into a real time like the axis ticks.
+                    title: (items) => items.length ? formatOmniTimeLabel(items[0].parsed.x) : '',
+                    labelTextColor: (item) => item.dataset.borderColor,
+                    label: (item) => item.formattedValue == null ? null : `${item.dataset.label}: ${item.formattedValue}`
+                }
+            }
+        },
+        scales: {
+            x: {
+                type: 'linear',
+                display: true,
+                ticks: {
+                    color: '#6b7280', font: { size: 9 }, maxTicksLimit: 8, autoSkip: true, maxRotation: 0,
+                    callback: (value) => formatOmniTimeLabel(value)
+                },
+                grid: { color: 'rgba(55,65,81,0.2)' },
+                title: { display: true, text: 'Time', color: '#6b7280', font: { size: 9 } }
+            },
+            y: {
+                position: 'left',
+                grid: { color: 'rgba(55,65,81,0.4)' },
+                ticks: { color: '#6b7280', font: { size: 9 } },
+                title: { display: true, text: 'Watts / MB/s', color: '#6b7280', font: { size: 9 } }
+            },
+            y2: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: '#6b7280', font: { size: 9 } },
+                min: 0, max: 100,
+                title: { display: true, text: '% / °C / tok/s', color: '#6b7280', font: { size: 9 } }
+            }
+        }
+    };
+}
+
+function renderOmniChartCore(metrics, titleText, tpsLineColor) {
     const modal = document.getElementById('expand-modal');
     const titleEl = document.getElementById('expand-modal-title');
     const canvas = document.getElementById('expandedChartCanvas');
-
-    titleEl.innerText = 'Live Response Telemetry';
+    titleEl.innerText = titleText;
     modal.classList.remove('hidden'); modal.classList.add('flex');
-
     if (expandedChartInst) { expandedChartInst.destroy(); }
-
-    const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
-    const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
-
     expandedChartInst = new Chart(canvas.getContext('2d'), {
         type: 'line',
+        data: { datasets: buildOmniDatasets(metrics, tpsLineColor) },
+        options: buildOmniOptions(),
+        plugins: [omniPointLabelsPlugin]
+    });
+}
+
+window.expandHwChart = function(containerEl) {
+    const metrics = (containerEl && containerEl.__hwMetrics) ? containerEl.__hwMetrics : responseMetrics;
+    if (!metrics || metrics.length < 2) return;
+
+    // Only the currently-streaming message's array is still being pushed to
+    // (older ones are frozen once superseded) -- label accordingly, and only
+    // that case will actually update live via refreshExpandedHwChartLive().
+    const isLive = metrics === responseMetrics;
+    currentExpandedChartId = null;
+    currentExpandedIsHw = true;
+    currentExpandedHwMetricsRef = metrics;
+    currentExpandedMonitorRunId = null;
+
+    const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
+    const tpsLineColor = isLive ? (phaseColors[currentResponsePhase] || '#22c55e') : phaseColors.answer;
+    renderOmniChartCore(metrics, isLive ? 'Live Response Telemetry' : 'Response Telemetry', tpsLineColor);
+};
+
+// Monitor Mode's per-request expand -- `inlineMetrics` comes straight from the
+// live COMPLETION SSE payload for rows that arrived while this tab was open;
+// backfilled rows (loaded from CSV, no inline metrics) fetch them from the
+// server's short in-memory ring buffer instead (see /api/logs/samples),
+// which only covers recently-completed requests -- older ones have no sample
+// data to show, same as any CSV row from before this feature existed.
+let currentExpandedMonitorRunId = null;
+window.expandMonitorRequestChart = async function(runId, inlineMetrics) {
+    currentExpandedChartId = null;
+    currentExpandedIsHw = false;
+    currentExpandedHwMetricsRef = null;
+    currentExpandedMonitorRunId = runId;
+
+    let metrics = inlineMetrics;
+    if (!metrics) {
+        const modal = document.getElementById('expand-modal');
+        const titleEl = document.getElementById('expand-modal-title');
+        titleEl.innerText = 'Loading...';
+        modal.classList.remove('hidden'); modal.classList.add('flex');
+        try {
+            const res = await fetch(`/api/logs/samples?runId=${encodeURIComponent(runId)}`);
+            const data = await res.json();
+            metrics = data.samples || [];
+        } catch (e) {
+            metrics = [];
+        }
+    }
+    if (!metrics || metrics.length < 2) {
+        document.getElementById('expand-modal-title').innerText = 'No telemetry samples for this request';
+        return;
+    }
+    renderOmniChartCore(metrics, 'Request Telemetry', 'rgba(74,222,128,1)');
+};
+
+// Live counterpart to refreshExpandedChartLive() for the hw chart -- called
+// right after responseMetrics.push(snap). No-ops for a frozen/historical
+// message's chart since its metrics array reference has stopped growing.
+function refreshExpandedHwChartLive() {
+    if (!currentExpandedIsHw || !expandedChartInst || !currentExpandedHwMetricsRef) return;
+    const metrics = currentExpandedHwMetricsRef;
+    const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
+    const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
+    expandedChartInst.data.datasets = buildOmniDatasets(metrics, tpsLineColor);
+    expandedChartInst.update('none');
+}
+
+// --- Monitor (this session only) + History (all-time) ---
+// Both are client-agnostic: every completed request (this dashboard's own
+// chat, opencode, Cline, curl -- anything hitting the server) shows up in
+// both, independent of any specific chat message's DOM lifecycle. Monitor is
+// fed purely by live COMPLETION SSE events (server4.js's logCompletedRequest)
+// arriving since this page loaded -- no CSV backfill, so it's an honest view
+// of "what's happened in front of me." History backfills everything ever
+// logged from the CSV on first visit, then also stays live via the same
+// COMPLETION events.
+let monitorTpsChart = null;
+let monitorDataPoints = []; // [{time, promptTps, genTps}]
+let monitorRequestRows = []; // [{timestamp, model, promptTokens, promptTps, genTokens, genTps, wallTime}]
+let isMonitorModeActive = false;
+let isHistoryModeActive = false;
+const SESSION_HISTORY_CAP = 500;
+
+function initMonitorChart() {
+    if (monitorTpsChart) return;
+    const canvas = document.getElementById('monitorTpsChart');
+    if (!canvas) return;
+    monitorTpsChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
         data: {
-            labels: responseMetrics.map((_, i) => i),
+            labels: [],
             datasets: [
-                { label: 'M-GPU W', data: responseMetrics.map(s => s.masterPwr), borderColor: 'rgba(250,204,21,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                { label: 'W-GPU W', data: responseMetrics.map(s => s.workerPwr), borderColor: 'rgba(248,113,113,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                { label: 'M-Temp °C', data: responseMetrics.map(s => s.masterTemp), borderColor: 'rgba(251,146,60,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                { label: 'GPU Util %', data: responseMetrics.map(s => s.masterGpuUtil), borderColor: 'rgba(167,139,250,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                { label: 'Net MB/s', data: responseMetrics.map(s => s.netMbps), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                { label: 'Tok/s', data: responseMetrics.map(s => s.genTps), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y2' },
-                { label: 'CPU %', data: responseMetrics.map(s => s.masterCpuUtil), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
+                { label: 'Prompt t/s', data: [], borderColor: 'rgba(96,165,250,1)', backgroundColor: 'rgba(96,165,250,0.08)', fill: true, borderWidth: 1.5, pointRadius: 2, tension: 0.2 },
+                { label: 'Gen t/s', data: [], borderColor: 'rgba(74,222,128,1)', backgroundColor: 'rgba(74,222,128,0.08)', fill: true, borderWidth: 1.5, pointRadius: 2, tension: 0.2 }
             ]
         },
         options: {
             responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
             interaction: { intersect: false, mode: 'index' },
-            plugins: { legend: { display: true, labels: { color: '#6b7280', font: { size: 9 }, boxWidth: 10, padding: 6 } } },
+            plugins: { legend: { display: true, labels: { color: '#9ca3af' } } },
             scales: {
-                x: { display: false },
-                y: { position: 'left', grid: { color: 'rgba(55,65,81,0.4)' }, ticks: { color: '#6b7280', font: { size: 9 } } },
-                y2: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#6b7280', font: { size: 9 } }, min: 0, max: 100 }
+                x: { ticks: { color: '#6b7280', maxTicksLimit: 8 }, grid: { color: 'rgba(55,65,81,0.3)' } },
+                y: { ticks: { color: '#6b7280' }, grid: { color: 'rgba(55,65,81,0.3)' }, beginAtZero: true }
             }
         }
     });
-};
+}
+
+function renderMonitorChart() {
+    if (!monitorTpsChart) return;
+    monitorTpsChart.data.labels = monitorDataPoints.map(p => new Date(p.time).toLocaleTimeString());
+    monitorTpsChart.data.datasets[0].data = monitorDataPoints.map(p => p.promptTps);
+    monitorTpsChart.data.datasets[1].data = monitorDataPoints.map(p => p.genTps);
+    monitorTpsChart.update('none');
+}
+
+function renderRequestTable(rows, tbodyId, emptyId, clickVarName) {
+    const tbody = document.getElementById(tbodyId);
+    const emptyEl = document.getElementById(emptyId);
+    if (!tbody) return;
+    if (rows.length === 0) {
+        tbody.innerHTML = '';
+        emptyEl.classList.remove('hidden');
+        return;
+    }
+    emptyEl.classList.add('hidden');
+    const displayRows = [...rows].reverse().slice(0, 100); // most recent first
+    // Row click expands the omni graph for that specific request -- live rows
+    // carry their samples inline (from the COMPLETION payload), backfilled
+    // rows fetch them from the server's short ring buffer on demand (see
+    // expandMonitorRequestChart). Keyed by array position since the metrics
+    // array can't survive being embedded in an HTML attribute the way the
+    // simple fields can. Monitor and History each get their own window var
+    // (clickVarName) so switching tabs can't clobber the other's row index.
+    window[clickVarName] = displayRows;
+    tbody.innerHTML = displayRows.map((r, i) => `
+        <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer" onclick="expandMonitorRequestChart(window.${clickVarName}[${i}].runId, window.${clickVarName}[${i}].metrics)" title="Click for this request's telemetry">
+            <td class="px-4 py-1.5 text-gray-500">${r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--'}</td>
+            <td class="px-4 py-1.5 truncate max-w-[220px]" title="${escapeHtml(r.model || '')}">${escapeHtml(r.model || '--')}</td>
+            <td class="px-4 py-1.5 text-right font-mono">${r.promptTokens ?? '--'}</td>
+            <td class="px-4 py-1.5 text-right font-mono text-blue-400">${r.promptTps != null ? Number(r.promptTps).toFixed(1) : '--'}</td>
+            <td class="px-4 py-1.5 text-right font-mono">${r.genTokens ?? '--'}</td>
+            <td class="px-4 py-1.5 text-right font-mono text-green-400">${r.genTps != null ? Number(r.genTps).toFixed(1) : '--'}</td>
+            <td class="px-4 py-1.5 text-right font-mono">${r.wallTime != null ? Number(r.wallTime).toFixed(1) : '--'}</td>
+        </tr>
+    `).join('');
+}
+function renderMonitorTable() {
+    renderRequestTable(monitorRequestRows, 'monitor-requests-body', 'monitor-requests-empty', '__monitorRowsForClick');
+}
+
+// --- Session-wide continuous omni graph (top of Monitor tab) ---
+// A flat concatenation of every completed request's already phase-tagged
+// samples (see server4.js logCompletedRequest's prefillTps/genTps split) in
+// the order they arrived this session -- reuses real, already-computed data
+// rather than polling anything new, so it naturally has gaps during idle
+// stretches between requests (nothing was sampled because nothing was
+// running -- an honest reflection of "activity", not a fabricated flat line).
+let sessionOmniHistory = [];
+// Client-side-only idle-lull filler points (see renderSessionOmniPreview) --
+// deliberately NOT part of sessionOmniHistory above, which only ever holds
+// real per-request data.
+let sessionIdleSamples = [];
+let sessionOmniPreviewChart = null;
+let sessionOmniRefreshTimer = null;
+const SESSION_OMNI_WINDOW_MS = 2 * 60 * 1000;
+const SESSION_OMNI_CAP = 20000; // guard against unbounded growth on a long-uptime session
+
+const SESSION_OMNI_TPS_COLOR = 'rgba(74,222,128,1)';
+
+function initSessionOmniChart() {
+    const canvas = document.getElementById('sessionOmniChart');
+    if (!canvas) return;
+    if (!sessionOmniPreviewChart) {
+        // Compact options, same reasoning as the inline chat-bubble chart --
+        // this is a small always-on preview card; click it for the fully
+        // labeled expand-modal version (bound below).
+        const compactOptions = buildOmniOptions();
+        compactOptions.scales.x.display = false;
+        compactOptions.scales.x.title.display = false;
+        compactOptions.scales.y.title.display = false;
+        compactOptions.scales.y2.title.display = false;
+        sessionOmniPreviewChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: { datasets: buildOmniDatasets([], SESSION_OMNI_TPS_COLOR) },
+            options: compactOptions
+        });
+    }
+    const card = document.getElementById('session-omni-card');
+    if (card && !card.dataset.clickBound) {
+        card.dataset.clickBound = '1';
+        card.addEventListener('click', () => {
+            if (sessionOmniHistory.length < 2) return;
+            renderOmniChartCore(sessionOmniHistory, 'Session Telemetry (since page load)', SESSION_OMNI_TPS_COLOR);
+        });
+    }
+}
+
+async function renderSessionOmniPreview() {
+    if (!sessionOmniPreviewChart) return;
+    const cutoff = Date.now() - SESSION_OMNI_WINDOW_MS;
+    let slice = sessionOmniHistory.filter(s => s.t > cutoff);
+    // sessionOmniHistory only gains points once a request fully COMPLETES
+    // (see handleMonitorCompletion) -- for a request that's still streaming,
+    // that could be minutes away, making this graph look dead the whole time
+    // despite real GPU/telemetry activity happening right now. Peek the
+    // server's in-progress sample buffer (not yet phase-split into prefill/gen
+    // since the final timing that split depends on isn't known until
+    // completion -- those two lines just stay gapped for these samples) and
+    // append it for display only; the real, correctly-tagged version of these
+    // same samples lands in sessionOmniHistory for good once the request
+    // actually completes, so nothing here is persisted or double-counted.
+    try {
+        const res = await fetch('/api/logs/active-samples');
+        const data = await res.json();
+        if (data.samples && data.samples.length > 0) {
+            const activeSlice = data.samples.filter(s => s.t > cutoff);
+            slice = slice.concat(activeSlice);
+        }
+    } catch (e) { /* best-effort -- still show whatever completed history we have */ }
+    // Fill idle lulls between requests with the same live stats already
+    // driving the sidebar cards -- GPU power/temp/util are real and moving
+    // (idling, but real) even when nothing's generating, but no sample from
+    // either source above ever gets taken during a lull (activeRequestSamples
+    // only accumulates while a request is in flight). Without this, the graph
+    // had a real cluster of points during each generation and a dead gap
+    // between them, making distant timestamps jump straight from one cluster
+    // to the next. Unlike sessionOmniHistory (permanent, request-completion-
+    // only) these DO need to accumulate across ticks -- one fresh point every
+    // 2s tick is what makes this a continuous line instead of a single dot
+    // that gets thrown away and recomputed each render. Kept in its own
+    // array (not sessionOmniHistory) so it stays cleanly separate from the
+    // real, permanent per-request data and only ever needs window-filtering,
+    // never phase-tagging or dedup against real samples.
+    if (lastPolledTelemetry && lastPolledTelemetry.t > cutoff) {
+        const lastIdle = sessionIdleSamples[sessionIdleSamples.length - 1];
+        const lastReal = slice[slice.length - 1];
+        const haveRecentPoint = (lastIdle && lastIdle.t > lastPolledTelemetry.t - 2500)
+            || (lastReal && lastReal.t > lastPolledTelemetry.t - 2500);
+        if (!haveRecentPoint) {
+            const s = lastPolledTelemetry.stats;
+            sessionIdleSamples.push({
+                t: lastPolledTelemetry.t,
+                masterPwr: s.master?.gpu_pwr ?? 0, masterTemp: s.master?.gpu_temp ?? 0,
+                masterGpuUtil: s.master?.gpu_util ?? 0, masterCpuUtil: s.master?.cpu_util ?? 0,
+                workerPwr: s.worker?.gpu_pwr ?? 0, workerTemp: s.worker?.gpu_temp ?? 0,
+                workerGpuUtil: s.worker?.gpu_util ?? 0,
+                prefillTps: null, genTps: null
+            });
+        }
+    }
+    // Age out idle points that fell out of the window -- unlike the other two
+    // sources (already filtered fresh above), this one is a persistent array
+    // that needs its own pruning or it'd grow forever.
+    sessionIdleSamples = sessionIdleSamples.filter(s => s.t > cutoff);
+    slice = slice.concat(sessionIdleSamples);
+    // Sort by time -- history, in-progress, and idle samples arrive from
+    // three different sources and aren't guaranteed to already be in order
+    // once concatenated; a line chart needs ascending x to render as a
+    // sensible line rather than zig-zagging.
+    slice.sort((a, b) => a.t - b.t);
+    sessionOmniPreviewChart.data.datasets = buildOmniDatasets(slice, SESSION_OMNI_TPS_COLOR);
+    sessionOmniPreviewChart.update('none');
+}
+
+// The "last 2 minutes" window needs to keep sliding even with no new
+// completions (old points should age out), so it gets its own light re-filter
+// tick -- only runs while Monitor is actually the visible tab. Also the only
+// thing driving the in-progress-request peek above, since that has no other
+// event to hook (nothing fires client-side while a request is mid-stream from
+// some OTHER client, e.g. opencode/curl).
+function startSessionOmniRefresh() {
+    if (sessionOmniRefreshTimer) return;
+    sessionOmniRefreshTimer = setInterval(renderSessionOmniPreview, 2000);
+}
+function stopSessionOmniRefresh() {
+    clearInterval(sessionOmniRefreshTimer);
+    sessionOmniRefreshTimer = null;
+}
+
+// Called from the SSE handler for every COMPLETION event -- keeps the
+// underlying arrays current regardless of which tab is active, but only
+// re-renders the DOM/chart when Monitor is actually visible (no point paying
+// render cost for a hidden tab). History is intentionally NOT updated here in
+// its backfilled array -- it re-backfills fresh from the CSV each time you
+// switch to it, so it doesn't need live event-driven upkeep.
+function handleMonitorCompletion(payload) {
+    monitorDataPoints.push({ time: payload.timestamp || Date.now(), promptTps: payload.promptTps, genTps: payload.genTps });
+    if (monitorDataPoints.length > SESSION_HISTORY_CAP) monitorDataPoints.shift();
+    monitorRequestRows.push({
+        timestamp: payload.timestamp, model: payload.model, runId: payload.runId,
+        promptTokens: payload.promptTokens, promptTps: payload.promptTps,
+        genTokens: payload.genTokens, genTps: payload.genTps,
+        wallTime: payload.wallTime != null ? parseFloat(payload.wallTime) : null,
+        // Carried inline so this specific row's omni graph doesn't need a
+        // round trip to /api/logs/samples -- only backfilled (History) rows
+        // need that fallback.
+        metrics: (payload.metrics && payload.metrics.length >= 2) ? payload.metrics : null
+    });
+    if (monitorRequestRows.length > SESSION_HISTORY_CAP) monitorRequestRows.shift();
+
+    if (payload.metrics && payload.metrics.length > 0) {
+        sessionOmniHistory.push(...payload.metrics);
+        if (sessionOmniHistory.length > SESSION_OMNI_CAP) {
+            sessionOmniHistory.splice(0, sessionOmniHistory.length - SESSION_OMNI_CAP);
+        }
+    }
+
+    if (isMonitorModeActive) {
+        renderMonitorChart();
+        renderMonitorTable();
+        renderSessionOmniPreview();
+    }
+}
+
+// --- History (all-time, backfilled from CSV) ---
+let historyTpsChart = null;
+let historyDataPoints = [];
+let historyRequestRows = [];
+const HISTORY_CAP = 200;
+
+function initHistoryChart() {
+    if (historyTpsChart) return;
+    const canvas = document.getElementById('historyTpsChart');
+    if (!canvas) return;
+    historyTpsChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                { label: 'Prompt t/s', data: [], borderColor: 'rgba(96,165,250,1)', backgroundColor: 'rgba(96,165,250,0.08)', fill: true, borderWidth: 1.5, pointRadius: 2, tension: 0.2 },
+                { label: 'Gen t/s', data: [], borderColor: 'rgba(74,222,128,1)', backgroundColor: 'rgba(74,222,128,0.08)', fill: true, borderWidth: 1.5, pointRadius: 2, tension: 0.2 }
+            ]
+        },
+        options: {
+            responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
+            interaction: { intersect: false, mode: 'index' },
+            plugins: { legend: { display: true, labels: { color: '#9ca3af' } } },
+            scales: {
+                x: { ticks: { color: '#6b7280', maxTicksLimit: 8 }, grid: { color: 'rgba(55,65,81,0.3)' } },
+                y: { ticks: { color: '#6b7280' }, grid: { color: 'rgba(55,65,81,0.3)' }, beginAtZero: true }
+            }
+        }
+    });
+}
+
+function renderHistoryChart() {
+    if (!historyTpsChart) return;
+    historyTpsChart.data.labels = historyDataPoints.map(p => new Date(p.time).toLocaleTimeString());
+    historyTpsChart.data.datasets[0].data = historyDataPoints.map(p => p.promptTps);
+    historyTpsChart.data.datasets[1].data = historyDataPoints.map(p => p.genTps);
+    historyTpsChart.update('none');
+}
+
+function renderHistoryTable() {
+    renderRequestTable(historyRequestRows, 'history-requests-body', 'history-requests-empty', '__historyRowsForClick');
+}
+
+// Re-fetches on every visit (not one-shot) -- History is meant to reflect
+// "everything ever logged" at the moment you're looking, including whatever
+// completed while you were on a different tab.
+async function backfillHistoryData() {
+    const statusEl = document.getElementById('history-chart-status');
+    try {
+        const res = await fetch(`/api/logs/recent?limit=${HISTORY_CAP}`);
+        const data = await res.json();
+        const rows = data.rows || [];
+        historyDataPoints = rows.map(r => ({ time: new Date(r.timestamp).getTime(), promptTps: r.promptTps, genTps: r.genTps }));
+        historyRequestRows = rows.map(r => ({
+            timestamp: r.timestamp, model: r.model, runId: r.runId,
+            promptTokens: r.promptTokens, promptTps: r.promptTps,
+            genTokens: r.genTokens, genTps: r.genTps, wallTime: r.wallTime,
+            metrics: null // backfilled rows fetch samples on demand via /api/logs/samples
+        }));
+        if (statusEl) statusEl.textContent = '';
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'Failed to load history';
+    }
+    renderHistoryChart();
+    renderHistoryTable();
+}
+
+// --- Tab switching (Interactive / Monitor / History) ---
+function setTabButtonActive(id, active) {
+    document.getElementById(id).className = active
+        ? 'px-4 py-2 text-xs font-semibold text-indigo-400 border-b-2 border-indigo-500'
+        : 'px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300';
+}
+document.getElementById('tab-interactive').addEventListener('click', () => {
+    isMonitorModeActive = false;
+    isHistoryModeActive = false;
+    stopSessionOmniRefresh();
+    setTabButtonActive('tab-interactive', true);
+    setTabButtonActive('tab-monitor', false);
+    setTabButtonActive('tab-history', false);
+    document.getElementById('monitor-view').classList.add('hidden');
+    document.getElementById('monitor-view').classList.remove('flex');
+    document.getElementById('history-view').classList.add('hidden');
+    document.getElementById('history-view').classList.remove('flex');
+    document.getElementById('chat-container').classList.remove('hidden');
+    document.getElementById('chat-input-bar').classList.remove('hidden');
+});
+document.getElementById('tab-monitor').addEventListener('click', () => {
+    isMonitorModeActive = true;
+    isHistoryModeActive = false;
+    setTabButtonActive('tab-monitor', true);
+    setTabButtonActive('tab-interactive', false);
+    setTabButtonActive('tab-history', false);
+    document.getElementById('monitor-view').classList.remove('hidden');
+    document.getElementById('monitor-view').classList.add('flex');
+    document.getElementById('history-view').classList.add('hidden');
+    document.getElementById('history-view').classList.remove('flex');
+    document.getElementById('chat-container').classList.add('hidden');
+    document.getElementById('chat-input-bar').classList.add('hidden');
+    initMonitorChart();
+    initSessionOmniChart();
+    renderMonitorChart();
+    renderMonitorTable();
+    renderSessionOmniPreview();
+    startSessionOmniRefresh();
+});
+document.getElementById('tab-history').addEventListener('click', () => {
+    isMonitorModeActive = false;
+    isHistoryModeActive = true;
+    stopSessionOmniRefresh();
+    setTabButtonActive('tab-history', true);
+    setTabButtonActive('tab-interactive', false);
+    setTabButtonActive('tab-monitor', false);
+    document.getElementById('history-view').classList.remove('hidden');
+    document.getElementById('history-view').classList.add('flex');
+    document.getElementById('monitor-view').classList.add('hidden');
+    document.getElementById('monitor-view').classList.remove('flex');
+    document.getElementById('chat-container').classList.add('hidden');
+    document.getElementById('chat-input-bar').classList.add('hidden');
+    initHistoryChart();
+    backfillHistoryData();
+});
 
 // --- Sidebar Resizer ---
 const resizer = document.getElementById('sidebar-resizer');
