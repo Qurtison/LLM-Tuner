@@ -2411,21 +2411,32 @@ async function pollTelemetry() {
             reasonMap.get(r).add('worker');
         }
 
+        // Always render all 4 badges (2 thermal, 2 power), toggling each between
+        // gray/inactive and lit-up/active -- previously only active badges were
+        // rendered at all, with the container's display toggled none/flex around
+        // them. min-height on the container doesn't apply to a display:none
+        // element, so that container collapsed to zero height between throttle
+        // events and sprang back when one fired, bouncing the graph below it on
+        // every transition. Keeping a constant 4-badge layout means the card's
+        // height never changes regardless of throttle state.
         let badgeHTML = '';
         let badgeHTMLPwr = '';
-        for (const [reason, sources] of reasonMap) {
+        for (const [reason, label] of Object.entries(throttleLabels)) {
             const isThermal = thermalReasons.has(reason);
-            const label = throttleLabels[reason] || reason;
-            const sourceList = [...sources].join(' + ');
-            const tooltip = `${sourceList.charAt(0).toUpperCase() + sourceList.slice(1)}: ${label}`;
-            const badge = `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${isThermal ? 'bg-red-900/40 text-red-300 border border-red-500/50' : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50'}" title="${tooltip}">${label}</span>`;
+            const sources = reasonMap.get(reason);
+            const active = !!sources;
+            const activeClasses = isThermal
+                ? 'bg-red-900/40 text-red-300 border border-red-500/50'
+                : 'bg-yellow-900/30 text-yellow-300 border border-yellow-600/50';
+            const inactiveClasses = 'bg-gray-800/40 text-gray-600 border border-gray-700/50';
+            const tooltip = active
+                ? `${[...sources].join(' + ').replace(/^./, c => c.toUpperCase())}: ${label}`
+                : `${label} (not currently active)`;
+            const badge = `<span class="px-1.5 py-0.5 text-[9px] font-semibold rounded ${active ? activeClasses : inactiveClasses}" title="${tooltip}">${label}</span>`;
             if (isThermal) badgeHTML += badge; else badgeHTMLPwr += badge;
         }
         badgeContainer.innerHTML = badgeHTML;
-        // Item 16 Step 3: dynamic visibility — hide container when no throttle reasons
-        badgeContainer.style.display = badgeHTML ? '' : 'none';
         badgeContainerPwr.innerHTML = badgeHTMLPwr;
-        badgeContainerPwr.style.display = badgeHTMLPwr ? '' : 'none';
 
         if (workerReporting) {
             document.getElementById('current-temp').innerHTML = `<span class="text-yellow-400">${fmtUnit(masterTemp, '°C')}</span> <span class="text-gray-500">/</span> <span class="text-red-400">${fmtUnit(workerTemp, '°C')}</span>`;
