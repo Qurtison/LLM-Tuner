@@ -314,7 +314,12 @@ function resolveLaunchCommand(config, launchMode) {
         baseArgs = [];
         mapModelPath = (p) => p; // raw host path, no container mount to remap into
         deviceArgs = [];
-        if (config.deviceA && config.deviceB) {
+        // deviceA === deviceB happens whenever device detection finds exactly one
+        // device (no eGPU/second GPU plugged in) -- renderDeviceOptions() has no
+        // "None" option, so both dropdowns default to the same lone device. Treat
+        // that as "no split configured" rather than passing llama-server a
+        // redundant `-dev X,X --split-mode layer` for a single physical GPU.
+        if (config.deviceA && config.deviceB && config.deviceA !== config.deviceB) {
             deviceArgs.push('--split-mode', 'layer', '-dev', `${config.deviceA},${config.deviceB}`);
             if (config.tensorSplit && config.tensorSplit < 100) {
                 deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
