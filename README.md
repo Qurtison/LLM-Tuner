@@ -1,3 +1,45 @@
+## Launching: local GPU(s) + optional RPC worker
+
+The master (`llama-server`) always launches natively now -- there's no more
+Docker-vs-local mode choice. `dashboard.config.json`'s `llamaServerBuilds`
+picks which compiled binary to run (e.g. Vulkan-only vs. a combined
+CUDA+Vulkan build), and up to two local devices (GPU A / GPU B) can be
+selected for a split, both detected automatically on page load.
+
+RPC Worker is a separate, optional toggle (off by default) that adds a remote
+`llama.cpp` RPC worker as a second compute target alongside your local GPU(s).
+Enabling it forces GPU B back to "None" -- the split is always exactly 2-way
+(this machine vs. the worker), not a 3-way local+local+remote split.
+
+**RPC needs a local build compiled with `-DGGML_RPC=ON`.** The
+`build-cuda-vulkan` build in `../llama-official/llama.cpp/build-cuda-vulkan`
+was compiled without it (`GGML_RPC:BOOL=OFF` in its `CMakeCache.txt`), so
+using RPC with that build will fail until it's rebuilt with RPC enabled, e.g.:
+
+```bash
+cmake -B build-cuda-vulkan -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_RPC=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cuda-vulkan --config Release -j$(nproc)
+```
+
+The worker side is still assumed to run via Docker (`docker-compose.worker.yml`,
+started/stopped over SSH by the RPC Worker box's Start/Stop buttons) --
+unchanged by this. Whether the worker actually needs Docker either is an open
+question, just not one this covers.
+
+**Known gap: RPC doesn't currently pin the local device list.** When RPC is
+on, `resolveLaunchCommand` (server4.js) passes `--rpc host:port --split-mode
+layer -ts N,M` but no `-dev` flag, relying on llama-server's own device
+auto-detection to land on exactly 2 devices (the one local GPU + the RPC
+worker). That's only actually 2 devices when there's just one local GPU
+available. With the eGPU reconnected, auto-detection would see both local
+GPUs *and* the RPC device -- 3 devices against a 2-value `-ts` -- so RPC +
+local dual-GPU is untested and likely broken until this is fixed. The GUI
+forces GPU B to "None" whenever RPC is on specifically to dodge this in the
+common case; it doesn't fix the underlying command. Verify `--list-devices`
+output on the rebuilt binary and figure out the right explicit `-dev` list
+(does it need the RPC device named in it too, and if so what's its id?)
+before trusting RPC together with a second local GPU.
+
 ## Offline / no external dependencies
 
 The frontend used to load Tailwind, Chart.js, and marked from public CDNs, so

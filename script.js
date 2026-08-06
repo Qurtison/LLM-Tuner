@@ -26,15 +26,15 @@ let lastNetBytes = 0;
 let isModelLoaded = false;
 let masterBaseVram = 0;
 
-// Launch mode: 'docker-rpc' (existing Docker+SSH-worker path) or
-// 'local-multi-gpu' (direct llama-server spawn across 2 local GPUs, e.g. a
-// 4090 + a Vulkan eGPU -- see server4.js /api/start). Drives which config
-// panel is shown, what pollTelemetry's POST body looks like, and whether the
-// "worker" telemetry slot means "remote RPC node" or "second local GPU".
-let currentLaunchMode = 'docker-rpc';
+// The master always launches natively now -- there's no other launch mode to
+// choose (see server4.js resolveLaunchCommand). Kept as a constant (not a
+// selector-driven variable) purely so config objects, the CSV, and saved
+// profiles keep writing/reading the same 'launchMode' field they always have
+// -- 'local-multi-gpu' is a historical value now, not a meaningful choice.
+const currentLaunchMode = 'local-multi-gpu';
 // Declared here (not down with the rest of the worker-logs-toggle state,
-// see "Worker Docker Control & Polling Logic" below) because applyLaunchMode()
-// references it and can run as early as page-load via restoreLastLaunchConfig()
+// see "Worker Docker Control & Polling Logic" below) because it
+// can be referenced as early as page-load via restoreLastLaunchConfig()
 // -- a `let` declared later in the file is in the temporal dead zone until its
 // own declaration line executes, so referencing it that early throws a
 // ReferenceError even though the reference is inside a function (only the
@@ -295,15 +295,15 @@ document.getElementById('build-select').addEventListener('change', detectDevices
 // a saved deviceA/deviceB selection into them.
 const devicesDetectedPromise = buildsLoadedPromise.then(detectDevices);
 
-// --- Auto-snap to last-used config for this model + launch mode ---
-// Triggered only by model-select and launch-mode-select changes -- the two
+// --- Auto-snap to last-used config for this model + transport ---
+// Triggered only by model-select and rpc-toggle changes -- the two
 // "which setup am I in" selections the user actually asked for ("whenever I
-// select a model, or when I select a launch mode"). Deliberately NOT wired to
-// finer controls within the launch-mode panel (device pickers, tensor split):
-// those don't change the model+transport lookup key for local-multi-gpu mode
-// (transport is always 'Local' regardless of which specific 2 GPUs are
-// chosen), so re-snapping there would just re-fetch the same historical
-// config and silently revert whatever device pairing the user just picked.
+// select a model, or when I turn RPC on/off"). Deliberately NOT wired to
+// finer controls (device pickers, tensor split): those don't change the
+// model+transport lookup key (transport is 'Local' whenever RPC is off,
+// regardless of which specific local GPUs are chosen), so re-snapping there
+// would just re-fetch the same historical config and silently revert
+// whatever device pairing the user just picked.
 let isApplyingHistoricalSnap = false;
 // Bumped by both this function and refreshCommandPreview() on every tracked
 // field change. snapToLastUsedConfig's fetch is a real network+file-read round
@@ -323,8 +323,8 @@ async function snapToLastUsedConfig() {
         const modelPath = document.getElementById('model-select').value;
         const modelBasename = modelPath ? modelPath.split('/').pop() : '';
         if (!modelBasename) return;
-        const isLocal = currentLaunchMode === 'local-multi-gpu';
-        const transport = isLocal ? 'Local' : document.getElementById('transport-type').value;
+        const rpcEnabled = document.getElementById('rpc-toggle').checked;
+        const transport = rpcEnabled ? document.getElementById('transport-type').value : 'Local';
         const params = new URLSearchParams({ model: modelBasename, transport: transport || '' });
         const res = await fetch(`/api/logs/summary?${params.toString()}`);
         const data = await res.json();
@@ -358,8 +358,8 @@ async function loadHistoricalStats() {
         // wrong model" (in practice, whatever was logged most recently
         // server-side, regardless of what's selected here).
         if (!modelBasename) { el.classList.add('hidden'); el.innerHTML = ''; return; }
-        const isLocal = currentLaunchMode === 'local-multi-gpu';
-        const transport = isLocal ? 'Local' : document.getElementById('transport-type').value;
+        const rpcEnabled = document.getElementById('rpc-toggle').checked;
+        const transport = rpcEnabled ? document.getElementById('transport-type').value : 'Local';
         const params = new URLSearchParams({ model: modelBasename });
         if (transport) params.set('transport', transport);
 
@@ -683,15 +683,16 @@ async function applyConfigToUI(config) {
     if (config.ctx != null) document.getElementById('server-ctx').value = config.ctx;
     if (config.ngl != null) document.getElementById('server-ngl').value = config.ngl;
 
-    // Restore launch mode
-    const mode = config.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
-    document.getElementById('launch-mode-select').value = mode;
-    applyLaunchMode(mode);
-
     // Restore toggles
     const rpcChecked = !!config.rpcTarget;
     document.getElementById('rpc-toggle').checked = rpcChecked;
     if (config.rpcTarget) document.getElementById('worker-ssh').value = config.rpcTarget;
+    if (config.transport) document.getElementById('transport-type').value = config.transport;
+    // Syncs worker-ssh-controls' enabled/disabled state and GPU B's forced-None
+    // state to whatever rpc-toggle was just set to -- setting .checked directly
+    // (as opposed to a real click) doesn't fire a 'change' event, so this
+    // wouldn't otherwise run for a restored config with RPC enabled.
+    applyRpcToggleUI();
     if (config.fa != null) document.getElementById('server-fa').checked = config.fa;
     if (config.reasoningPreserve != null) document.getElementById('reasoning-preserve-toggle').checked = config.reasoningPreserve;
 
@@ -701,16 +702,19 @@ async function applyConfigToUI(config) {
     if (config.tensorSplit != null) document.getElementById('server-tensor-split').value = config.tensorSplit;
     document.getElementById('server-tensor-split').dispatchEvent(new Event('input'));
 
-    // Restore local-multi-gpu device selection (manual fields always; dropdowns
-    // only if detection already populated matching options) -- await the
-    // auto-detect triggered on load so this isn't racing it.
+    // Restore device selection (manual fields always; dropdowns only if
+    // detection already populated matching options) -- await the auto-detect
+    // triggered on load so this isn't racing it. Skip GPU B when RPC is
+    // enabled (applyRpcToggleUI already forced it to "None" above) -- an old
+    // saved profile from before RPC and local split were mutually exclusive
+    // could otherwise reintroduce a stale deviceB value here.
     await devicesDetectedPromise;
     if (config.deviceA != null) {
         document.getElementById('device-manual-a').value = config.deviceA;
         const selA = document.getElementById('device-select-a');
         if ([...selA.options].some(o => o.value === config.deviceA)) selA.value = config.deviceA;
     }
-    if (config.deviceB != null) {
+    if (config.deviceB != null && !rpcChecked) {
         document.getElementById('device-manual-b').value = config.deviceB;
         const selB = document.getElementById('device-select-b');
         if ([...selB.options].some(o => o.value === config.deviceB)) selB.value = config.deviceB;
@@ -805,23 +809,26 @@ function populateLaunchConfig(config) {
 function buildConfigFromUI() {
     const mtpEnabled = document.getElementById('mtp-toggle').checked;
     const verbosityVal = parseInt(document.getElementById('server-verbosity').value);
-    const isLocal = currentLaunchMode === 'local-multi-gpu';
-    // Local mode: dropdown value wins if Detect Devices populated it and it's
-    // still selected, otherwise fall back to whatever's in the manual text field.
-    const deviceA = isLocal ? (document.getElementById('device-select-a').value || document.getElementById('device-manual-a').value.trim() || null) : null;
-    const deviceB = isLocal ? (document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim() || null) : null;
+    // Dropdown value wins if detection populated it and it's still selected,
+    // otherwise fall back to whatever's in the manual text field. GPU B is
+    // forced to "None" whenever RPC is enabled (see applyRpcToggleUI), so
+    // reading it here needs no separate RPC gate.
+    const deviceA = document.getElementById('device-select-a').value || document.getElementById('device-manual-a').value.trim() || null;
+    const deviceB = document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim() || null;
+    const rpcEnabled = document.getElementById('rpc-toggle').checked;
     return {
         modelPath: document.getElementById('model-select').value, // full host path, not just filename
         build: document.getElementById('build-select').value || null,
         ctx: parseInt(document.getElementById('server-ctx').value),
         ngl: parseInt(document.getElementById('server-ngl').value),
-        launchMode: currentLaunchMode,
-        rpcTarget: (!isLocal && document.getElementById('rpc-toggle').checked) ? document.getElementById('worker-ssh').value.trim() : null,
+        launchMode: currentLaunchMode, // historical field, kept for CSV/profile back-compat -- always 'local-multi-gpu' now
+        rpcTarget: rpcEnabled ? document.getElementById('worker-ssh').value.trim() : null,
+        transport: rpcEnabled ? document.getElementById('transport-type').value : null,
         deviceA, deviceB,
         fa: document.getElementById('server-fa').checked,
         cacheK: document.getElementById('server-cache-k').value,
         cacheV: document.getElementById('server-cache-v').value,
-        tensorSplit: (isLocal || document.getElementById('rpc-toggle').checked) ? parseInt(document.getElementById('server-tensor-split').value) : null,
+        tensorSplit: (deviceB || rpcEnabled) ? parseInt(document.getElementById('server-tensor-split').value) : null,
         specType: mtpEnabled ? 'draft-mtp' : null,
         specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
@@ -939,6 +946,10 @@ document.getElementById('flag-reference-search').addEventListener('input', (e) =
 // llama-server args instead, which IS a real persisted field.
 let rawCommandRefreshTimer = null;
 function refreshCommandPreview() {
+    // Runs synchronously (not inside the debounce below) so the tensor-split
+    // slider/labels react immediately to a device or RPC change instead of
+    // waiting on the network round-trip's debounce.
+    updateTensorSplitVisibility();
     // Invalidate any in-flight snapToLastUsedConfig() -- see that function's
     // comment on configOperationGeneration for why (this is the "user edited
     // something else" signal it checks for before applying a late result).
@@ -997,7 +1008,7 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
 
 // Model selection additionally snaps the whole setup to the last config used
 // with this model (see snapToLastUsedConfig's comment for why this is scoped
-// to model-select/launch-mode-select only, not every field above).
+// to model-select/rpc-toggle only, not every field above).
 document.getElementById('model-select').addEventListener('change', snapToLastUsedConfig);
 
 // Restore last launch config on page load (Item #22)
@@ -1086,8 +1097,8 @@ function renderSavedConfigs() {
     for (const p of profiles) {
         const opt = document.createElement('option');
         opt.value = p.name;
-        const isLocalProfile = p.config.launchMode === 'local-multi-gpu';
-        opt.textContent = `${p.name} — ${isLocalProfile ? 'Local' : 'RPC'} · ${(p.config.modelPath || '').split('/').pop()}`;
+        const isRpcProfile = !!p.config.rpcTarget;
+        opt.textContent = `${p.name} — ${isRpcProfile ? 'RPC' : 'Local'} · ${(p.config.modelPath || '').split('/').pop()}`;
         select.appendChild(opt);
     }
     // Keep the current selection if it still exists (e.g. after a save/delete
@@ -1462,8 +1473,8 @@ async function submitPrompt() {
         model: document.getElementById('model-select').value,
         ctx: document.getElementById('server-ctx').value,
         ngl: document.getElementById('server-ngl').value,
-        rpc: (currentLaunchMode !== 'local-multi-gpu' && document.getElementById('rpc-toggle').checked) ? 'yes' : 'no',
-        transport: currentLaunchMode === 'local-multi-gpu' ? 'Local' : document.getElementById('transport-type').value,
+        rpc: document.getElementById('rpc-toggle').checked ? 'yes' : 'no',
+        transport: document.getElementById('rpc-toggle').checked ? document.getElementById('transport-type').value : 'Local',
         argString: document.getElementById('extra-args').value.trim() || '',
         promptTokens: 0,
         gpuMem: currentVramSnapshot,
@@ -1786,19 +1797,13 @@ document.getElementById('server-ctx').addEventListener('input', (e) => {
 let showWorkerLogs = false;
 let workerStatusInterval = null;
 // workerLogsInterval declared near the top of the file (see comment there) --
-// applyLaunchMode() needs it to exist before this point during page load.
+// updateSecondNodeVisibility() needs it to exist before this point during page load.
 
 async function updateWorkerStatus() {
-    // This is Docker+RPC-specific (SSH-polls the remote worker's docker compose
-    // status). It runs on a 5s interval regardless of launch mode -- without this
-    // guard, in local-multi-gpu mode it kept firing every 5s anyway (rpc-toggle
-    // defaults checked, worker-ssh has a default value, so the early-return
-    // below never triggered), polling a worker_ssh that isn't even relevant and
-    // periodically re-hiding #tensor-split-container out from under
-    // applyLaunchMode's unconditional "show it" for local mode -- which is why
-    // the tensor split slider would appear on refresh and vanish a few seconds
-    // later.
-    if (currentLaunchMode === 'local-multi-gpu') return;
+    // SSH-polls the remote worker's docker compose status. It runs on a 5s
+    // interval regardless of anything else in the UI -- the !rpcEnabled check
+    // right below is what makes this a no-op (badge -> DISABLED) whenever RPC
+    // isn't actually turned on, rather than a separate mode-based guard here.
     const workerSsh = document.getElementById('worker-ssh').value.trim();
     const rpcEnabled = document.getElementById('rpc-toggle').checked;
     const badge = document.getElementById('worker-status-badge');
@@ -1977,79 +1982,70 @@ document.getElementById('btn-master-logs-toggle').addEventListener('click', () =
     }
 });
 
-document.getElementById('rpc-toggle').addEventListener('change', () => {
+// --- RPC Worker: optional, off by default, independent of local device
+// selection (the master always launches natively -- see server4.js
+// resolveLaunchCommand). Enabling it claims the "second compute target" slot
+// for the remote worker, so GPU B is forced back to "None": the split stays
+// exactly 2-way (this machine vs. the worker) rather than trying to support a
+// 3-way local-A + local-B + worker split, which nothing here (the tensor-split
+// slider, monitor.py's local_second_gpu/worker_ssh handling) is built for.
+function applyRpcToggleUI() {
+    const enabled = document.getElementById('rpc-toggle').checked;
     const controls = document.getElementById('worker-ssh-controls');
-    if (document.getElementById('rpc-toggle').checked) {
-        controls.classList.remove('opacity-50');
-        controls.querySelectorAll('button, input').forEach(el => el.removeAttribute('disabled'));
+    controls.classList.toggle('opacity-50', !enabled);
+    controls.querySelectorAll('button, input, select').forEach(el => el.disabled = !enabled);
+
+    const selB = document.getElementById('device-select-b');
+    const manualB = document.getElementById('device-manual-b');
+    selB.disabled = enabled;
+    manualB.disabled = enabled;
+    if (enabled) { selB.value = ''; manualB.value = ''; }
+
+    if (enabled) {
         updateWorkerStatus();
     } else {
-        controls.classList.add('opacity-50');
-        controls.querySelectorAll('button, input').forEach(el => el.setAttribute('disabled', 'true'));
         document.getElementById('worker-status-badge').className = 'px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500';
         document.getElementById('worker-status-badge').innerText = 'DISABLED';
     }
     updateSecondNodeVisibility();
+}
+document.getElementById('rpc-toggle').addEventListener('change', () => {
+    applyRpcToggleUI();
     refreshCommandPreview();
+    snapToLastUsedConfig(); // transport (Local vs WiFi/TB4) changed
 });
 
-// --- Launch Mode: Docker+RPC Worker vs Local Multi-GPU (Vulkan) ---
-
-function applyLaunchMode(mode) {
-    currentLaunchMode = mode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
-    const isLocal = currentLaunchMode === 'local-multi-gpu';
-
-    document.getElementById('docker-rpc-panel').classList.toggle('hidden', isLocal);
-    document.getElementById('local-multi-gpu-panel').classList.toggle('hidden', !isLocal);
-
-    // RPC mode's tensor-split visibility is driven by updateWorkerStatus() (only
-    // shown once the remote worker is confirmed running); local mode has no such
-    // "is the second node up" step, so just show it unconditionally.
-    if (isLocal) {
-        document.getElementById('tensor-split-container').classList.remove('hidden');
-    } else {
-        document.getElementById('tensor-split-container').classList.add('hidden');
-        updateWorkerStatus();
-    }
-
-    updateSecondNodeVisibility();
-
-    // "GPU A"/"GPU B" now correctly corresponds to real data everywhere this
-    // is used (tensor split, telemetry legends, VRAM headers) -- pollTelemetry
-    // detects which vendor is actually in the GPU A dropdown and swaps
-    // stats.master/stats.worker to match before anything downstream reads
-    // them, so these labels and the data behind them stay consistent.
-    document.querySelectorAll('.node-a-label').forEach(el => { el.textContent = isLocal ? 'GPU A' : 'Master'; });
-    document.querySelectorAll('.node-b-label').forEach(el => { el.textContent = isLocal ? 'GPU B' : 'Worker'; });
-}
-
 // Worker Logs / Worker RAM / the CPU-chart "Worker" legend row only make sense
-// when a second node is actually part of the current setup: always true in
-// local-multi-gpu mode, but in Docker+RPC mode only when the RPC toggle is
-// actually checked -- these used to be gated on isLocal alone, so switching
-// into Docker+RPC mode (or just leaving rpc-toggle at its default-checked
-// state with no real worker configured) showed a "Worker" row/panel that
-// would never have real data. Called from applyLaunchMode() (mode switches)
-// and the rpc-toggle listener (toggling it within Docker+RPC mode).
+// when a real remote RPC worker is configured -- meaningless for a local
+// second GPU (both GPUs share this one host's RAM/CPU/log stream, there's no
+// second host) and meaningless when RPC isn't actually enabled.
 function updateSecondNodeVisibility() {
-    // These three panels are specifically about a SEPARATE HOST's logs/RAM/CPU
-    // -- meaningless in local-multi-gpu mode (both GPUs share this one host's
-    // RAM/CPU/log stream, there's no second host) and meaningless in
-    // Docker+RPC mode when RPC isn't actually enabled (no second host
-    // configured at all). Only show them for an actual remote RPC worker.
-    const isLocal = currentLaunchMode === 'local-multi-gpu';
-    const showWorkerSecondary = !isLocal && document.getElementById('rpc-toggle').checked;
+    const showWorkerSecondary = document.getElementById('rpc-toggle').checked;
     document.getElementById('worker-logs-container').classList.toggle('hidden', !showWorkerSecondary);
     document.getElementById('worker-ram-container').classList.toggle('hidden', !showWorkerSecondary);
     document.querySelectorAll('.node-b-cpu-row').forEach(el => el.classList.toggle('hidden', !showWorkerSecondary));
     if (!showWorkerSecondary && workerLogsInterval) { clearInterval(workerLogsInterval); workerLogsInterval = null; }
 }
 
-document.getElementById('launch-mode-select').addEventListener('change', (e) => {
-    applyLaunchMode(e.target.value);
-    refreshCommandPreview();
-    snapToLastUsedConfig();
-});
+// Tensor split only makes sense with an actual second compute target to split
+// across: a real second local GPU (deviceB set and different from deviceA) or
+// an RPC worker -- these two cases can't overlap (see applyRpcToggleUI).
+// RPC's own visibility here is driven by updateWorkerStatus() instead (only
+// shown once the remote worker is confirmed actually running), so this only
+// touches the container for the local-split case, to avoid fighting that.
+// Node A/B labels follow the same split: "GPU A"/"GPU B" for a local pair,
+// "Local"/"Worker" once RPC is in the picture.
+function updateTensorSplitVisibility() {
+    const deviceA = document.getElementById('device-select-a').value || document.getElementById('device-manual-a').value.trim();
+    const deviceB = document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim();
+    const localSplit = !!(deviceA && deviceB && deviceA !== deviceB);
+    const rpcEnabled = document.getElementById('rpc-toggle').checked;
+    if (!rpcEnabled) {
+        document.getElementById('tensor-split-container').classList.toggle('hidden', !localSplit);
+    }
+    document.querySelectorAll('.node-a-label').forEach(el => { el.textContent = rpcEnabled ? 'Local' : 'GPU A'; });
+    document.querySelectorAll('.node-b-label').forEach(el => { el.textContent = rpcEnabled ? 'Worker' : 'GPU B'; });
+}
 
 function renderDeviceOptions(devices) {
     const selA = document.getElementById('device-select-a');
@@ -2122,12 +2118,23 @@ async function detectDevices() {
         document.getElementById('device-manual-row').classList.remove('hidden');
         statusEl.textContent = `Detection failed (${e.message}) — enter device ids manually below.`;
     }
+    // renderDeviceOptions() always defaults GPU B to a real device when 2+ are
+    // found, regardless of RPC state -- re-assert the "RPC forces GPU B to
+    // None" invariant in case this (re-)detection landed after the user had
+    // already turned RPC on (e.g. toggled it before a Build-change re-detect
+    // resolved).
+    applyRpcToggleUI();
     refreshCommandPreview();
 }
 
 // Initialize polling intervals
 workerStatusInterval = setInterval(updateWorkerStatus, 5000);
 updateWorkerStatus();
+// Sets the initial worker-logs/-ram/CPU-row visibility to match rpc-toggle's
+// default (off) -- HTML's static classes already match this, this just keeps
+// the two in sync from one place. applyConfigToUI() calls this itself too,
+// for whenever a saved profile with RPC enabled restores after this runs.
+applyRpcToggleUI();
 
 // --- Hardware Polling ---
 let workerBaseVram = 0;
@@ -2163,15 +2170,19 @@ async function pollTelemetry() {
         } else if (banner) {
             banner.style.display = 'none';
         }
-        const isLocalMode = currentLaunchMode === 'local-multi-gpu';
-        const rpcEnabled = !isLocalMode && document.getElementById('rpc-toggle').checked;
+        // "worker" telemetry slot means one of two things, mutually exclusive
+        // by construction (enabling RPC forces GPU B back to "None" -- see
+        // applyRpcToggleUI): a real second local GPU (monitor.py
+        // get_amd_stats()), or a remote RPC worker over SSH. monitor.py's
+        // do_POST picks one or the other from this same body, so sending both
+        // would silently drop the RPC worker's telemetry.
+        const localSecondGpu = !!(document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim());
+        const rpcEnabled = !localSecondGpu && document.getElementById('rpc-toggle').checked;
         const workerSsh = rpcEnabled ? document.getElementById('worker-ssh').value : '';
-        // Local mode: "worker" slot is the second GPU on THIS machine (see
-        // monitor.py get_amd_stats()), not a remote SSH host.
         const res = await fetch('http://localhost:8081/stats', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: isLocalMode ? 'amd' : '' }),
+            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: localSecondGpu ? 'amd' : '' }),
             signal: AbortSignal.timeout(10000)
         });
         const stats = await res.json();
@@ -2188,7 +2199,7 @@ async function pollTelemetry() {
         // device detection succeeded (the dropdown's option text carries the
         // vendor name); manual device-id entry has no vendor info to go on,
         // so it's left as the historical nvidia=master default in that case.
-        if (isLocalMode && stats.worker) {
+        if (localSecondGpu && stats.worker) {
             const gpuASelect = document.getElementById('device-select-a');
             const gpuASelectedText = (gpuASelect && gpuASelect.selectedOptions[0]) ? gpuASelect.selectedOptions[0].textContent : '';
             if (/amd|radeon/i.test(gpuASelectedText)) {
@@ -2282,16 +2293,17 @@ async function pollTelemetry() {
         // actually running) rendered a flat "worker" line on every chart at 0 instead
         // of no line at all.
         const workerDataIsReal = !!stats.worker && !stats.worker.nvidia_smi_error && !stats.worker.amdgpu_top_error;
-        const workerReporting = workerDataIsReal && (rpcEnabled || isLocalMode);
+        const workerReporting = workerDataIsReal && (rpcEnabled || localSecondGpu);
         if (workerReporting) {
             workerStatsMissingSince = null;
             workerPwr = stats.worker.gpu_pwr;
             workerTemp = stats.worker.gpu_temp;
 
             document.getElementById('worker-vram-container').classList.remove('hidden');
-            // RAM sub-panel stays hidden in local mode regardless (both GPUs
-            // share one CPU/RAM pool on this host -- see applyLaunchMode()).
-            if (!isLocalMode) document.getElementById('worker-ram-container').classList.remove('hidden');
+            // RAM sub-panel stays hidden for a local second GPU regardless (both
+            // GPUs share one CPU/RAM pool on this host) -- only a real remote
+            // RPC worker has its own separate RAM to report.
+            if (!localSecondGpu) document.getElementById('worker-ram-container').classList.remove('hidden');
 
             if (!workerBaseVram && stats.worker.vram_used > 500 && isModelLoaded) workerBaseVram = stats.worker.process_vram ?? stats.worker.vram_used; // capture base after load
 

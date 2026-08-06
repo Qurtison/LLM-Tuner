@@ -100,92 +100,88 @@
                     <option>Loading models...</option>
                 </select>
 
-                <!-- Launch Mode sits directly under the model selector: picking a
-                     model or switching launch mode auto-snaps every field below
-                     (and the raw command box) to the last config you ran with that
-                     exact combo, sourced from the CSV (see snapToLastUsedConfig()
-                     in script.js and config_json in server4.js). -->
+                <!-- Compute config sits directly under the model selector: picking a
+                     model auto-snaps every field below (and the raw command box) to
+                     the last config you ran for it, sourced from the CSV (see
+                     snapToLastUsedConfig() in script.js and config_json in
+                     server4.js). The master always launches natively now (no Docker;
+                     see server4.js resolveLaunchCommand) -- RPC is an optional add-on
+                     below, off by default, not a separate mode. RPC needs a local
+                     build compiled with GGML_RPC=ON (today's builds aren't -- see
+                     README) and still assumes Docker for the worker side. -->
                 <div class="p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg space-y-3">
-                    <div class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-                        <label class="shrink-0">Launch Mode</label>
-                        <select id="launch-mode-select" class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
-                            <option value="docker-rpc">Docker + RPC Worker</option>
-                            <option value="local-multi-gpu">Local Multi-GPU (Vulkan)</option>
-                        </select>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-0.5">Build <span class="text-indigo-400 cursor-help" title="Which compiled llama-server binary to launch (configured in dashboard.config.json). Different builds can expose different backends/devices for the same physical GPUs -- e.g. a CUDA+Vulkan build shows an extra native CUDA0 device for an NVIDIA card that a Vulkan-only build can only reach through Vulkan. Switching this re-runs device detection automatically.">?</span></label>
+                        <select id="build-select" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
+                    </div>
+                    <!-- Detected automatically on load and on Build change (script.js
+                         devicesDetectedPromise/detectDevices) -- no manual trigger, since
+                         GPU hotplug isn't supported by the kernel. -->
+                    <span class="text-[10px] text-gray-400">Vulkan/CUDA devices on this machine</span>
+                    <div id="device-detect-status" class="hidden text-[9px] text-amber-400"></div>
+
+                    <div id="device-dropdown-row" class="hidden grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[9px] text-gray-500 mb-0.5">GPU A</label>
+                            <select id="device-select-a" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
+                        </div>
+                        <div>
+                            <label class="block text-[9px] text-gray-500 mb-0.5">GPU B</label>
+                            <select id="device-select-b" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
+                        </div>
                     </div>
 
-                    <!-- Docker + RPC Worker mode (existing path, unchanged) -->
-                    <div id="docker-rpc-panel" class="space-y-3">
+                    <!-- Manual fallback: shown when detection fails/times out, or the user
+                         wants to type device ids directly. -->
+                    <div id="device-manual-row" class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[9px] text-gray-500 mb-0.5">GPU A id</label>
+                            <input type="text" id="device-manual-a" placeholder="e.g. Vulkan0" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[9px] text-gray-500 mb-0.5">GPU B id</label>
+                            <input type="text" id="device-manual-b" placeholder="e.g. Vulkan1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
+                        </div>
+                    </div>
+
+                    <!-- RPC Worker: an optional extra device, independent of the local
+                         GPU(s) above -- off by default. Enabling it forces GPU B back to
+                         "None" (script.js applyRpcToggleUI), since the split is exactly
+                         2-way (this machine vs. the worker); see resolveLaunchCommand
+                         and monitor.py's local_second_gpu/worker_ssh handling. -->
+                    <div class="space-y-2 border-t border-gray-700/50 pt-2">
                         <label class="flex items-center gap-2 text-xs font-semibold text-indigo-400">
-                            <input type="checkbox" id="rpc-toggle" checked class="accent-indigo-500 rounded">
-                            Enable RPC Worker
+                            <input type="checkbox" id="rpc-toggle" class="accent-indigo-500 rounded">
+                            Enable RPC Worker <span class="text-indigo-400 cursor-help" title="Adds a remote llama.cpp RPC worker as a second compute target alongside (not instead of) this machine's GPU(s). Requires a local build compiled with GGML_RPC=ON -- see README -- and the worker's own rpc-server/Docker container running.">?</span>
                         </label>
                         <input type="text" id="worker-ssh" value="kyle4090@169.254.61.173" class="w-full bg-gray-900 border border-gray-700 rounded-md px-3 py-2 text-xs text-gray-200">
 
-                        <div id="worker-ssh-controls" class="space-y-2 border-t border-gray-700/50 pt-2">
+                        <div id="worker-ssh-controls" class="space-y-2 border-t border-gray-700/50 pt-2 opacity-50">
                             <div class="flex items-center gap-2 mb-2">
                                 <label class="text-[10px] text-gray-400 w-1/4">Transport</label>
-                                <select id="transport-type" class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
+                                <select id="transport-type" disabled class="flex-1 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-xs text-gray-200">
                                     <option value="WiFi">Wi-Fi / LAN</option>
                                     <option value="TB4">Thunderbolt 4</option>
                                 </select>
                             </div>
                             <div class="flex justify-between items-center text-[10px]">
                                 <span class="text-gray-400">Worker Status:</span>
-                                <span id="worker-status-badge" class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500">OFFLINE</span>
+                                <span id="worker-status-badge" class="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-gray-850 text-gray-500">DISABLED</span>
                             </div>
                             <div class="flex gap-2">
-                                <button id="btn-worker-start" class="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-medium transition-colors">Start Worker</button>
-                                <button id="btn-worker-stop" class="flex-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] font-medium transition-colors">Stop</button>
+                                <button id="btn-worker-start" disabled class="flex-1 px-2 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-medium transition-colors">Start Worker</button>
+                                <button id="btn-worker-stop" disabled class="flex-1 px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded text-[10px] font-medium transition-colors">Stop</button>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Local Multi-GPU (Vulkan) mode: no Docker, no SSH -- spawns
-                         llama-server directly with -dev/-ts (see server4.js /api/start,
-                         local-multi-gpu branch). -->
-                    <div id="local-multi-gpu-panel" class="hidden space-y-2">
-                        <div>
-                            <label class="block text-[10px] text-gray-400 mb-0.5">Build <span class="text-indigo-400 cursor-help" title="Which compiled llama-server binary to launch (configured in dashboard.config.json). Different builds can expose different backends/devices for the same physical GPUs -- e.g. a CUDA+Vulkan build shows an extra native CUDA0 device for an NVIDIA card that a Vulkan-only build can only reach through Vulkan. Switching this re-runs device detection automatically.">?</span></label>
-                            <select id="build-select" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
-                        </div>
-                        <!-- Detected automatically on load and on Build change (script.js
-                             devicesDetectedPromise/detectDevices) -- no manual trigger, since
-                             GPU hotplug isn't supported by the kernel. -->
-                        <span class="text-[10px] text-gray-400">Vulkan/CUDA devices on this machine</span>
-                        <div id="device-detect-status" class="hidden text-[9px] text-amber-400"></div>
-
-                        <div id="device-dropdown-row" class="hidden grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU A</label>
-                                <select id="device-select-a" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
-                            </div>
-                            <div>
-                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU B</label>
-                                <select id="device-select-b" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
-                            </div>
-                        </div>
-
-                        <!-- Manual fallback: shown when detection fails/times out, or the user
-                             wants to type device ids directly. -->
-                        <div id="device-manual-row" class="grid grid-cols-2 gap-2">
-                            <div>
-                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU A id</label>
-                                <input type="text" id="device-manual-a" placeholder="e.g. Vulkan0" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
-                            </div>
-                            <div>
-                                <label class="block text-[9px] text-gray-500 mb-0.5">GPU B id</label>
-                                <input type="text" id="device-manual-b" placeholder="e.g. Vulkan1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200 font-mono">
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Shared 2-way tensor split -- both modes are always exactly a
-                         2-node split (Docker RPC's master+worker, or local's GPU A+B),
-                         so one slider covers both; only the visible label changes. -->
+                    <!-- Shared 2-way tensor split -- always exactly local-GPU-A vs. one
+                         other target (local GPU B, or the RPC worker; enabling RPC rules
+                         out GPU B, see above), so one slider covers both; only the
+                         visible label changes (updateTensorSplitVisibility() in script.js). -->
                     <div id="tensor-split-container" class="hidden pt-2 border-t border-gray-700/50 mt-2">
                         <div class="flex justify-between text-[10px] text-gray-400 mb-1">
-                            <span>Tensor Split (<span class="node-a-label">Master</span>/<span class="node-b-label">Worker</span>)</span>
+                            <span>Tensor Split (<span class="node-a-label">GPU A</span>/<span class="node-b-label">GPU B</span>)</span>
                             <span id="ts-val-display">50% / 50%</span>
                         </div>
                         <input type="range" id="server-tensor-split" min="0" max="100" value="50" class="w-full accent-indigo-500 cursor-pointer">

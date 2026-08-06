@@ -73,23 +73,13 @@ function getLlamaServerBinary(buildId) {
     return (found || builds[0]).path;
 }
 
-function isLocalMode() {
-    return !!(currentLaunchConfig && currentLaunchConfig.launchMode === 'local-multi-gpu');
-}
 // In-memory ring buffer for master logs (last 500 lines) — sidesteps the
 // docker compose run --rm one-off container issue (see dashboard-bugs1-analysis.md item 5)
 let masterLogBuffer = [];
 const MASTER_LOG_BUFFER_SIZE = 500;
 
 // --- PATH HELPERS ---
-const LOCAL_MODELS_DIR = path.join(ROOT_DIR, 'models');
 const HF_CACHE_DIR = process.env.HF_HOME || process.env.HUGGINGFACE_HUB_CACHE || path.join(os.homedir(), '.cache', 'huggingface', 'hub');
-
-function toContainerPath(hostPath) {
-    if (hostPath.startsWith(LOCAL_MODELS_DIR)) return hostPath.replace(LOCAL_MODELS_DIR, '/models');
-    if (hostPath.startsWith(HF_CACHE_DIR)) return hostPath.replace(HF_CACHE_DIR, '/hf-cache');
-    throw new Error(`Model path not under a mounted dir: ${hostPath}`);
-}
 
 // --- SAFE SSE BROADCAST ---
 function broadcastState(logLine = '', errorMessage = '') {
@@ -165,19 +155,6 @@ async function runSSHCommand(host, command) {
         });
         ssh.on('error', reject);
     });
-}
-
-// --- DOCKER COMPOSE HELPER ---
-async function runDockerCompose(command) {
-    try {
-        const { stdout, stderr } = await execAsync(`docker compose -f docker-compose.master.yml ${command}`, {
-            cwd: ROOT_DIR,
-            maxBuffer: 1024 * 1024
-        });
-        return { stdout, stderr };
-    } catch (err) {
-        return { stdout: err.stdout || '', stderr: err.stderr || err.message };
-    }
 }
 
 // --- PORT CLEANUP (Restored safely) ---
@@ -300,45 +277,40 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
 }
 
 // --- LAUNCH COMMAND RESOLUTION (structured config -> command + args) ---
-// Mode-specific base command/device-selection logic, shared by /api/preview-command
-// (which only needs the resolved command/args to show the user, never spawns
-// anything) and /api/start's fallback path (used when the raw-command box is
-// empty). This is the "convenience generator" for the box's starting content --
-// once a user has edited the box, THIS function is no longer consulted for that
-// launch; see the rawCommand branch in /api/start.
-function resolveLaunchCommand(config, launchMode) {
-    let command, baseArgs, mapModelPath, deviceArgs;
-
-    if (launchMode === 'local-multi-gpu') {
-        command = getLlamaServerBinary(config.build);
-        baseArgs = [];
-        mapModelPath = (p) => p; // raw host path, no container mount to remap into
-        deviceArgs = [];
-        // deviceA === deviceB happens whenever device detection finds exactly one
-        // device (no eGPU/second GPU plugged in) -- renderDeviceOptions() has no
-        // "None" option, so both dropdowns default to the same lone device. Treat
-        // that as "no split configured" rather than passing llama-server a
-        // redundant `-dev X,X --split-mode layer` for a single physical GPU.
-        if (config.deviceA && config.deviceB && config.deviceA !== config.deviceB) {
-            deviceArgs.push('--split-mode', 'layer', '-dev', `${config.deviceA},${config.deviceB}`);
-            if (config.tensorSplit && config.tensorSplit < 100) {
-                deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
-            }
-        }
-    } else {
-        command = 'docker';
-        baseArgs = ['compose', '-f', 'docker-compose.master.yml', 'run', '--rm', '--service-ports', 'master-node', '/app/llama-server'];
-        mapModelPath = toContainerPath;
-        deviceArgs = [];
-        if (config.rpcTarget) {
-            deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`, '--split-mode', 'layer');
-            if (config.tensorSplit && config.tensorSplit < 100) {
-                deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
-            }
+// Shared by /api/preview-command (which only needs the resolved command/args
+// to show the user, never spawns anything) and /api/start's fallback path
+// (used when the raw-command box is empty). This is the "convenience
+// generator" for the box's starting content -- once a user has edited the
+// box, THIS function is no longer consulted for that launch; see the
+// rawCommand branch in /api/start.
+//
+// The master always launches natively (no Docker) -- a local device split
+// (GPU A + GPU B) and an RPC worker are both optional add-ons on top of that,
+// not separate launch mechanisms. They're mutually exclusive in practice:
+// enabling RPC in the GUI forces GPU B back to "None" (script.js
+// applyRpcToggleUI), so at most one of localSplit/config.rpcTarget is ever
+// true below -- this only supports a 2-way split (this machine vs. one other
+// target), not a 3-way local-A + local-B + worker split.
+function resolveLaunchCommand(config) {
+    const command = getLlamaServerBinary(config.build);
+    const mapModelPath = (p) => p; // raw host path, no container mount to remap into
+    const deviceArgs = [];
+    // deviceA === deviceB happens whenever device detection finds exactly one
+    // device (no eGPU/second GPU plugged in) -- renderDeviceOptions() has a
+    // "None" option for GPU B for exactly this case, but treat an accidental
+    // match defensively too rather than passing llama-server a redundant
+    // `-dev X,X --split-mode layer` for a single physical GPU.
+    const localSplit = !!(config.deviceA && config.deviceB && config.deviceA !== config.deviceB);
+    if (localSplit || config.rpcTarget) {
+        deviceArgs.push('--split-mode', 'layer');
+        if (localSplit) deviceArgs.push('-dev', `${config.deviceA},${config.deviceB}`);
+        if (config.rpcTarget) deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`);
+        if (config.tensorSplit && config.tensorSplit < 100) {
+            deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
         }
     }
 
-    const args = [...baseArgs, ...buildLlamaArgs(config, { mapModelPath, deviceArgs })];
+    const args = buildLlamaArgs(config, { mapModelPath, deviceArgs });
     return { command, args };
 }
 
@@ -374,12 +346,11 @@ function tokenizeCommand(str) {
 }
 
 // --- SHARED PROCESS SPAWN + LIFECYCLE ---
-// Generic over "a spawned child process that speaks llama-server's stdout log format" --
-// used for both the `docker` invocation (Docker+RPC mode) and a directly-spawned
-// llama-server binary (local-multi-gpu mode). `onErrorCleanup`, if given, is called
-// (in addition to `proc.kill()`) when handleLogs detects an abort/OOM/error line --
-// Docker mode uses it to tear down the compose container; local mode has nothing
-// extra to clean up, so it's omitted there.
+// The master is always a directly-spawned llama-server binary now (no Docker
+// invocation). `onErrorCleanup`, if given, is called (in addition to
+// `proc.kill()`) when handleLogs detects an abort/OOM/error line -- currently
+// always omitted, since a direct spawn has nothing extra to tear down; kept
+// as a hook for whatever future launch path might need one.
 function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
     const proc = spawn(command, args, { cwd: cwd || ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -745,7 +716,8 @@ function rememberRequestSamples(runId, samples) {
 async function fetchCurrentTelemetry() {
     try {
         const body = {};
-        if (isLocalMode()) {
+        // Mutually exclusive by construction -- see resolveLaunchCommand's comment.
+        if (currentLaunchConfig?.deviceB) {
             body.local_second_gpu = 'amd';
         } else if (currentLaunchConfig?.rpcTarget) {
             body.worker_ssh = currentLaunchConfig.rpcTarget;
@@ -802,13 +774,12 @@ async function logCompletedRequest(timing) {
         const master = stats?.master || {};
         const worker = stats?.worker || {};
         const cfg = currentLaunchConfig || {};
-        const local = isLocalMode();
         const runId = await appendBenchmarkRow({
             model: cfg.modelPath || '',
             ctx: cfg.ctx || '',
             ngl: cfg.ngl || '',
-            rpc: (!local && cfg.rpcTarget) ? 'yes' : 'no',
-            transport: local ? 'Local' : (cfg.transport || ''),
+            rpc: cfg.rpcTarget ? 'yes' : 'no',
+            transport: cfg.rpcTarget ? (cfg.transport || '') : 'Local',
             argString: cfg.argString || '',
             launchCommand: currentLaunchCommand,
             promptTps: timing.promptTps ?? '',
@@ -1221,8 +1192,7 @@ const server = http.createServer(async (req, res) => {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
             try {
-                const launchMode = body.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
-                const { command, args } = resolveLaunchCommand(body, launchMode);
+                const { command, args } = resolveLaunchCommand(body);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ command: formatCommand(command, args) }));
             } catch (err) {
@@ -1239,9 +1209,8 @@ const server = http.createServer(async (req, res) => {
             if (llamaProcess) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Running' })); }
 
             const config = body;
-            const launchMode = config.launchMode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
             currentModel = config.model;
-            isRpc = launchMode === 'docker-rpc' && !!config.rpcTarget;
+            isRpc = !!config.rpcTarget;
             currentLaunchConfig = config;
             serverState = 'starting';
             loadStartTime = Date.now();
@@ -1263,19 +1232,14 @@ const server = http.createServer(async (req, res) => {
                 command = tokens[0];
                 args = tokens.slice(1);
             } else {
-                ({ command, args } = resolveLaunchCommand(config, launchMode));
-            }
-
-            const onErrorCleanup = launchMode === 'docker-rpc' ? () => runDockerCompose('down --remove-orphans') : null;
-            if (launchMode === 'docker-rpc') {
-                await runDockerCompose('down --remove-orphans');
+                ({ command, args } = resolveLaunchCommand(config));
             }
 
             currentLaunchCommand = formatCommand(command, args);
             console.log('LAUNCHING:', currentLaunchCommand);
             broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
 
-            llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR, onErrorCleanup });
+            llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR });
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ status: 'launching' }));
@@ -1285,11 +1249,8 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/stop' && req.method === 'POST') {
             serverState = 'stopping';
             broadcastState();
-            // Docker teardown only applies to the Docker+RPC launch path -- a
-            // local-multi-gpu run has no compose container to bring down.
-            if (!isLocalMode()) {
-                await runDockerCompose('down --remove-orphans');
-            }
+            // The master always runs as a directly-spawned process now -- no
+            // compose container to bring down.
             // Request the kill but don't null `llamaProcess` here -- the process's own
             // 'close' handler (registered at spawn time) is now the single place that
             // clears shared state, once the process has actually exited. Nulling it here
@@ -1403,32 +1364,20 @@ async function initServer() {
     await initLogsDir();
     await cleanupPort(8081); // Restored safe orphan-process protection
 
-    try {
-        const { stdout: psOut } = await execAsync('docker ps -q -f name=master-node');
-        const containerId = psOut.trim();
-        if (containerId) {
-            serverState = 'ready';
-            const { stdout: inspectOut } = await execAsync(`docker inspect ${containerId}`);
-            const inspectData = JSON.parse(inspectOut);
-            const args = inspectData[0]?.Args || [];
-            const mIdx = args.indexOf('-m');
-            if (mIdx !== -1 && args[mIdx + 1]) currentModel = args[mIdx + 1].split('/').pop();
-            else currentModel = 'Unknown';
-            isRpc = args.includes('--rpc');
-        }
-    } catch { /* Docker not available or container not running */ }
+    // No more startup recovery scan for a leftover `master-node` Docker
+    // container here -- the master never launches in Docker anymore, so the
+    // only thing that scan could ever find post-refactor is a stale container
+    // from before this change. If you have one of those hanging around after
+    // updating, tear it down manually: `docker compose -f
+    // docker-compose.master.yml down`.
 
     pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname });
 
     const shutdownHandler = async () => {
+        // Directly-spawned process -- must be killed explicitly or it's
+        // orphaned on shutdown (no compose container to bring down instead).
         if (llamaProcess) {
-            if (isLocalMode()) {
-                // Directly-spawned process -- Docker teardown wouldn't touch it,
-                // so it must be killed explicitly or it's orphaned on shutdown.
-                try { llamaProcess.kill(); } catch { }
-            } else {
-                try { await execAsync('docker compose -f docker-compose.master.yml down', { cwd: ROOT_DIR }); } catch { }
-            }
+            try { llamaProcess.kill(); } catch { }
         }
         if (pythonProcess) pythonProcess.kill();
         process.exit(0);
