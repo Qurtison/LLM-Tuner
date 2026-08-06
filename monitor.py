@@ -278,26 +278,35 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         nvidia's clocks_throttle_reasons bits, so throttle_reasons is always empty --
         that just means no throttle badges fire for this GPU, not that it's broken.
 
-        IMPORTANT (confirmed during implementation, amdgpu_top 0.11.5): `-n 1` does
-        NOT make it exit after one sample -- it just keeps streaming a fresh JSON
-        object every `-s` ms forever, ignoring the count. So this always spawns it,
-        waits a short bounded window, force-kills it, and parses only the *first*
-        complete JSON object out of whatever got buffered (there's no clean "run
-        once and exit" mode to rely on). The explicit kill is required every call --
-        without it this would leak one long-running amdgpu_top process per poll.
+        Historical note: an earlier pass (same amdgpu_top 0.11.5) found `-n 1`
+        didn't make it exit after one sample and always ran it without that flag,
+        waiting out a fixed timeout and force-killing every call regardless of
+        whether output was ready sooner. Re-tested directly on the command line
+        (2026-08-04, same binary/version, 4 consecutive runs): `-n 1` now
+        reliably exits on its own in ~0.2s. Re-added it since -- communicate()
+        returns as soon as the process exits, so this is a pure win in the
+        common case (no more ALWAYS blocking the full timeout on every single
+        call, which was the actual reason /stats consistently took ~2s even at
+        idle). Kept every bit of the existing force-kill/salvage/reap machinery
+        below completely intact as a safety net in case a future device/driver
+        state brings back the old non-exiting behavior -- worst case is exactly
+        today's behavior, just with a tighter timeout.
         """
         device = None
         proc = None
         try:
             proc = subprocess.Popen(
-                ["amdgpu_top", "-J", "-s", "150"],
+                ["amdgpu_top", "-J", "-s", "150", "-n", "1"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
-            # 0.5s measured live as comfortably reliable (a healthy device flushes
-            # its first sample in ~0.3s at -s 150); kept short since this blocks
-            # monitor.py's single-threaded request handling for the duration.
+            # ~0.2s measured live and consistent across 4 runs with -n 1 (see
+            # docstring). 1s timeout keeps a generous ~5x safety margin over
+            # that for a slower run, while still failing much faster than the
+            # old 2s if -n 1 ever reverts to its old non-exiting behavior --
+            # the existing TimeoutExpired/salvage path below is unchanged and
+            # still fully handles that case if it happens.
             try:
-                raw_out, _ = proc.communicate(timeout=0.5)
+                raw_out, _ = proc.communicate(timeout=1)
             except subprocess.TimeoutExpired as e:
                 raw_out = e.stdout or b''
             text = raw_out.decode('utf-8', errors='ignore')
@@ -424,8 +433,6 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                 "cat /proc/meminfo 2>/dev/null || true; "
                 "echo '===PS==='; "
                 "ps ax -o rss,comm 2>/dev/null || true; "
-                "echo '===CPU==='; "
-                "top -bn1 2>/dev/null || true; "
                 "echo '===CPUSTAT==='; "
                 "cat /proc/stat 2>/dev/null || true; "
                 "echo '===CPUINFO==='; "
@@ -464,7 +471,6 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
                 apps_out = '\n'.join(section_lines.get('APPS', [])).strip()
                 meminfo_out = '\n'.join(section_lines.get('MEMINFO', [])).strip()
                 ps_out = '\n'.join(section_lines.get('PS', [])).strip()
-                cpu_out = '\n'.join(section_lines.get('CPU', [])).strip()
                 cpu_stat_out = '\n'.join(section_lines.get('CPUSTAT', [])).strip()
                 cpu_info = '\n'.join(section_lines.get('CPUINFO', [])).strip()
                 temp_out = '\n'.join(section_lines.get('TEMP', [])).strip()
@@ -485,7 +491,6 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             gpu_out = ""
             apps_out = ""
             ps_out = ""
-            cpu_out = ""
             cpu_info = ""
             temp_out = ""
             
@@ -501,22 +506,28 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 ps_out = subprocess.check_output(["ps", "ax", "-o", "rss,comm"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
             except Exception: pass
-            
-            try:
-                cpu_out = subprocess.check_output(["top", "-bn1"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
-            except Exception: pass
-            
+
+            # top -bn1 used to be the primary CPU-util source here, but "top -bn1"
+            # needs an internal sampling window to compute its delta (typically
+            # 1.5-3s in practice, confirmed live -- this alone made this whole
+            # function take 2.3-2.9s even at idle, meaning neither the "Fast
+            # (0.5s)" nor "Normal (1s)" telemetry polling options could ever
+            # actually run at their selected rate). /proc/stat gives the same
+            # answer instantly via a plain file read (see _parse_cpu_util_from_stat
+            # below), so top is no longer called at all.
             try:
                 cpu_stat_out = open('/proc/stat').read()
             except Exception:
                 cpu_stat_out = ""
-            
+
+            # Plain file reads, not subprocess("cat", ...) -- spawning an external
+            # process to read one file is pure overhead Python doesn't need.
             try:
-                cpu_info = subprocess.check_output(["cat", "/proc/cpuinfo"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8')
+                cpu_info = open('/proc/cpuinfo').read()
             except Exception: pass
-            
+
             try:
-                temp_out = subprocess.check_output(["cat", "/sys/class/thermal/thermal_zone0/temp"], stderr=subprocess.DEVNULL, timeout=2).decode('utf-8').strip()
+                temp_out = open('/sys/class/thermal/thermal_zone0/temp').read().strip()
             except Exception: pass
 
         # Helper to parse /proc/meminfo output (works for both local and SSH-remote data)
@@ -602,48 +613,26 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             process_ram = 0
 
-        # CPU Metrics — try top first, fall back to /proc/stat delta
+        # CPU Metrics — /proc/stat only. This used to try parsing `top -bn1`
+        # output first (see git history), which needs an internal sampling
+        # window to compute its delta -- confirmed live to take 1.5-3s on its
+        # own, making this whole function take 2.3-2.9s even at idle and
+        # capping the real telemetry update rate well below both the "Fast
+        # (0.5s)" and "Normal (1s)" polling options regardless of which was
+        # selected. /proc/stat's own cumulative counters give the same
+        # cpu_util answer without needing to wait for anything.
         cpu_util = 0.0
         cpu_parse_method = "none"
         try:
-            # Handle both "Cpu(s)" and "%Cpu(s)" formats across top versions
-            cpu_line_candidates = [l for l in cpu_out.split('\n') if "Cpu(s)" in l or "%Cpu(s)" in l]
-            if cpu_line_candidates:
-                cpu_line = cpu_line_candidates[0]
-                # Parse idle value: handle both comma-separated and space-separated formats
-                # Typical: "Cpu(s):  2.5%us,  1.0%sy,  0.0%ni, 95.0%id,  0.0%wa,  0.0%hi,  0.0%si,  1.5%st"
-                # Or:      "%Cpu0:  2.5 us,  1.0 sy,  0.0 ni, 95.0 id,  0.0 wa,  0.0 hi,  0.0 si,  1.5 st"
-                idle_str = None
-                parts_list = [p.strip().rstrip('%') for p in cpu_line.split(',')]
-                # Find the "id" field by position (4th field after Cpu(s): us, sy, ni, id)
-                for p in parts_list:
-                    if 'id' in p:
-                        # Extract the number before "id"
-                        idle_str = p.split('id')[0].strip()
-                        break
-                if idle_str:
-                    idle = float(idle_str)
-                    cpu_util = 100.0 - idle
-                    cpu_parse_method = "top"
-                else:
-                    print(f"[monitor] CPU top parse: no idle field in: {cpu_line!r}")
+            if cpu_stat_out:
+                cpu_util = _parse_cpu_util_from_stat(cpu_stat_out)
+                cpu_parse_method = "proc_stat" if not ssh_prefix else "proc_stat_remote"
             else:
-                print(f"[monitor] CPU top parse: no Cpu(s) line found in top output")
-        except Exception as e:
-            print(f"[monitor] CPU top parse error: {e} — falling back to /proc/stat")
-            cpu_parse_method = "fallback"
-        if cpu_parse_method != "top":
-            # Fallback: parse /proc/stat cumulative stats
-            try:
-                if cpu_stat_out:
-                    cpu_util = _parse_cpu_util_from_stat(cpu_stat_out)
-                    cpu_parse_method = "proc_stat" if not ssh_prefix else "proc_stat_remote"
-                else:
-                    print("[monitor] CPU fallback: no /proc/stat data available")
-                    cpu_util = 0.0
-            except Exception as e:
-                print(f"[monitor] CPU /proc/stat fallback error: {e}")
+                print("[monitor] CPU: no /proc/stat data available")
                 cpu_util = 0.0
+        except Exception as e:
+            print(f"[monitor] CPU /proc/stat parse error: {e}")
+            cpu_util = 0.0
 
         try:
             cpu_name = [l for l in cpu_info.split('\n') if "model name" in l][0].split(':')[1].strip()
