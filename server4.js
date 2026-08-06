@@ -30,22 +30,47 @@ let currentLaunchConfig = null;
 
 // --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
 // dashboard.config.json is user-editable and gitignored (see dashboard.config.example.json);
-// missing/invalid file silently falls back to this default.
-const DEFAULT_LLAMA_SERVER_BINARY = '/home/kyle/AI/llama-official/llama.cpp/build/bin/llama-server';
+// missing/invalid file silently falls back to this default. llamaServerBuilds
+// is a list (not a single path) so the GUI can offer a "Build" selector for
+// local-multi-gpu mode -- e.g. a Vulkan-only build vs. a combined CUDA+Vulkan
+// build of the same repo, which expose different devices for the same
+// physical GPUs (a CUDA-capable NVIDIA card only shows up as a native CUDA
+// device when launched from a binary actually compiled with GGML_CUDA=ON).
+const DEFAULT_LLAMA_SERVER_BUILDS = [
+    { id: 'default', label: 'Default', path: '/home/kyle/AI/llama-official/llama.cpp/build/bin/llama-server' }
+];
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, 'dashboard.config.json');
-let dashboardConfig = { llamaServerBinary: DEFAULT_LLAMA_SERVER_BINARY };
+let dashboardConfig = { llamaServerBuilds: DEFAULT_LLAMA_SERVER_BUILDS };
 
 async function loadDashboardConfig() {
     try {
         const parsed = JSON.parse(await fs.readFile(DASHBOARD_CONFIG_FILE, 'utf-8'));
-        if (parsed.llamaServerBinary) dashboardConfig.llamaServerBinary = parsed.llamaServerBinary;
+        if (Array.isArray(parsed.llamaServerBuilds) && parsed.llamaServerBuilds.length > 0) {
+            dashboardConfig.llamaServerBuilds = parsed.llamaServerBuilds;
+        } else if (parsed.llamaServerBinary) {
+            // Old single-path config format, from before builds existed --
+            // wrap it as a one-item build list rather than requiring every
+            // existing dashboard.config.json to be hand-migrated.
+            dashboardConfig.llamaServerBuilds = [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary }];
+        }
     } catch {
         // missing/invalid config file -- keep the default
     }
 }
 
-function getLlamaServerBinary() {
-    return dashboardConfig.llamaServerBinary;
+function getLlamaServerBuilds() {
+    return dashboardConfig.llamaServerBuilds;
+}
+
+// Resolves a build id to its binary path, falling back to the first
+// configured build if the id is missing/unknown -- e.g. a saved profile or
+// restored launch config from before builds existed (no `build` field at
+// all), or a stale id left over after dashboard.config.json was edited to
+// remove a build.
+function getLlamaServerBinary(buildId) {
+    const builds = getLlamaServerBuilds();
+    const found = buildId ? builds.find(b => b.id === buildId) : null;
+    return (found || builds[0]).path;
 }
 
 function isLocalMode() {
@@ -182,7 +207,10 @@ async function cleanupPort(port) {
 // own line -- the actual description is the following indented line(s),
 // handled by the continuation-line branch below.
 const HELP_DESC_COLUMN = 40;
-let cachedFlagReference = null; // help text is static per binary; no need to re-parse every request
+// Help text is static per binary, not globally -- different builds (e.g.
+// CUDA+Vulkan vs Vulkan-only) can expose different flags, so this is keyed by
+// build id rather than a single cached value.
+const cachedFlagReferenceByBuild = new Map();
 function parseHelpFlags(helpText) {
     const lines = helpText.split('\n');
     const entries = [];
@@ -282,7 +310,7 @@ function resolveLaunchCommand(config, launchMode) {
     let command, baseArgs, mapModelPath, deviceArgs;
 
     if (launchMode === 'local-multi-gpu') {
-        command = getLlamaServerBinary();
+        command = getLlamaServerBinary(config.build);
         baseArgs = [];
         mapModelPath = (p) => p; // raw host path, no container mount to remap into
         deviceArgs = [];
@@ -1126,17 +1154,26 @@ const server = http.createServer(async (req, res) => {
             }
         }
 
+        // --- LIST CONFIGURED BUILDS (local-multi-gpu mode's "Build" selector) ---
+        else if (req.url === '/api/builds' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ builds: getLlamaServerBuilds() }));
+        }
+
         // --- FLAG REFERENCE (searchable popover) ---
-        else if (req.url === '/api/flags' && req.method === 'GET') {
-            if (cachedFlagReference) {
+        else if (req.url.startsWith('/api/flags') && req.method === 'GET') {
+            const queryParams = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '');
+            const buildId = queryParams.get('build') || '';
+            if (cachedFlagReferenceByBuild.has(buildId)) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ flags: cachedFlagReference }));
+                return res.end(JSON.stringify({ flags: cachedFlagReferenceByBuild.get(buildId) }));
             }
             try {
-                const { stdout } = await execFileAsync(getLlamaServerBinary(), ['--help'], { timeout: 8000, maxBuffer: 1024 * 1024 });
-                cachedFlagReference = parseHelpFlags(stdout);
+                const { stdout } = await execFileAsync(getLlamaServerBinary(buildId), ['--help'], { timeout: 8000, maxBuffer: 1024 * 1024 });
+                const flags = parseHelpFlags(stdout);
+                cachedFlagReferenceByBuild.set(buildId, flags);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ flags: cachedFlagReference }));
+                return res.end(JSON.stringify({ flags }));
             } catch (err) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ flags: [], error: err.message }));
@@ -1144,8 +1181,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         // --- LIST VULKAN/CUDA DEVICES (local-multi-gpu mode) ---
-        else if (req.url === '/api/devices' && req.method === 'GET') {
-            const binary = getLlamaServerBinary();
+        else if (req.url.startsWith('/api/devices') && req.method === 'GET') {
+            const queryParams = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '');
+            const binary = getLlamaServerBinary(queryParams.get('build') || '');
             try {
                 // Hard timeout: device enumeration talks to the Vulkan/CUDA loader, which
                 // can hang (e.g. a TB4 eGPU in a bad power/link state) -- never let this

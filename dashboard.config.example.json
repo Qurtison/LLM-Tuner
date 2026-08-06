@@ -1,3 +1,6 @@
 {
-  "llamaServerBinary": "/home/kyle/AI/llama-official/llama.cpp/build/bin/llama-server"
+  "llamaServerBuilds": [
+    { "id": "vulkan", "label": "Vulkan Only", "path": "/path/to/llama.cpp/build/bin/llama-server" },
+    { "id": "vulkan-cuda", "label": "Vulkan + CUDA", "path": "/path/to/llama.cpp/build-cuda-vulkan/bin/llama-server" }
+  ]
 }

@@ -266,6 +266,30 @@ async function fetchModels() {
 // enough since callers of applyConfigToUI can run before this resolves).
 const modelsLoadedPromise = fetchModels();
 
+// Local-multi-gpu mode's "Build" selector -- which compiled llama-server
+// binary to launch (configured server-side in dashboard.config.json). Same
+// early-population race as fetchModels() above, same fix (expose the promise,
+// await it before applyConfigToUI() touches #build-select's value).
+async function fetchBuilds() {
+    try {
+        const res = await fetch('/api/builds');
+        const data = await res.json();
+        const select = document.getElementById('build-select');
+        select.innerHTML = '';
+        (data.builds || []).forEach(b => {
+            const opt = document.createElement('option');
+            opt.value = b.id; opt.textContent = b.label || b.id;
+            opt.title = b.path || '';
+            select.appendChild(opt);
+        });
+    } catch (e) {}
+}
+const buildsLoadedPromise = fetchBuilds();
+// Switching builds can change which devices are reachable for the same
+// physical GPUs (see detectDevices()'s own comment), so re-detect
+// automatically rather than leaving a stale list from the previous build.
+document.getElementById('build-select').addEventListener('change', detectDevices);
+
 // --- Auto-snap to last-used config for this model + launch mode ---
 // Triggered only by model-select and launch-mode-select changes -- the two
 // "which setup am I in" selections the user actually asked for ("whenever I
@@ -640,6 +664,16 @@ async function applyConfigToUI(config) {
         modelSelect.dispatchEvent(new Event('change'));
     }
 
+    // Restore build selection -- same "wait for options to exist first" reasoning
+    // as the model select above. Falls back to whatever's already selected
+    // (fetchBuilds()'s default) if the saved build id no longer exists among the
+    // currently-configured builds.
+    await buildsLoadedPromise;
+    const buildSelect = document.getElementById('build-select');
+    if (config.build != null && buildSelect && [...buildSelect.options].some(o => o.value === config.build)) {
+        buildSelect.value = config.build;
+    }
+
     // Restore numeric fields
     if (config.ctx != null) document.getElementById('server-ctx').value = config.ctx;
     if (config.ngl != null) document.getElementById('server-ngl').value = config.ngl;
@@ -771,6 +805,7 @@ function buildConfigFromUI() {
     const deviceB = isLocal ? (document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim() || null) : null;
     return {
         modelPath: document.getElementById('model-select').value, // full host path, not just filename
+        build: document.getElementById('build-select').value || null,
         ctx: parseInt(document.getElementById('server-ctx').value),
         ngl: parseInt(document.getElementById('server-ngl').value),
         launchMode: currentLaunchMode,
@@ -799,19 +834,28 @@ function buildConfigFromUI() {
 }
 
 // --- Flag Reference (searchable popover, click-to-insert) ---
-let flagReferenceCache = null;
+// Keyed by build id -- different builds (e.g. Vulkan-only vs Vulkan+CUDA) can
+// expose different flags, so a cache hit for one build must not be served for
+// another.
+let flagReferenceCacheByBuild = new Map();
+let flagReferenceCache = null; // the currently-active build's cache, for renderFlagReference()
 async function openFlagReference() {
     const modal = document.getElementById('flag-reference-modal');
     const statusEl = document.getElementById('flag-reference-status');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     document.getElementById('flag-reference-search').focus();
-    if (!flagReferenceCache) {
+    const buildId = document.getElementById('build-select').value || '';
+    if (flagReferenceCacheByBuild.has(buildId)) {
+        flagReferenceCache = flagReferenceCacheByBuild.get(buildId);
+        statusEl.textContent = '';
+    } else {
         statusEl.textContent = 'Loading...';
         try {
-            const res = await fetch('/api/flags');
+            const res = await fetch('/api/flags?build=' + encodeURIComponent(buildId));
             const data = await res.json();
             flagReferenceCache = data.flags || [];
+            flagReferenceCacheByBuild.set(buildId, flagReferenceCache);
             statusEl.textContent = data.error ? `Failed to load: ${data.error}` : '';
         } catch (e) {
             statusEl.textContent = `Failed to load: ${e.message}`;
@@ -2030,13 +2074,21 @@ function renderDeviceOptions(devices) {
     }
 }
 
-document.getElementById('btn-detect-devices').addEventListener('click', async () => {
+// Shared by the "Detect Devices" button and the Build selector's change
+// handler -- different builds can expose different devices for the same
+// physical GPUs (e.g. a CUDA+Vulkan build shows an extra native CUDA device
+// for an NVIDIA card that a Vulkan-only build of the same repo can only reach
+// through Vulkan), so switching builds re-runs detection automatically
+// rather than leaving a stale device list from whichever build was
+// previously selected.
+async function detectDevices() {
     const statusEl = document.getElementById('device-detect-status');
     const dropdownRow = document.getElementById('device-dropdown-row');
     statusEl.classList.remove('hidden');
     statusEl.textContent = 'Detecting...';
     try {
-        const res = await fetch('/api/devices');
+        const buildId = document.getElementById('build-select').value;
+        const res = await fetch(`/api/devices?build=${encodeURIComponent(buildId)}`);
         const data = await res.json();
         if (data.devices && data.devices.length > 0) {
             renderDeviceOptions(data.devices);
@@ -2044,7 +2096,6 @@ document.getElementById('btn-detect-devices').addEventListener('click', async ()
             document.getElementById('device-manual-row').classList.add('hidden');
             statusEl.classList.add('hidden');
             try { localStorage.setItem(LAST_DETECTED_DEVICES_KEY, JSON.stringify(data.devices)); } catch (e) {}
-            refreshCommandPreview();
         } else {
             dropdownRow.classList.add('hidden');
             document.getElementById('device-manual-row').classList.remove('hidden');
@@ -2055,7 +2106,9 @@ document.getElementById('btn-detect-devices').addEventListener('click', async ()
         document.getElementById('device-manual-row').classList.remove('hidden');
         statusEl.textContent = `Detection failed (${e.message}) — enter device ids manually below.`;
     }
-});
+    refreshCommandPreview();
+}
+document.getElementById('btn-detect-devices').addEventListener('click', detectDevices);
 
 // On load: if a previous Detect Devices run succeeded, pre-populate the
 // dropdowns from cache so the user isn't forced to re-detect every page load
