@@ -2917,6 +2917,62 @@ document.addEventListener('keydown', (e) => {
         closeExpandModal();
     }
 });
+document.getElementById('expand-scroll-slider').addEventListener('input', () => {
+    // applyExpandTimeWindow (called via refreshExpandedChartLive ->
+    // getExpandChartData) reads this slider's own current value/max to decide
+    // both the visible window AND whether to treat the new position as "live"
+    // going forward, so a manual drag just needs to trigger a re-render.
+    refreshExpandedChartLive();
+});
+document.getElementById('expand-zoom-in').addEventListener('click', () => {
+    expandWindowSize = Math.max(10, Math.round(expandWindowSize / 1.5));
+    refreshExpandedChartLive();
+});
+document.getElementById('expand-zoom-out').addEventListener('click', () => {
+    expandWindowSize = Math.min(5000, Math.round(expandWindowSize * 1.5));
+    refreshExpandedChartLive();
+});
+
+// tempHistory/pwrHistory/cpuHistory/gpuUtilHistory/cpuTempHistory grow
+// unbounded for the life of the page (netHistoryFull/tpsHistoryFull are
+// capped at 200) -- the mini sidebar view only ever shows the last 30
+// points, and the full-screen expand used to just dump the ENTIRE history
+// onto one chart (fine early in a session, unreadable/dense after a few
+// hours). This windows it instead: EXPAND_DEFAULT_WINDOW points visible at
+// once (3x the mini view), with a slider to scroll back through older data
+// and zoom buttons to change how many points are visible at a time.
+const EXPAND_DEFAULT_WINDOW = 90;
+let expandWindowSize = EXPAND_DEFAULT_WINDOW;
+
+// Slider value is an absolute start-index into the full array, not a
+// distance-from-live offset -- simpler to reason about, and "am I at the
+// live edge" is just value===max. Called every time new data arrives
+// (fullLength grows) as well as on open/zoom/scroll, so it both applies the
+// current window AND keeps the slider's own max/value in sync: if the
+// previous position was pinned to live (value was at the previous max), the
+// view auto-follows new data by moving to the new max; otherwise the view
+// stays anchored to the same absolute index range while more data
+// accumulates behind it, exactly like a paused live-stream scrubber.
+function applyExpandTimeWindow(fullLabels, fullData0, fullData1) {
+    const slider = document.getElementById('expand-scroll-slider');
+    const L = fullLabels.length;
+    const prevMax = parseInt(slider.max, 10) || 0;
+    const prevValue = parseInt(slider.value, 10) || 0;
+    const wasLive = prevValue >= prevMax;
+    const newMax = Math.max(0, L - expandWindowSize);
+    slider.max = newMax;
+    slider.value = wasLive ? newMax : Math.min(prevValue, newMax);
+    const windowStart = parseInt(slider.value, 10) || 0;
+    const windowEnd = Math.min(windowStart + expandWindowSize, L);
+    const isLive = windowEnd >= L;
+    const statusEl = document.getElementById('expand-time-status');
+    if (statusEl) statusEl.textContent = `${isLive ? 'Live' : 'Paused'} · ${Math.max(windowEnd - windowStart, 0)} samples`;
+    return {
+        labels: fullLabels.slice(windowStart, windowEnd),
+        data0: fullData0.slice(windowStart, windowEnd),
+        data1: fullData1 ? fullData1.slice(windowStart, windowEnd) : null
+    };
+}
 
 function getExpandChartData(chartId) {
     let fullLabels = [], fullData0 = [], fullData1 = [], isSingleLine = false, singleColor = null, singleLabel = '';
@@ -2934,7 +2990,8 @@ function getExpandChartData(chartId) {
         isSingleLine = true; singleColor = 'rgba(74, 222, 128, 1)'; singleLabel = 'Tokens/sec';
     }
     else return null;
-    return { fullLabels, fullData0, fullData1, isSingleLine, singleColor, singleLabel };
+    const windowed = applyExpandTimeWindow(fullLabels, fullData0, fullData1);
+    return { fullLabels: windowed.labels, fullData0: windowed.data0, fullData1: windowed.data1, isSingleLine, singleColor, singleLabel };
 }
 
 // Called from every history-array push site (see call sites) -- no-ops
@@ -2959,6 +3016,18 @@ window.expandChart = function(chartId, title) {
     modal.classList.remove('hidden'); modal.classList.add('flex');
     currentExpandedChartId = chartId;
     currentExpandedIsHw = false;
+
+    // Fresh zoom/scroll state each time a (possibly different) chart is
+    // opened -- start at the default 3x-mini window, pinned to live (slider
+    // reset to its max further down inside getExpandChartData/
+    // applyExpandTimeWindow, since wasLive is read from the slider's current
+    // value === its current max, which this 0/0 reset always satisfies).
+    expandWindowSize = EXPAND_DEFAULT_WINDOW;
+    const scrollSlider = document.getElementById('expand-scroll-slider');
+    scrollSlider.max = 0;
+    scrollSlider.value = 0;
+    document.getElementById('expand-time-controls').classList.remove('hidden');
+    document.getElementById('expand-time-controls').classList.add('flex');
 
     const chartData = getExpandChartData(chartId);
     if (!chartData) return;
@@ -3191,6 +3260,14 @@ function renderOmniChartCore(metrics, titleText, tpsLineColor) {
     const canvas = document.getElementById('expandedChartCanvas');
     titleEl.innerText = titleText;
     modal.classList.remove('hidden'); modal.classList.add('flex');
+    // Time-window scroll/zoom controls only apply to the classic single/dual-
+    // line sidebar charts (see expandChart, which shows this same row) -- omni
+    // graphs are either a fixed, already-complete per-request sample set, or
+    // (session graph) already show their own bounded window with its own
+    // "click to expand full session" affordance, so windowing on top of that
+    // doesn't apply the same way.
+    document.getElementById('expand-time-controls').classList.add('hidden');
+    document.getElementById('expand-time-controls').classList.remove('flex');
     if (expandedChartInst) { expandedChartInst.destroy(); }
     expandedChartInst = new Chart(canvas.getContext('2d'), {
         type: 'line',

@@ -774,6 +774,20 @@
             <canvas id="expandedChartCanvas"></canvas>
         </div>
         </div>
+        <!-- Time window controls: only shown for the classic single/dual-line
+             sidebar charts (temp/power/CPU/GPU util/CPU temp/net/tokens-per-sec),
+             which keep an unbounded in-memory history but only ever showed the
+             mini view's own 30-point slice, even full-screen. Scrollback is
+             expressed as a slider position, not a raw offset, so it can stay
+             pinned to "live" (auto-follows new data) when at the right edge,
+             or stay anchored to whatever absolute range the user scrolled to
+             otherwise -- see updateExpandTimeWindowUI() for the mapping. -->
+        <div id="expand-time-controls" class="hidden flex items-center gap-3 mt-3 px-1 text-xs text-gray-400">
+            <button id="expand-zoom-out" type="button" class="px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-gray-300" title="Zoom out (show more time, less detail)">−</button>
+            <button id="expand-zoom-in" type="button" class="px-2 py-1 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded text-gray-300" title="Zoom in (show less time, more detail)">+</button>
+            <input id="expand-scroll-slider" type="range" min="0" max="0" value="0" class="flex-1 accent-indigo-500 cursor-pointer">
+            <span id="expand-time-status" class="font-mono text-[11px] text-gray-500 whitespace-nowrap w-40 text-right">Live · 90 samples</span>
+        </div>
     </div>
 
     <!-- Flag reference: searchable browse-and-insert list parsed from
