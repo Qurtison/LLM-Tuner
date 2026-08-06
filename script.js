@@ -41,9 +41,6 @@ let currentLaunchMode = 'docker-rpc';
 // function's *call* needs to happen after the declaration, and that call can
 // happen before script evaluation reaches line 1250 or wherever it now lives).
 let workerLogsInterval = null;
-// Same early-declaration reasoning as workerLogsInterval above -- restoreCachedDevices()
-// (moved to run before restoreLastLaunchConfig(), see that call site) references this.
-const LAST_DETECTED_DEVICES_KEY = 'last_detected_devices';
 
 // Active Session Trackers for CSV
 let sessionData = {};
@@ -289,6 +286,14 @@ const buildsLoadedPromise = fetchBuilds();
 // physical GPUs (see detectDevices()'s own comment), so re-detect
 // automatically rather than leaving a stale list from the previous build.
 document.getElementById('build-select').addEventListener('change', detectDevices);
+// Auto-detect devices as soon as the Build selector is populated, rather than
+// requiring a manual "Detect Devices" click -- hotplugging a GPU isn't
+// supported by the kernel, so the device list is static for the life of the
+// boot and there's nothing to gain by making the user ask for it. Exposed as
+// a promise for the same reason buildsLoadedPromise/modelsLoadedPromise are:
+// applyConfigToUI() needs the dropdown options to exist before it can restore
+// a saved deviceA/deviceB selection into them.
+const devicesDetectedPromise = buildsLoadedPromise.then(detectDevices);
 
 // --- Auto-snap to last-used config for this model + launch mode ---
 // Triggered only by model-select and launch-mode-select changes -- the two
@@ -697,7 +702,9 @@ async function applyConfigToUI(config) {
     document.getElementById('server-tensor-split').dispatchEvent(new Event('input'));
 
     // Restore local-multi-gpu device selection (manual fields always; dropdowns
-    // only if a Detect Devices run already populated matching options)
+    // only if detection already populated matching options) -- await the
+    // auto-detect triggered on load so this isn't racing it.
+    await devicesDetectedPromise;
     if (config.deviceA != null) {
         document.getElementById('device-manual-a').value = config.deviceA;
         const selA = document.getElementById('device-select-a');
@@ -992,11 +999,6 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
 // with this model (see snapToLastUsedConfig's comment for why this is scoped
 // to model-select/launch-mode-select only, not every field above).
 document.getElementById('model-select').addEventListener('change', snapToLastUsedConfig);
-
-// Must run before restoreLastLaunchConfig() -- see restoreCachedDevices()'s
-// own comment for why (device dropdown options need to exist before
-// applyConfigToUI() tries to select one of them).
-restoreCachedDevices();
 
 // Restore last launch config on page load (Item #22)
 restoreLastLaunchConfig();
@@ -1992,7 +1994,6 @@ document.getElementById('rpc-toggle').addEventListener('change', () => {
 });
 
 // --- Launch Mode: Docker+RPC Worker vs Local Multi-GPU (Vulkan) ---
-// LAST_DETECTED_DEVICES_KEY declared near the top of the file -- see comment there.
 
 function applyLaunchMode(mode) {
     currentLaunchMode = mode === 'local-multi-gpu' ? 'local-multi-gpu' : 'docker-rpc';
@@ -2054,6 +2055,15 @@ function renderDeviceOptions(devices) {
     const selA = document.getElementById('device-select-a');
     const selB = document.getElementById('device-select-b');
     selA.innerHTML = ''; selB.innerHTML = '';
+    // GPU B defaults to "None" -- a single detected device (no eGPU/second GPU
+    // connected) should mean a plain, unsplit single-GPU launch, not both
+    // dropdowns landing on the same lone device (see resolveLaunchCommand in
+    // server4.js, which now treats deviceA === deviceB as "no split configured"
+    // too, but this makes "no second device" an explicit, selectable state
+    // instead of relying on that as an implicit fallback).
+    const noneOpt = document.createElement('option');
+    noneOpt.value = ''; noneOpt.textContent = 'None (single GPU)';
+    selB.appendChild(noneOpt);
     for (const d of devices) {
         const label = `${d.id} — ${d.description} (${d.freeMib} MiB free)`;
         for (const sel of [selA, selB]) {
@@ -2067,20 +2077,27 @@ function renderDeviceOptions(devices) {
     // never what you want in an A/B split by default, and can even report a
     // deceptively large "VRAM" total via UMA/shared memory, so size isn't a
     // reliable signal either. User can still override via the dropdowns.
+    // Only GPU B needs the "None" option's index accounted for -- .value (not
+    // .selectedIndex) sidesteps that offset entirely.
     if (devices.length > 1) {
         const discreteIdx = devices.map((d, i) => i).filter(i => !/intel|iris|uhd graphics/i.test(devices[i].description));
         const [idxA, idxB] = discreteIdx.length >= 2 ? discreteIdx : [0, 1];
-        selA.selectedIndex = idxA; selB.selectedIndex = idxB;
+        selA.selectedIndex = idxA; selB.value = devices[idxB].id;
     }
+    // devices.length <= 1: selA defaults to its only option (or stays empty),
+    // selB defaults to "None" (the option we just inserted first) -- exactly
+    // the single-GPU/no-eGPU state, with no extra code needed.
 }
 
-// Shared by the "Detect Devices" button and the Build selector's change
-// handler -- different builds can expose different devices for the same
-// physical GPUs (e.g. a CUDA+Vulkan build shows an extra native CUDA device
-// for an NVIDIA card that a Vulkan-only build of the same repo can only reach
-// through Vulkan), so switching builds re-runs detection automatically
-// rather than leaving a stale device list from whichever build was
-// previously selected.
+// Runs automatically on page load (once the Build selector is populated, see
+// devicesDetectedPromise) and again on the Build selector's change handler --
+// different builds can expose different devices for the same physical GPUs
+// (e.g. a CUDA+Vulkan build shows an extra native CUDA device for an NVIDIA
+// card that a Vulkan-only build of the same repo can only reach through
+// Vulkan), so switching builds re-runs detection automatically rather than
+// leaving a stale device list from whichever build was previously selected.
+// No manual trigger -- GPU hotplug isn't supported by the kernel, so the
+// device list can't change without a reboot anyway.
 async function detectDevices() {
     const statusEl = document.getElementById('device-detect-status');
     const dropdownRow = document.getElementById('device-dropdown-row');
@@ -2095,7 +2112,6 @@ async function detectDevices() {
             dropdownRow.classList.remove('hidden');
             document.getElementById('device-manual-row').classList.add('hidden');
             statusEl.classList.add('hidden');
-            try { localStorage.setItem(LAST_DETECTED_DEVICES_KEY, JSON.stringify(data.devices)); } catch (e) {}
         } else {
             dropdownRow.classList.add('hidden');
             document.getElementById('device-manual-row').classList.remove('hidden');
@@ -2107,26 +2123,6 @@ async function detectDevices() {
         statusEl.textContent = `Detection failed (${e.message}) — enter device ids manually below.`;
     }
     refreshCommandPreview();
-}
-document.getElementById('btn-detect-devices').addEventListener('click', detectDevices);
-
-// On load: if a previous Detect Devices run succeeded, pre-populate the
-// dropdowns from cache so the user isn't forced to re-detect every page load
-// (detection talks to the Vulkan/CUDA loader, which can be slow or flaky --
-// see server4.js /api/devices). Declared as a plain function (not a
-// self-invoking one) and called explicitly near the top of the file, before
-// restoreLastLaunchConfig() -- that function tries to set the device
-// dropdowns' .value, which silently no-ops if the matching <option> doesn't
-// exist yet, same race as the fetchModels() one (see applyConfigToUI).
-function restoreCachedDevices() {
-    try {
-        const cached = JSON.parse(localStorage.getItem(LAST_DETECTED_DEVICES_KEY) || 'null');
-        if (cached && cached.length > 0) {
-            renderDeviceOptions(cached);
-            document.getElementById('device-dropdown-row').classList.remove('hidden');
-            document.getElementById('device-manual-row').classList.add('hidden');
-        }
-    } catch (e) {}
 }
 
 // Initialize polling intervals

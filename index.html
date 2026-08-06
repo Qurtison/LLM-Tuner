@@ -149,10 +149,10 @@
                             <label class="block text-[10px] text-gray-400 mb-0.5">Build <span class="text-indigo-400 cursor-help" title="Which compiled llama-server binary to launch (configured in dashboard.config.json). Different builds can expose different backends/devices for the same physical GPUs -- e.g. a CUDA+Vulkan build shows an extra native CUDA0 device for an NVIDIA card that a Vulkan-only build can only reach through Vulkan. Switching this re-runs device detection automatically.">?</span></label>
                             <select id="build-select" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[10px] text-gray-200"></select>
                         </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-[10px] text-gray-400">Vulkan/CUDA devices on this machine</span>
-                            <button id="btn-detect-devices" type="button" class="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300">Detect Devices</button>
-                        </div>
+                        <!-- Detected automatically on load and on Build change (script.js
+                             devicesDetectedPromise/detectDevices) -- no manual trigger, since
+                             GPU hotplug isn't supported by the kernel. -->
+                        <span class="text-[10px] text-gray-400">Vulkan/CUDA devices on this machine</span>
                         <div id="device-detect-status" class="hidden text-[9px] text-amber-400"></div>
 
                         <div id="device-dropdown-row" class="hidden grid grid-cols-2 gap-2">
