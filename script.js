@@ -2068,21 +2068,39 @@ function renderDeviceOptions(devices) {
             sel.appendChild(opt);
         }
     }
-    // Default to the first two *discrete* GPUs, not just list order -- an
-    // integrated GPU (e.g. an Intel iGPU alongside a laptop's dGPU) is almost
-    // never what you want in an A/B split by default, and can even report a
-    // deceptively large "VRAM" total via UMA/shared memory, so size isn't a
-    // reliable signal either. User can still override via the dropdowns.
-    // Only GPU B needs the "None" option's index accounted for -- .value (not
-    // .selectedIndex) sidesteps that offset entirely.
-    if (devices.length > 1) {
-        const discreteIdx = devices.map((d, i) => i).filter(i => !/intel|iris|uhd graphics/i.test(devices[i].description));
-        const [idxA, idxB] = discreteIdx.length >= 2 ? discreteIdx : [0, 1];
-        selA.selectedIndex = idxA; selB.value = devices[idxB].id;
+    // Default to the first two *distinct physical* discrete GPUs.
+    // Two things a naive "first two discrete entries" would get wrong:
+    // - An integrated GPU (e.g. an Intel iGPU alongside a laptop's dGPU) is
+    //   almost never what you want in an A/B split by default, and can even
+    //   report a deceptively large "VRAM" total via UMA/shared memory, so
+    //   size isn't a reliable signal either.
+    // - A build that supports more than one backend for the same card (e.g.
+    //   this repo's CUDA+Vulkan build) lists that ONE physical GPU twice --
+    //   confirmed live: an RTX 4090 shows up as both "CUDA0" and "Vulkan1".
+    //   Taking the first two list entries picked CUDA0 + Vulkan1 (two paths
+    //   to the SAME card) over CUDA0 + the actual second GPU (an eGPU on
+    //   Vulkan2), silently dropping the eGPU from the launch entirely.
+    // Dedupe by description (the physical card's name), preferring whichever
+    // entry is CUDA-backed for a card that appears on both -- CUDA is the
+    // faster native path, and picking it is the whole reason a CUDA+Vulkan
+    // build exists over a Vulkan-only one. User can still override via the
+    // dropdowns regardless of what's picked here.
+    const discrete = devices.filter(d => !/intel|iris|uhd graphics/i.test(d.description));
+    const byPhysicalGpu = new Map();
+    for (const d of discrete) {
+        const existing = byPhysicalGpu.get(d.description);
+        if (!existing || (!/^CUDA/.test(existing.id) && /^CUDA/.test(d.id))) {
+            byPhysicalGpu.set(d.description, d);
+        }
     }
-    // devices.length <= 1: selA defaults to its only option (or stays empty),
-    // selB defaults to "None" (the option we just inserted first) -- exactly
-    // the single-GPU/no-eGPU state, with no extra code needed.
+    const distinctGpus = [...byPhysicalGpu.values()];
+    if (distinctGpus.length > 1) {
+        selA.value = distinctGpus[0].id;
+        selB.value = distinctGpus[1].id;
+    }
+    // 0 or 1 distinct physical GPUs found: selA defaults to its first option
+    // (or stays empty), selB defaults to "None" (the option we just inserted
+    // first) -- exactly the single-GPU/no-eGPU state, with no extra code needed.
 }
 
 // Runs automatically on page load (once the Build selector is populated, see
