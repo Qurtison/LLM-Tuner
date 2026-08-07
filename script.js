@@ -675,7 +675,16 @@ async function applyConfigToUI(config) {
     // currently-configured builds.
     await buildsLoadedPromise;
     const buildSelect = document.getElementById('build-select');
+    // devicesDetectedPromise's detection already ran by this point, against
+    // whatever build fetchBuilds() defaulted to (its first option) -- if the
+    // saved config restores a DIFFERENT build here, that detection was for
+    // the wrong binary (confirmed live: restoring "Vulkan + CUDA" over a
+    // default "Vulkan Only" left the device dropdowns showing only the
+    // Vulkan-only device list, missing CUDA0 entirely). Track that so device
+    // restoration below can re-detect instead of trusting the stale result.
+    let buildChanged = false;
     if (config.build != null && buildSelect && [...buildSelect.options].some(o => o.value === config.build)) {
+        buildChanged = buildSelect.value !== config.build;
         buildSelect.value = config.build;
     }
 
@@ -704,11 +713,14 @@ async function applyConfigToUI(config) {
 
     // Restore device selection (manual fields always; dropdowns only if
     // detection already populated matching options) -- await the auto-detect
-    // triggered on load so this isn't racing it. Skip GPU B when RPC is
-    // enabled (applyRpcToggleUI already forced it to "None" above) -- an old
-    // saved profile from before RPC and local split were mutually exclusive
-    // could otherwise reintroduce a stale deviceB value here.
-    await devicesDetectedPromise;
+    // triggered on load so this isn't racing it, unless restoring the build
+    // above just invalidated that detection (see buildChanged), in which
+    // case re-run it for the build actually being restored instead of
+    // trusting the stale result. Skip GPU B when RPC is enabled
+    // (applyRpcToggleUI already forced it to "None" above) -- an old saved
+    // profile from before RPC and local split were mutually exclusive could
+    // otherwise reintroduce a stale deviceB value here.
+    if (buildChanged) await detectDevices(); else await devicesDetectedPromise;
     if (config.deviceA != null) {
         document.getElementById('device-manual-a').value = config.deviceA;
         const selA = document.getElementById('device-select-a');
