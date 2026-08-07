@@ -4,6 +4,16 @@ const escapeHtml = (unsafe) => unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;
 
 // Safe formatting helpers -- avoid NaN/Infinity leaking into % widths or "0%" masquerading as real data
 function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+// A blank numeric field means "omit this flag, let llama-server use its own
+// default" -- not "0" or whatever parseFloat/parseInt does with an empty
+// string (NaN). Used by buildConfigFromUI() for every optional sampling
+// param, so e.g. clearing Repeat Penalty actually drops --repeat-penalty
+// instead of coercing to a value llama-server might reject outright (0 is
+// invalid for it; 1.0, not 0, is its own "disabled" value).
+function numFieldOrNull(id, parser) {
+    const v = parser(document.getElementById(id).value);
+    return isNum(v) ? v : null;
+}
 function fmtPct(value, decimals = 1) { return isNum(value) ? `${value.toFixed(decimals)}%` : '--%'; }
 function fmtUnit(value, unit, decimals = 0) { return isNum(value) ? `${value.toFixed(decimals)}${unit}` : `--${unit}`; }
 function safeRatioPct(numerator, denominator) {
@@ -737,14 +747,17 @@ async function applyConfigToUI(config) {
     document.getElementById('mtp-toggle').checked = mtpEnabled;
     if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
 
-    // Restore sampling params -- ?? not || since 0 is a valid, meaningful value
-    // for several of these (top-k/presence-penalty disabled, etc).
-    document.getElementById('server-temp').value = config.temp ?? 0.80;
-    document.getElementById('server-top-k').value = config.topK ?? 40;
-    document.getElementById('server-top-p').value = config.topP ?? 0.95;
-    document.getElementById('server-min-p').value = config.minP ?? 0.05;
-    document.getElementById('server-presence-penalty').value = config.presencePenalty ?? 0.00;
-    document.getElementById('server-repeat-penalty').value = config.repeatPenalty ?? 1.00;
+    // Restore sampling params -- ?? '' (not a hardcoded numeric default) so a
+    // field the user deliberately left blank (buildConfigFromUI's
+    // numFieldOrNull -> null, meaning "omit this flag, let llama-server use
+    // its own default") comes back blank too, rather than silently
+    // reappearing with the dashboard's own pre-filled value on next load.
+    document.getElementById('server-temp').value = config.temp ?? '';
+    document.getElementById('server-top-k').value = config.topK ?? '';
+    document.getElementById('server-top-p').value = config.topP ?? '';
+    document.getElementById('server-min-p').value = config.minP ?? '';
+    document.getElementById('server-presence-penalty').value = config.presencePenalty ?? '';
+    document.getElementById('server-repeat-penalty').value = config.repeatPenalty ?? '';
 
     // Restore MoE CPU offload (optional -- blank omits the flag entirely)
     document.getElementById('server-n-cpu-moe').value = config.nCpuMoe ?? '';
@@ -820,7 +833,6 @@ function populateLaunchConfig(config) {
 // to run the server (see the rawCommand branch in server4.js /api/start).
 function buildConfigFromUI() {
     const mtpEnabled = document.getElementById('mtp-toggle').checked;
-    const verbosityVal = parseInt(document.getElementById('server-verbosity').value);
     // Dropdown value wins if detection populated it and it's still selected,
     // otherwise fall back to whatever's in the manual text field. GPU B is
     // forced to "None" whenever RPC is enabled (see applyRpcToggleUI), so
@@ -844,17 +856,17 @@ function buildConfigFromUI() {
         specType: mtpEnabled ? 'draft-mtp' : null,
         specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
-        temp: parseFloat(document.getElementById('server-temp').value),
-        topK: parseInt(document.getElementById('server-top-k').value),
-        topP: parseFloat(document.getElementById('server-top-p').value),
-        minP: parseFloat(document.getElementById('server-min-p').value),
-        presencePenalty: parseFloat(document.getElementById('server-presence-penalty').value),
-        repeatPenalty: parseFloat(document.getElementById('server-repeat-penalty').value),
-        nCpuMoe: document.getElementById('server-n-cpu-moe').value.trim() !== '' ? parseInt(document.getElementById('server-n-cpu-moe').value) : null,
+        temp: numFieldOrNull('server-temp', parseFloat),
+        topK: numFieldOrNull('server-top-k', parseInt),
+        topP: numFieldOrNull('server-top-p', parseFloat),
+        minP: numFieldOrNull('server-min-p', parseFloat),
+        presencePenalty: numFieldOrNull('server-presence-penalty', parseFloat),
+        repeatPenalty: numFieldOrNull('server-repeat-penalty', parseFloat),
+        nCpuMoe: numFieldOrNull('server-n-cpu-moe', parseInt),
         jinja: document.getElementById('jinja-toggle').checked,
         chatTemplateFile: document.getElementById('server-chat-template-file').value.trim() || null,
         loadMode: document.getElementById('server-load-mode').value || null,
-        verbosity: Number.isFinite(verbosityVal) ? verbosityVal : null,
+        verbosity: numFieldOrNull('server-verbosity', parseInt),
         argString: document.getElementById('extra-args').value.trim() || null
     };
 }
