@@ -1332,6 +1332,7 @@ let livePrefillTps = null;
 
 // Monitor tab's Live Request card -- driven by the same broadcasts as the
 // sidebar so it reflects requests from any client, not just this chat.
+let prefillEtaState = null; // { p0, t0, lastP } -- progress-rate baseline for the ETA
 function updateLiveRequestCard(phase, data) {
     const phaseEl = document.getElementById('live-req-phase');
     if (!phaseEl) return;
@@ -1349,12 +1350,21 @@ function updateLiveRequestCard(phase, data) {
         document.getElementById('live-req-prefill-tps').textContent = isNaN(data.tps) ? '' : `${data.tps.toFixed(1)} t/s`;
         document.getElementById('live-req-bar').style.width = `${pct.toFixed(1)}%`;
         document.getElementById('live-req-pct').textContent = `${pct.toFixed(1)}%`;
-        // ETA from progress + rate: total = pos/progress, remaining/tps
+        // ETA from the observed rate of PROGRESS over wall time, not from
+        // token counts: llama's progress fraction is measured against the
+        // whole task (cached prefix included) while n_tokens only counts
+        // newly-processed tokens, so tokens/progress math misestimates
+        // whenever the prompt cache absorbed part of the prefill.
+        const now = Date.now();
+        if (!prefillEtaState || data.progress < prefillEtaState.lastP) {
+            prefillEtaState = { p0: data.progress, t0: now, lastP: data.progress }; // new request
+        }
+        prefillEtaState.lastP = data.progress;
         let eta = '';
-        if (data.progress > 0 && data.tps > 0 && !isNaN(data.nTokens)) {
-            const remaining = data.nTokens / data.progress - data.nTokens;
-            const secs = remaining / data.tps;
-            eta = secs >= 90 ? `~${(secs / 60).toFixed(1)} min left` : `~${secs.toFixed(0)}s left`;
+        const dp = data.progress - prefillEtaState.p0;
+        if (dp > 0.005) {
+            const secs = (1 - data.progress) * (now - prefillEtaState.t0) / dp / 1000;
+            eta = secs >= 90 ? `est. ${(secs / 60).toFixed(1)} min left` : `est. ${secs.toFixed(0)}s left`;
         }
         document.getElementById('live-req-eta').textContent = eta;
     } else if (phase === 'gen') {

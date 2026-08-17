@@ -61,6 +61,34 @@
             .boot-fade-out {
                 animation: fade-out-end 0.6s ease-out forwards;
             }
+
+        /* Utilities missing from the static vendor/tailwind.css build (it was
+           compiled before these classes were first used -- new classes never
+           appear in it, they just silently do nothing). Keep in sync when
+           adding UI that uses previously-unused Tailwind classes. */
+        .inset-x-0 { left: 0; right: 0; }
+        .top-10 { top: 2.5rem; }
+        .bottom-0 { bottom: 0; }
+        .z-30 { z-index: 30; }
+        .backdrop-blur-sm { backdrop-filter: blur(4px); }
+        .bg-gray-950\/85 { background-color: rgba(3,7,18,0.85); }
+        .bg-yellow-900\/40 { background-color: rgba(113,63,18,0.4); }
+        .bg-green-900\/40 { background-color: rgba(20,83,45,0.4); }
+        .text-orange-400 { color: #fb923c; }
+        .text-amber-400 { color: #fbbf24; }
+        .grid-cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .grid-cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+        .grid-cols-6 { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+        .col-span-2 { grid-column: span 2 / span 2; }
+        .col-span-3 { grid-column: span 3 / span 3; }
+        .gap-x-2 { column-gap: 0.5rem; }
+        .gap-y-1 { row-gap: 0.25rem; }
+        .pb-1 { padding-bottom: 0.25rem; }
+        .duration-500 { transition-duration: 500ms; }
+        .min-h-\[16rem\] { min-height: 16rem; }
+        .max-h-\[32rem\] { max-height: 32rem; }
+        .hover\:bg-indigo-500:hover { background-color: #6366f1; }
+        .hover\:bg-gray-700:hover { background-color: #374151; }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 font-sans h-screen flex flex-col md:flex-row overflow-hidden">
@@ -474,7 +502,7 @@
                         <span class="font-mono text-yellow-400" id="live-req-prefill-tps"></span>
                     </div>
                     <div class="h-2 bg-gray-800 rounded-full overflow-hidden">
-                        <div id="live-req-bar" class="h-full rounded-full bg-gradient-to-r from-yellow-500 to-amber-400 transition-all duration-500" style="width:0%"></div>
+                        <div id="live-req-bar" class="h-full rounded-full transition-all duration-500" style="width:0%; background:linear-gradient(to right, #eab308, #fbbf24)"></div>
                     </div>
                     <div class="flex justify-between text-[10px] text-gray-500">
                         <span id="live-req-pct"></span>
