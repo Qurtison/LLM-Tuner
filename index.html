@@ -260,6 +260,20 @@
                             <label class="block text-[10px] text-gray-400 mb-1">Draft Model <span class="text-indigo-400 cursor-help" title="--spec-draft-model PATH -- separate draft model for the draft-simple/eagle3/dflash/dspark strategies. Not needed for draft-mtp or the ngram-* strategies. Launch fails with a visible error if a strategy that needs it is checked without it.">?</span></label>
                             <input type="text" id="spec-draft-model" placeholder="/path/to/draft.gguf (only for draft-simple/eagle3/dflash/dspark)" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[11px] font-mono">
                         </div>
+                        <div id="spec-ngram-options" class="hidden grid grid-cols-3 gap-2">
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1">Ngram N <span class="text-indigo-400 cursor-help" title="--spec-ngram-<type>-size-n N -- length of the lookup n-gram (default: 12). Applied to each checked ngram-simple/map-k/map-k4v strategy. Blank = llama-server default.">?</span></label>
+                                <input type="number" id="spec-ngram-size-n" placeholder="12" min="1" max="1024" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1">Ngram M <span class="text-indigo-400 cursor-help" title="--spec-ngram-<type>-size-m N -- length of the drafted m-gram on a lookup hit (default: 48). Applied to each checked ngram-simple/map-k/map-k4v strategy. Blank = llama-server default.">?</span></label>
+                                <input type="number" id="spec-ngram-size-m" placeholder="48" min="1" max="1024" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1">Min Hits <span class="text-indigo-400 cursor-help" title="--spec-ngram-<type>-min-hits N -- minimum lookup hits before an m-gram is proposed (default: 1). Applied to each checked ngram-simple/map-k/map-k4v strategy. Blank = llama-server default.">?</span></label>
+                                <input type="number" id="spec-ngram-min-hits" placeholder="1" min="1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                            </div>
+                        </div>
                     </div>
                 </div>
                 <div class="pt-2 border-t border-gray-700/40">
@@ -435,6 +449,7 @@
             <button type="button" id="tab-interactive" class="px-4 py-2 text-xs font-semibold text-indigo-400 border-b-2 border-indigo-500">Interactive</button>
             <button type="button" id="tab-monitor" class="px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300">Monitor</button>
             <button type="button" id="tab-history" class="px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300">History</button>
+            <button type="button" id="tab-bench" class="px-4 py-2 text-xs font-semibold text-gray-500 border-b-2 border-transparent hover:text-gray-300">Bench</button>
         </div>
 
         <!-- Monitor: THIS SESSION ONLY (nothing backfilled from CSV -- only
@@ -444,6 +459,34 @@
              single request, fed every telemetry poll tick regardless of which
              tab is active. -->
         <div id="monitor-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
+            <!-- Live in-flight request status: fed by the same PREFILL_PROGRESS /
+                 GEN_PROGRESS broadcasts that drive the sidebar, so it works for
+                 requests from ANY client (opencode, curl, ...), not just this
+                 dashboard's chat. -->
+            <div id="live-request-card" class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Live Request</h3>
+                    <span id="live-req-phase" class="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-800 text-gray-500">idle</span>
+                </div>
+                <div id="live-req-prefill" class="hidden space-y-1">
+                    <div class="flex justify-between items-baseline text-xs">
+                        <span class="text-gray-500">Prefill <span id="live-req-pos" class="text-gray-300 font-mono"></span> tokens</span>
+                        <span class="font-mono text-yellow-400" id="live-req-prefill-tps"></span>
+                    </div>
+                    <div class="h-2 bg-gray-800 rounded-full overflow-hidden">
+                        <div id="live-req-bar" class="h-full rounded-full bg-gradient-to-r from-yellow-500 to-amber-400 transition-all duration-500" style="width:0%"></div>
+                    </div>
+                    <div class="flex justify-between text-[10px] text-gray-500">
+                        <span id="live-req-pct"></span>
+                        <span id="live-req-eta"></span>
+                    </div>
+                </div>
+                <div id="live-req-gen" class="hidden flex justify-between items-baseline text-xs">
+                    <span class="text-gray-500">Generating <span id="live-req-decoded" class="text-gray-300 font-mono"></span> tokens</span>
+                    <span class="font-mono text-green-400" id="live-req-gen-tps"></span>
+                </div>
+                <div id="live-req-idle" class="text-xs text-gray-600">No request in flight.</div>
+            </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" id="session-omni-card" title="Click to expand and see all session activity since page load">
                 <div class="flex justify-between items-center mb-2">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Session Activity <span class="text-gray-600 normal-case font-normal">(last 2 min -- click to expand full session)</span></h3>
@@ -513,9 +556,89 @@
             </div>
         </div>
 
-        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
-            <!-- Boot Animation Overlay -->
-            <div id="boot-overlay" class="hidden flex-col items-center justify-center h-full text-center">
+        <div id="bench-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">llama-bench <span class="text-indigo-400 cursor-help font-normal normal-case" title="Runs llama-bench from the selected build. The model server must be stopped first (the bench needs the VRAM). -d tests prompt/gen speed at context depth -- the key number for long-context tuning.">?</span></h3>
+                    <span id="bench-status" class="text-[10px] text-gray-500"></span>
+                </div>
+                <div class="grid grid-cols-4 gap-2">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Build</label>
+                        <select id="bench-build" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs"></select>
+                    </div>
+                    <div class="col-span-3">
+                        <label class="block text-[10px] text-gray-400 mb-1">Model</label>
+                        <select id="bench-model" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono"></select>
+                    </div>
+                </div>
+                <div class="grid grid-cols-4 gap-2">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Devices <span class="text-indigo-400 cursor-help" title="-dev -- comma/slash separated, e.g. Vulkan2 or CUDA0 or Vulkan1,Vulkan2. Blank = all devices.">?</span></label>
+                        <input type="text" id="bench-devices" placeholder="all" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Split mode</label>
+                        <select id="bench-sm" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
+                            <option value="">default (layer)</option>
+                            <option value="none">none</option>
+                            <option value="layer">layer</option>
+                            <option value="row">row</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Tensor split <span class="text-indigo-400 cursor-help" title="-ts, e.g. 37/63. Blank = auto.">?</span></label>
+                        <input type="text" id="bench-ts" placeholder="auto" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div class="flex items-end pb-1">
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" id="bench-fa" checked class="accent-indigo-500 rounded">Flash attn</label>
+                    </div>
+                </div>
+                <div class="grid grid-cols-6 gap-2">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Prompt tok (-p)</label>
+                        <input type="text" id="bench-p" value="8192" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Gen tok (-n)</label>
+                        <input type="text" id="bench-n" value="128" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div class="col-span-2">
+                        <label class="block text-[10px] text-gray-400 mb-1">Depths (-d) <span class="text-indigo-400 cursor-help" title="Comma-separated context depths to test at. Depth 0 = empty context; higher depths show the long-context decay that matters for your real workload.">?</span></label>
+                        <input type="text" id="bench-d" value="0,32768,131072" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Reps (-r)</label>
+                        <input type="text" id="bench-r" placeholder="5" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">KV cache</label>
+                        <select id="bench-kv" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
+                            <option value="">f16</option>
+                            <option value="q8_0" selected>q8_0</option>
+                        </select>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-[10px] text-gray-400 mb-1">Extra args</label>
+                    <input type="text" id="bench-extra" placeholder="passed through to llama-bench verbatim" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                </div>
+                <div class="flex gap-2">
+                    <button id="bench-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run</button>
+                    <button id="bench-stop-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-red-400 rounded-md text-xs font-semibold transition-colors hidden">Stop</button>
+                </div>
+            </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1 min-h-[16rem]">
+                <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Output</h3>
+                <pre id="bench-output" class="text-[11px] font-mono text-gray-300 whitespace-pre overflow-x-auto overflow-y-auto max-h-[32rem]"></pre>
+            </div>
+        </div>
+
+        <!-- Boot Animation Overlay: floats over whatever view is active
+             (absolute within <main>, below the tab bar) instead of living at
+             the top of the chat scrollback where it disappears once messages
+             exist. -->
+        <div id="boot-overlay" class="hidden flex-col items-center justify-center text-center absolute inset-x-0 bottom-0 top-10 z-30 bg-gray-950/85 backdrop-blur-sm">
                 <!-- Animated rings -->
                 <div class="relative w-40 h-40 mb-8">
                     <!-- Outer spinning ring -->
@@ -545,8 +668,9 @@
                 <div class="w-64 h-1 bg-gray-800 rounded-full mt-6 overflow-hidden">
                     <div id="boot-progress-fill" class="h-full rounded-full bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-500 transition-all duration-300" style="width: 0%; animation: boot-bar-pulse 2s ease-in-out infinite;"></div>
                 </div>
-            </div>
+        </div>
 
+        <div id="chat-container" class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
             <div class="flex flex-col items-center justify-center h-full text-gray-600 text-sm" id="empty-state">
                 <svg class="w-12 h-12 mb-3 opacity-20" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/></svg>
                 (no content to show)
@@ -600,7 +724,7 @@
         <!-- Prefill Speed Card -->
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50 space-y-2">
             <div class="flex justify-between items-center">
-                <span class="text-xs font-semibold text-blue-400">Prefill (Prompt) <span class="text-gray-500 cursor-help ml-1" title="Speed of processing the initial prompt (Tokens/s)">?</span></span>
+                <span class="text-xs font-semibold text-blue-400">Prefill (Prompt) <span class="text-gray-500 cursor-help ml-1" title="Speed of processing the initial prompt (Tokens/s). Avg is token-weighted: total prompt tokens / total prefill time across requests since page load.">?</span></span>
                 <span id="metric-prefill-tokens" class="text-[10px] text-gray-400">0 tokens</span>
             </div>
             <div class="flex justify-between items-baseline">
@@ -616,7 +740,7 @@
         <!-- Generation Speed Card -->
         <div class="bg-gray-800/50 p-3 rounded-xl border border-gray-700/50 space-y-2">
             <div class="flex justify-between items-center">
-                <span class="text-xs font-semibold text-green-400">Generation <span class="text-gray-500 cursor-help ml-1" title="Speed of generating new tokens (Tokens/s)">?</span></span>
+                <span class="text-xs font-semibold text-green-400">Generation <span class="text-gray-500 cursor-help ml-1" title="Speed of generating new tokens (Tokens/s). Avg is token-weighted: total generated tokens / total generation time across requests since page load.">?</span></span>
                 <span id="metric-gen-tokens" class="text-[10px] text-gray-400">0 tokens</span>
             </div>
             <div class="flex justify-between items-baseline">

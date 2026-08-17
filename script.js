@@ -60,30 +60,32 @@ let allChatSessions = [];
 let currentSessionId = Date.now().toString();
 let currentContextLimit = 110000; 
 let currentContextTokens = 0;
+// Token-weighted running averages: avg = total tokens / total seconds, so a
+// 145k-token prefill dominates a 19-token one instead of counting equally.
 let runningAverages = {
-    prefillSpeedSum: 0,
-    prefillSpeedCount: 0,
-    genSpeedSum: 0,
-    genSpeedCount: 0
+    prefillTokens: 0,
+    prefillSeconds: 0,
+    genTokens: 0,
+    genSeconds: 0
 };
 
 function updateAverageUI() {
-    if (runningAverages.prefillSpeedCount > 0) {
-        const avgPrefill = (runningAverages.prefillSpeedSum / runningAverages.prefillSpeedCount).toFixed(1);
+    if (runningAverages.prefillSeconds > 0) {
+        const avgPrefill = (runningAverages.prefillTokens / runningAverages.prefillSeconds).toFixed(1);
         document.getElementById('metric-prefill-avg').innerText = `${avgPrefill} t/s`;
     }
-    if (runningAverages.genSpeedCount > 0) {
-        const avgGen = (runningAverages.genSpeedSum / runningAverages.genSpeedCount).toFixed(1);
+    if (runningAverages.genSeconds > 0) {
+        const avgGen = (runningAverages.genTokens / runningAverages.genSeconds).toFixed(1);
         document.getElementById('metric-gen-avg').innerText = `${avgGen} t/s`;
     }
 }
 
 function resetRunningAverages() {
     runningAverages = {
-        prefillSpeedSum: 0,
-        prefillSpeedCount: 0,
-        genSpeedSum: 0,
-        genSpeedCount: 0
+        prefillTokens: 0,
+        prefillSeconds: 0,
+        genTokens: 0,
+        genSeconds: 0
     };
     try {
         localStorage.removeItem('cluster_averages');
@@ -100,16 +102,23 @@ try {
     localStorage.removeItem('cluster_averages');
 } catch (e) {}
 
-function saveMetricsToAverages(prefillSpeed, genSpeed) {
+function saveMetricsToAverages(prefillSpeed, genSpeed, prefillTokens, genTokens) {
     const pSpeed = parseFloat(prefillSpeed);
     const gSpeed = parseFloat(genSpeed);
+    // Weight each request by its token count (seconds = tokens / tps). If the
+    // token count is missing, fall back to a 1-second weight so the request
+    // still registers instead of being dropped.
     if (!isNaN(pSpeed) && pSpeed > 0) {
-        runningAverages.prefillSpeedSum += pSpeed;
-        runningAverages.prefillSpeedCount += 1;
+        const pTok = parseFloat(prefillTokens);
+        const tok = (!isNaN(pTok) && pTok > 0) ? pTok : pSpeed;
+        runningAverages.prefillTokens += tok;
+        runningAverages.prefillSeconds += tok / pSpeed;
     }
     if (!isNaN(gSpeed) && gSpeed > 0) {
-        runningAverages.genSpeedSum += gSpeed;
-        runningAverages.genSpeedCount += 1;
+        const gTok = parseFloat(genTokens);
+        const tok = (!isNaN(gTok) && gTok > 0) ? gTok : gSpeed;
+        runningAverages.genTokens += tok;
+        runningAverages.genSeconds += tok / gSpeed;
     }
     try {
         localStorage.setItem('cluster_averages', JSON.stringify(runningAverages));
@@ -252,8 +261,14 @@ document.getElementById('btn-advanced-toggle').addEventListener('click', () => {
 function getCheckedSpecTypes() {
     return [...document.querySelectorAll('.spec-type-cb:checked')].map(cb => cb.value);
 }
+// Strategies that take the shared ngram size-n/size-m/min-hits knobs (each via
+// its own namespaced flags; ngram-mod/ngram-cache have different or no knobs).
+const NGRAM_MAP_STRATEGIES = ['ngram-simple', 'ngram-map-k', 'ngram-map-k4v'];
 document.querySelectorAll('.spec-type-cb').forEach(cb => cb.addEventListener('change', () => {
-    document.getElementById('spec-options').classList.toggle('hidden', getCheckedSpecTypes().length === 0);
+    const checked = getCheckedSpecTypes();
+    document.getElementById('spec-options').classList.toggle('hidden', checked.length === 0);
+    document.getElementById('spec-ngram-options').classList.toggle('hidden',
+        !checked.some(t => NGRAM_MAP_STRATEGIES.includes(t)));
     refreshCommandPreview();
 }));
 
@@ -481,8 +496,22 @@ eventSource.onmessage = (e) => {
                 // it's the one place that can drive Avg Speed correctly for all
                 // of them -- submitPrompt's own calls were removed in favor of
                 // this single source.
-                saveMetricsToAverages(payload.promptTps, payload.genTps);
+                saveMetricsToAverages(payload.promptTps, payload.genTps, payload.promptTokens, payload.genTokens);
             } catch (e) { /* malformed payload -- ignore this one, not worth breaking the SSE handler over */ }
+        }
+        else if (data.log.startsWith('CTX_LIVE:')) {
+            // Real context usage straight from llama-server's /slots endpoint --
+            // works for requests from ANY client, unlike the old chat-side-only
+            // token estimate.
+            const parts = data.log.split(':');
+            const used = parseInt(parts[1]), limit = parseInt(parts[2]);
+            if (!isNaN(used) && !isNaN(limit) && limit > 0) updateContextUI(used, limit);
+        }
+        else if (data.log.startsWith('BENCH_DONE:')) {
+            setBenchRunningUI(false);
+        }
+        else if (data.log.startsWith('BENCH:')) {
+            appendBenchLine(data.log.slice('BENCH:'.length));
         }
     }
 
@@ -757,6 +786,11 @@ async function applyConfigToUI(config) {
     if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
     document.getElementById('spec-draft-n-min').value = config.specDraftNMin ?? '';
     document.getElementById('spec-draft-model').value = config.specDraftModel || '';
+    document.getElementById('spec-ngram-options').classList.toggle('hidden',
+        !specTypes.some(t => NGRAM_MAP_STRATEGIES.includes(t)));
+    document.getElementById('spec-ngram-size-n').value = config.specNgramSizeN ?? '';
+    document.getElementById('spec-ngram-size-m').value = config.specNgramSizeM ?? '';
+    document.getElementById('spec-ngram-min-hits').value = config.specNgramMinHits ?? '';
 
     // Restore sampling params -- ?? '' (not a hardcoded numeric default) so a
     // field the user deliberately left blank (buildConfigFromUI's
@@ -869,6 +903,9 @@ function buildConfigFromUI() {
         specDraftNMax: specEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
         specDraftNMin: specEnabled ? numFieldOrNull('spec-draft-n-min', parseInt) : null,
         specDraftModel: specEnabled ? (document.getElementById('spec-draft-model').value.trim() || null) : null,
+        specNgramSizeN: specEnabled ? numFieldOrNull('spec-ngram-size-n', parseInt) : null,
+        specNgramSizeM: specEnabled ? numFieldOrNull('spec-ngram-size-m', parseInt) : null,
+        specNgramMinHits: specEnabled ? numFieldOrNull('spec-ngram-min-hits', parseInt) : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
         temp: numFieldOrNull('server-temp', parseFloat),
         topK: numFieldOrNull('server-top-k', parseInt),
@@ -1034,7 +1071,8 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
 // Any GUI field that feeds buildConfigFromUI() regenerates the command preview.
 ['model-select', 'server-ctx', 'server-ngl', 'worker-ssh', 'server-fa',
  'server-cache-k', 'server-cache-v', 'mtp-draft-n', 'spec-draft-n-min',
- 'spec-draft-model', 'reasoning-preserve-toggle',
+ 'spec-draft-model', 'spec-ngram-size-n', 'spec-ngram-size-m',
+ 'spec-ngram-min-hits', 'reasoning-preserve-toggle',
  'server-verbosity', 'extra-args', 'device-select-a', 'device-select-b',
  'device-manual-a', 'device-manual-b',
  'server-temp', 'server-top-k', 'server-top-p', 'server-min-p',
@@ -1076,10 +1114,21 @@ function getLaunchProfiles() {
 }
 function saveLaunchProfiles(profiles) { localStorage.setItem(LAUNCH_PROFILES_KEY, JSON.stringify(profiles)); }
 
+// Name of the profile most recently loaded (or saved) THIS session -- Save
+// Profile defaults to overwriting it, since "tweak a setting, re-save the
+// profile I'm working with" is the common loop. With no profile touched yet
+// this session, the default is a fresh name derived from the model instead.
+let sessionActiveProfileName = null;
+
 function saveCurrentConfig() {
     const modelLabel = document.getElementById('model-select').selectedOptions[0]?.textContent.replace(/\s*\(.*/, '') || 'profile';
-    const name = prompt('Profile name:', modelLabel);
+    const defaultName = sessionActiveProfileName || modelLabel;
+    const promptMsg = sessionActiveProfileName
+        ? `Profile name (Enter overwrites "${sessionActiveProfileName}", or type a new name):`
+        : 'Profile name:';
+    const name = prompt(promptMsg, defaultName);
     if (!name) return;
+    sessionActiveProfileName = name;
     const config = buildConfigFromUI();
     config.rawCommand = document.getElementById('raw-launch-command').value.trim();
     const profiles = getLaunchProfiles();
@@ -1100,6 +1149,7 @@ function loadLaunchProfile(name) {
     // day should stay near the top, not sink below one you tweaked-and-saved
     // yesterday but haven't actually used since).
     entry.lastLoadedAt = Date.now();
+    sessionActiveProfileName = name;
     saveLaunchProfiles(profiles);
     // Reuse snapToLastUsedConfig's reentrancy guard: applyConfigToUI sets
     // model-select's value and dispatches a 'change' event on it (to drive
@@ -1118,6 +1168,7 @@ function loadLaunchProfile(name) {
 
 function deleteLaunchProfile(name) {
     saveLaunchProfiles(getLaunchProfiles().filter(p => p.name !== name));
+    if (sessionActiveProfileName === name) sessionActiveProfileName = null;
     renderSavedConfigs();
 }
 
@@ -1279,11 +1330,50 @@ let activeTimelineEls = null; // { svg, prefillLine, thinkLine, answerLine } for
 // chart (the loop used to null out the whole Prefill dataset every tick).
 let livePrefillTps = null;
 
+// Monitor tab's Live Request card -- driven by the same broadcasts as the
+// sidebar so it reflects requests from any client, not just this chat.
+function updateLiveRequestCard(phase, data) {
+    const phaseEl = document.getElementById('live-req-phase');
+    if (!phaseEl) return;
+    const prefillBlock = document.getElementById('live-req-prefill');
+    const genBlock = document.getElementById('live-req-gen');
+    const idleBlock = document.getElementById('live-req-idle');
+    prefillBlock.classList.toggle('hidden', phase !== 'prefill');
+    genBlock.classList.toggle('hidden', phase !== 'gen');
+    idleBlock.classList.toggle('hidden', phase !== 'idle');
+    if (phase === 'prefill') {
+        phaseEl.textContent = 'prefill';
+        phaseEl.className = 'text-[10px] font-semibold px-2 py-0.5 rounded-full bg-yellow-900/40 text-yellow-400';
+        const pct = (data.progress * 100);
+        document.getElementById('live-req-pos').textContent = isNaN(data.nTokens) ? '?' : data.nTokens.toLocaleString();
+        document.getElementById('live-req-prefill-tps').textContent = isNaN(data.tps) ? '' : `${data.tps.toFixed(1)} t/s`;
+        document.getElementById('live-req-bar').style.width = `${pct.toFixed(1)}%`;
+        document.getElementById('live-req-pct').textContent = `${pct.toFixed(1)}%`;
+        // ETA from progress + rate: total = pos/progress, remaining/tps
+        let eta = '';
+        if (data.progress > 0 && data.tps > 0 && !isNaN(data.nTokens)) {
+            const remaining = data.nTokens / data.progress - data.nTokens;
+            const secs = remaining / data.tps;
+            eta = secs >= 90 ? `~${(secs / 60).toFixed(1)} min left` : `~${secs.toFixed(0)}s left`;
+        }
+        document.getElementById('live-req-eta').textContent = eta;
+    } else if (phase === 'gen') {
+        phaseEl.textContent = 'generating';
+        phaseEl.className = 'text-[10px] font-semibold px-2 py-0.5 rounded-full bg-green-900/40 text-green-400';
+        document.getElementById('live-req-decoded').textContent = isNaN(data.nDecoded) ? '?' : data.nDecoded.toLocaleString();
+        document.getElementById('live-req-gen-tps').textContent = isNaN(data.tps) ? '' : `${data.tps.toFixed(1)} t/s`;
+    } else {
+        phaseEl.textContent = 'idle';
+        phaseEl.className = 'text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-800 text-gray-500';
+    }
+}
+
 function handlePrefillProgress(progress, tps, nTokens) {
     if (!isNaN(progress) && !isNaN(tps)) {
         activePrefillSamples.push({ progress, tps });
         livePrefillTps = tps;
     }
+    updateLiveRequestCard('prefill', { progress, tps, nTokens });
     const pct = isNaN(progress) ? 0 : (progress * 100).toFixed(1);
     // status-indicator's ticking text is owned solely by submitPrompt's own
     // tpsLoop (1s interval) -- it used to also get overwritten from here,
@@ -1333,6 +1423,7 @@ function hidePrefillLoadingBar() {
 function handleGenProgress(tps, nDecoded) {
     // status-indicator is owned by submitPrompt's tpsLoop -- see the matching
     // note in handlePrefillProgress above.
+    updateLiveRequestCard('gen', { tps, nDecoded });
 
     // Live gen speed in the sidebar card
     if (!isNaN(tps)) {
@@ -3241,8 +3332,14 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         // Prefill and gen tps are mutually exclusive per-sample (each sample is
         // only ever in one phase), so these render as two distinct
         // non-overlapping segments rather than one line switching color.
-        { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y2', spanGaps: false },
-        { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y2', spanGaps: false },
+        // On their own auto-scaled axis (y3) -- they used to sit on y2, whose
+        // 0-100 clamp silently CLIPPED every prefill point above 100 t/s off
+        // the chart (i.e. nearly all of them on this hardware).
+        { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
+        { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
+        { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
+        { label: 'VRAM A (GB)', data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2', hidden: true },
+        { label: 'VRAM B (GB)', data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2', hidden: true },
         { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
     ];
 }
@@ -3325,7 +3422,17 @@ function buildOmniOptions() {
                 grid: { drawOnChartArea: false },
                 ticks: { color: '#6b7280', font: { size: 9 } },
                 min: 0, max: 100,
-                title: { display: true, text: '% / °C / tok/s', color: '#6b7280', font: { size: 9 } }
+                title: { display: true, text: '% / °C / GB', color: '#6b7280', font: { size: 9 } }
+            },
+            // Token rates get their own auto-scaled axis: prefill runs at
+            // 100-300 t/s on this hardware and was being clipped by y2's 0-100
+            // clamp (points outside axis range simply don't render).
+            y3: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                ticks: { color: 'rgba(234,179,8,0.9)', font: { size: 9 } },
+                min: 0,
+                title: { display: true, text: 'tok/s', color: 'rgba(234,179,8,0.9)', font: { size: 9 } }
             }
         }
     };
@@ -3488,7 +3595,7 @@ function renderRequestTable(rows, tbodyId, emptyId, clickVarName) {
     window[clickVarName] = displayRows;
     tbody.innerHTML = displayRows.map((r, i) => `
         <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer" onclick="expandMonitorRequestChart(window.${clickVarName}[${i}].runId, window.${clickVarName}[${i}].metrics)" title="Click for this request's telemetry">
-            <td class="px-4 py-1.5 text-gray-500">${r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--'}</td>
+            <td class="px-4 py-1.5 text-gray-500">${r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--'}${r.aborted ? ' <span class="text-orange-400 cursor-help" title="Request was canceled by the client before finishing (agent tool-call aborts, user interrupts). Counts are the last values observed live, not final totals.">⚠</span>' : ''}</td>
             <td class="px-4 py-1.5 truncate max-w-[220px]" title="${escapeHtml(r.model || '')}">${escapeHtml(r.model || '--')}</td>
             <td class="px-4 py-1.5 text-right font-mono">${r.promptTokens ?? '--'}</td>
             <td class="px-4 py-1.5 text-right font-mono text-blue-400">${r.promptTps != null ? Number(r.promptTps).toFixed(1) : '--'}</td>
@@ -3599,6 +3706,8 @@ async function renderSessionOmniPreview() {
                 masterGpuUtil: s.master?.gpu_util ?? 0, masterCpuUtil: s.master?.cpu_util ?? 0,
                 workerPwr: s.worker?.gpu_pwr ?? 0, workerTemp: s.worker?.gpu_temp ?? 0,
                 workerGpuUtil: s.worker?.gpu_util ?? 0,
+                masterVram: s.master?.vram_used != null ? +(s.master.vram_used / 1024).toFixed(2) : null,
+                workerVram: s.worker?.vram_used != null ? +(s.worker.vram_used / 1024).toFixed(2) : null,
                 prefillTps: null, genTps: null
             });
         }
@@ -3639,6 +3748,7 @@ function stopSessionOmniRefresh() {
 // its backfilled array -- it re-backfills fresh from the CSV each time you
 // switch to it, so it doesn't need live event-driven upkeep.
 function handleMonitorCompletion(payload) {
+    updateLiveRequestCard('idle', {});
     monitorDataPoints.push({ time: payload.timestamp || Date.now(), promptTps: payload.promptTps, genTps: payload.genTps });
     if (monitorDataPoints.length > SESSION_HISTORY_CAP) monitorDataPoints.shift();
     monitorRequestRows.push({
@@ -3650,6 +3760,7 @@ function handleMonitorCompletion(payload) {
         draftAccepted: payload.draftAccepted ?? null,
         draftGenerated: payload.draftGenerated ?? null,
         draftMeanLen: payload.draftMeanLen ?? null,
+        aborted: !!payload.aborted,
         // Carried inline so this specific row's omni graph doesn't need a
         // round trip to /api/logs/samples -- only backfilled (History) rows
         // need that fallback.
@@ -3732,6 +3843,7 @@ async function backfillHistoryData() {
             draftAccepted: r.draftAccepted ?? null,
             draftGenerated: r.draftGenerated ?? null,
             draftMeanLen: r.draftMeanLen ?? null,
+            aborted: !!r.aborted,
             metrics: null // backfilled rows fetch samples on demand via /api/logs/samples
         }));
         if (statusEl) statusEl.textContent = '';
@@ -3755,6 +3867,8 @@ document.getElementById('tab-interactive').addEventListener('click', () => {
     setTabButtonActive('tab-interactive', true);
     setTabButtonActive('tab-monitor', false);
     setTabButtonActive('tab-history', false);
+    setTabButtonActive('tab-bench', false);
+    document.getElementById('bench-view').classList.add('hidden');
     document.getElementById('monitor-view').classList.add('hidden');
     document.getElementById('monitor-view').classList.remove('flex');
     document.getElementById('history-view').classList.add('hidden');
@@ -3768,6 +3882,8 @@ document.getElementById('tab-monitor').addEventListener('click', () => {
     setTabButtonActive('tab-monitor', true);
     setTabButtonActive('tab-interactive', false);
     setTabButtonActive('tab-history', false);
+    setTabButtonActive('tab-bench', false);
+    document.getElementById('bench-view').classList.add('hidden');
     document.getElementById('monitor-view').classList.remove('hidden');
     document.getElementById('monitor-view').classList.add('flex');
     document.getElementById('history-view').classList.add('hidden');
@@ -3788,6 +3904,8 @@ document.getElementById('tab-history').addEventListener('click', () => {
     setTabButtonActive('tab-history', true);
     setTabButtonActive('tab-interactive', false);
     setTabButtonActive('tab-monitor', false);
+    setTabButtonActive('tab-bench', false);
+    document.getElementById('bench-view').classList.add('hidden');
     document.getElementById('history-view').classList.remove('hidden');
     document.getElementById('history-view').classList.add('flex');
     document.getElementById('monitor-view').classList.add('hidden');
@@ -3796,6 +3914,96 @@ document.getElementById('tab-history').addEventListener('click', () => {
     document.getElementById('chat-input-bar').classList.add('hidden');
     initHistoryChart();
     backfillHistoryData();
+});
+
+// --- Bench tab (llama-bench runner) ---
+let benchTabInitialized = false;
+async function initBenchTab() {
+    if (benchTabInitialized) return;
+    benchTabInitialized = true;
+    try {
+        const { builds } = await (await fetch('/api/builds')).json();
+        document.getElementById('bench-build').innerHTML =
+            builds.map(b => `<option value="${b.id}">${b.label}</option>`).join('');
+    } catch (e) { /* leave empty; server falls back to first build */ }
+    try {
+        const { models } = await (await fetch('/api/models')).json();
+        document.getElementById('bench-model').innerHTML =
+            (models || []).map(m => `<option value="${m.path}">${m.name} (${m.size} GB)</option>`).join('');
+    } catch (e) {
+        document.getElementById('bench-model').innerHTML = '<option value="">failed to load models</option>';
+    }
+}
+function setBenchRunningUI(running) {
+    document.getElementById('bench-run').classList.toggle('hidden', running);
+    document.getElementById('bench-stop-btn').classList.toggle('hidden', !running);
+    document.getElementById('bench-status').textContent = running ? 'running...' : '';
+}
+function appendBenchLine(line) {
+    const pre = document.getElementById('bench-output');
+    pre.textContent += (pre.textContent ? '\n' : '') + line;
+    pre.scrollTop = pre.scrollHeight;
+}
+document.getElementById('tab-bench').addEventListener('click', async () => {
+    isMonitorModeActive = false;
+    isHistoryModeActive = false;
+    stopSessionOmniRefresh();
+    setTabButtonActive('tab-bench', true);
+    setTabButtonActive('tab-interactive', false);
+    setTabButtonActive('tab-monitor', false);
+    setTabButtonActive('tab-history', false);
+    document.getElementById('bench-view').classList.remove('hidden');
+    document.getElementById('bench-view').classList.add('flex');
+    document.getElementById('monitor-view').classList.add('hidden');
+    document.getElementById('monitor-view').classList.remove('flex');
+    document.getElementById('history-view').classList.add('hidden');
+    document.getElementById('history-view').classList.remove('flex');
+    document.getElementById('chat-container').classList.add('hidden');
+    document.getElementById('chat-input-bar').classList.add('hidden');
+    await initBenchTab();
+    // Restore output/state from the server so a refresh or late tab-open
+    // doesn't lose a run that's already in progress or just finished.
+    try {
+        const status = await (await fetch('/api/bench/status')).json();
+        document.getElementById('bench-output').textContent = (status.output || []).join('\n');
+        const pre = document.getElementById('bench-output');
+        pre.scrollTop = pre.scrollHeight;
+        setBenchRunningUI(!!status.running);
+    } catch (e) { /* leave as-is */ }
+});
+document.getElementById('bench-run').addEventListener('click', async () => {
+    const body = {
+        build: document.getElementById('bench-build').value,
+        modelPath: document.getElementById('bench-model').value,
+        devices: document.getElementById('bench-devices').value.trim() || null,
+        splitMode: document.getElementById('bench-sm').value || null,
+        tensorSplit: document.getElementById('bench-ts').value.trim() || null,
+        fa: document.getElementById('bench-fa').checked,
+        cacheK: document.getElementById('bench-kv').value || null,
+        cacheV: document.getElementById('bench-kv').value || null,
+        nPrompt: document.getElementById('bench-p').value.trim() || null,
+        nGen: document.getElementById('bench-n').value.trim() || null,
+        depths: document.getElementById('bench-d').value.trim() || null,
+        reps: document.getElementById('bench-r').value.trim() || null,
+        extraArgs: document.getElementById('bench-extra').value.trim() || null,
+    };
+    document.getElementById('bench-output').textContent = '';
+    try {
+        const resp = await fetch('/api/bench/start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            document.getElementById('bench-status').textContent = data.error || 'failed to start';
+            return;
+        }
+        setBenchRunningUI(true);
+    } catch (e) {
+        document.getElementById('bench-status').textContent = 'failed to start: ' + e.message;
+    }
+});
+document.getElementById('bench-stop-btn').addEventListener('click', () => {
+    fetch('/api/bench/stop', { method: 'POST' }).catch(() => {});
 });
 
 // --- Sidebar Resizer ---

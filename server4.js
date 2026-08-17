@@ -28,6 +28,19 @@ let currentLaunchCommand = '';
 // server actually stops so a dead run's config isn't offered as "current".
 let currentLaunchConfig = null;
 
+// Live phase state of the in-flight request, parsed from llama-server's
+// progress lines -- stamped onto each telemetry sample as it's taken so the
+// per-request/monitor charts get REAL per-tick rates and prefill progress,
+// not just a flat completion-time average painted across the whole phase.
+let liveProgress = {};
+
+// --- BENCH STATE (llama-bench runner, Bench tab) ---
+let benchProcess = null;
+let benchOutput = [];          // full output of the current/last run
+const BENCH_OUTPUT_MAX_LINES = 2000;
+let benchRunning = false;
+let benchLastCommand = '';
+
 // --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
 // dashboard.config.json is user-editable and gitignored (see dashboard.config.example.json);
 // missing/invalid file silently falls back to this default. llamaServerBuilds
@@ -243,6 +256,24 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
             args.push('--spec-draft-n-min', config.specDraftNMin.toString());
         }
         if (config.specDraftModel) args.push('--spec-draft-model', config.specDraftModel);
+        // Shared ngram knobs: llama-server namespaces them per strategy
+        // (--spec-ngram-map-k4v-size-n etc.), so emit the same value for each
+        // checked strategy that takes them. Blank fields omit the flags
+        // (llama defaults: size-n 12, size-m 48, min-hits 1).
+        const ngramFlagStems = { 'ngram-simple': 'ngram-simple', 'ngram-map-k': 'ngram-map-k', 'ngram-map-k4v': 'ngram-map-k4v' };
+        for (const type of config.specType.split(',').map(s => s.trim())) {
+            const stem = ngramFlagStems[type];
+            if (!stem) continue;
+            if (config.specNgramSizeN != null && !Number.isNaN(config.specNgramSizeN)) {
+                args.push(`--spec-${stem}-size-n`, config.specNgramSizeN.toString());
+            }
+            if (config.specNgramSizeM != null && !Number.isNaN(config.specNgramSizeM)) {
+                args.push(`--spec-${stem}-size-m`, config.specNgramSizeM.toString());
+            }
+            if (config.specNgramMinHits != null && !Number.isNaN(config.specNgramMinHits)) {
+                args.push(`--spec-${stem}-min-hits`, config.specNgramMinHits.toString());
+            }
+        }
         args.push('-np', '1');
     }
     if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
@@ -412,6 +443,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 // or t_prompt_processing >= 3000ms internally), this always fires,
                 // so it's the only reliable way to start Monitor Mode's telemetry
                 // sampling for short/fast requests that never cross those thresholds.
+                liveProgress = {}; // new request -- drop the previous one's phase state
                 markRequestActivity();
             }
             else if (line.includes('prompt processing, n_tokens =')) {
@@ -421,6 +453,11 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 if (progressMatch) {
                     const nTokens = nTokensMatch ? nTokensMatch[1] : '0';
                     const tps = tpsMatch ? tpsMatch[1] : '0';
+                    liveProgress = {
+                        prefillTps: parseFloat(tps) || null,
+                        prefillProgress: parseFloat(progressMatch[1]),
+                        prefillTokens: parseInt(nTokens, 10) || null,
+                    };
                     broadcastState(`PREFILL_PROGRESS:${progressMatch[1]}:${tps}:${nTokens}`);
                     markRequestActivity();
                 }
@@ -429,6 +466,10 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 const nDecodedMatch = line.match(/n_decoded\s*=\s*(\d+)/);
                 const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
                 if (nDecodedMatch && tpsMatch) {
+                    // Generation phase -- clear any prefill-phase state so
+                    // telemetry samples taken from here on carry the gen rate,
+                    // not a stale prefill stamp.
+                    liveProgress = { genTps: parseFloat(tpsMatch[1]) || null, genTokens: parseInt(nDecodedMatch[1], 10) || null };
                     broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
                     markRequestActivity();
                 }
@@ -478,6 +519,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                                 logCompletedRequest(pending.timing, pending.samples, pending.completedAt).catch(() => { });
                             }, COMPLETION_FLUSH_DELAY_MS);
                             pendingCompletionsByTaskId.set(taskId, pending);
+                            rememberCompletedTaskId(taskId);
                         }
                     } else if (lastSegment.startsWith('draft acceptance')) {
                         // `draft acceptance = 0.76471 (   13 accepted /    17 generated), mean len =  1.76`
@@ -498,7 +540,34 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                     }
                 }
             }
-            else if (line.includes('abort') || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
+            else if (line.includes('stop processing: n_tokens =')) {
+                // Slot release line -- fires on BOTH natural completion and
+                // client-side cancel (opencode/agents abort streams constantly;
+                // llama.cpp prints NO timing lines for those, so canceled
+                // requests -- often the longest thinking runs -- silently
+                // produced no row at all). After a grace delay, if no natural
+                // completion was seen for this task, synthesize a row from the
+                // live progress state.
+                const relTaskMatch = line.match(/task\s+(\d+)/);
+                if (relTaskMatch) {
+                    const taskId = relTaskMatch[1];
+                    const live = { ...liveProgress };
+                    setTimeout(() => {
+                        if (pendingCompletionsByTaskId.has(taskId) || recentlyCompletedTaskIds.has(taskId)) return;
+                        if (!live.genTokens && !live.prefillTokens) return; // nothing observed -- not worth a row
+                        rememberCompletedTaskId(taskId); // guard against double-fire
+                        const timing = {
+                            promptTokens: live.prefillTokens ?? null,
+                            promptTps: live.prefillTps ?? null,
+                            genTokens: live.genTokens ?? null,
+                            genTps: live.genTps ?? null,
+                            aborted: true,
+                        };
+                        logCompletedRequest(timing, takeRequestSamples(), Date.now()).catch(() => { });
+                    }, 400);
+                }
+            }
+            else if ((line.includes('abort') && !line.includes('stop processing')) || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
                 serverState = 'stopped';
                 proc.kill();
                 if (onErrorCleanup) onErrorCleanup().catch(() => { });
@@ -550,7 +619,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
 // this row, as JSON. Lets a later model-select/launch-mode change look up
 // "what did I run last time for this exact combo" and restore it exactly,
 // rather than reconstructing a guess from the scattered individual columns.
-const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len\n";
+const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len,Aborted\n";
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
 
@@ -654,7 +723,8 @@ async function appendBenchmarkRow(data) {
         data.draftAcceptRate ?? '',
         data.draftAccepted ?? '',
         data.draftGenerated ?? '',
-        data.draftMeanLen ?? ''
+        data.draftMeanLen ?? '',
+        data.aborted ? '1' : ''
     ];
     await fs.appendFile(CSV_FILE, fields.join(',') + '\n');
     return runId;
@@ -681,6 +751,15 @@ const taskTimingsByTaskId = new Map();
 // acceptance line ever) flush on the timer with the draft fields absent.
 const pendingCompletionsByTaskId = new Map(); // taskId -> { timing, samples, completedAt, timer }
 const COMPLETION_FLUSH_DELAY_MS = 500;
+// Task ids that reached a natural "total time" completion recently -- used by
+// the abort detector (the "stop processing" release line fires for BOTH
+// natural and canceled ends, and by the time its grace delay runs, a natural
+// completion's pending entry may already have flushed and been deleted).
+const recentlyCompletedTaskIds = new Set();
+function rememberCompletedTaskId(taskId) {
+    recentlyCompletedTaskIds.add(taskId);
+    setTimeout(() => recentlyCompletedTaskIds.delete(taskId), 30000);
+}
 
 // Per-request telemetry sampling for Monitor Mode's "omni graph" (GPU
 // power/temp/util over the course of a request, not just the final tps
@@ -721,12 +800,34 @@ async function takeOneTelemetrySample() {
     try {
         const stats = await fetchCurrentTelemetry();
         if (!stats) return;
+        // Live context position from llama-server's /slots endpoint -- the only
+        // client-agnostic source of real context usage (n_prompt_tokens tracks
+        // the slot's absolute context position, growing during generation).
+        try {
+            const port = currentLaunchConfig?.port || 8080;
+            const slotsRes = await fetch(`http://localhost:${port}/slots`, { signal: AbortSignal.timeout(1500) });
+            const slots = await slotsRes.json();
+            const slot = Array.isArray(slots) ? slots[0] : null;
+            if (slot && slot.n_ctx) {
+                broadcastState(`CTX_LIVE:${slot.n_prompt_tokens ?? 0}:${slot.n_ctx}:${slot.is_processing ? 1 : 0}`);
+            }
+        } catch { /* endpoint disabled/unreachable -- context card just stays client-driven */ }
         activeRequestSamples.push({
             t: Date.now(),
             masterPwr: stats.master?.gpu_pwr ?? 0, masterTemp: stats.master?.gpu_temp ?? 0,
             masterGpuUtil: stats.master?.gpu_util ?? 0, masterCpuUtil: stats.master?.cpu_util ?? 0,
             workerPwr: stats.worker?.gpu_pwr ?? 0, workerTemp: stats.worker?.gpu_temp ?? 0,
             workerGpuUtil: stats.worker?.gpu_util ?? 0,
+            // VRAM in GB (monitor.py reports MiB) -- lets the charts show KV
+            // cache growth during long prefills.
+            masterVram: stats.master?.vram_used != null ? +(stats.master.vram_used / 1024).toFixed(2) : null,
+            workerVram: stats.worker?.vram_used != null ? +(stats.worker.vram_used / 1024).toFixed(2) : null,
+            // Real per-tick phase data from llama-server's own progress lines
+            // (see liveProgress). Null in whichever phase doesn't apply.
+            prefillTps: liveProgress.prefillTps ?? null,
+            prefillProgress: liveProgress.prefillProgress ?? null,
+            prefillPos: liveProgress.prefillTokens ?? null,
+            genTps: liveProgress.genTps ?? null,
         });
         if (activeRequestSamples.length > MAX_SAMPLES_PER_REQUEST) activeRequestSamples.shift();
     } finally {
@@ -757,6 +858,7 @@ function markRequestActivity() {
 function takeRequestSamples() {
     const samples = activeRequestSamples;
     activeRequestSamples = [];
+    liveProgress = {}; // request over -- don't let its last rates bleed into trailing samples
     return samples;
 }
 
@@ -825,15 +927,19 @@ async function logCompletedRequest(timing, samples, completedAt) {
         // comment). genMs is the actual generation-phase duration, so counting
         // back from the total-time log line's timestamp gives a real
         // prefill/gen boundary timestamp to split the samples on.
+        // Samples already carry real per-tick rates when llama printed progress
+        // lines while they were taken (see liveProgress stamping) -- the flat
+        // completion-time average is only a FALLBACK for samples that have
+        // nothing (short requests below llama's progress-print thresholds).
         if (samples.length > 0 && timing.genMs != null) {
             const prefillEndTime = completedAt - timing.genMs;
             for (const s of samples) {
                 if (s.t < prefillEndTime) {
-                    s.prefillTps = timing.promptTps ?? null;
+                    s.prefillTps = s.prefillTps ?? timing.promptTps ?? null;
                     s.genTps = null;
                 } else {
                     s.prefillTps = null;
-                    s.genTps = timing.genTps ?? null;
+                    s.genTps = s.genTps ?? timing.genTps ?? null;
                 }
             }
         }
@@ -869,6 +975,7 @@ async function logCompletedRequest(timing, samples, completedAt) {
             draftAccepted: timing.draftAccepted,
             draftGenerated: timing.draftGenerated,
             draftMeanLen: timing.draftMeanLen,
+            aborted: !!timing.aborted,
         });
         rememberRequestSamples(runId, samples);
         broadcastState(`COMPLETION:${JSON.stringify({
@@ -882,6 +989,7 @@ async function logCompletedRequest(timing, samples, completedAt) {
             draftAccepted: timing.draftAccepted ?? null,
             draftGenerated: timing.draftGenerated ?? null,
             draftMeanLen: timing.draftMeanLen ?? null,
+            aborted: !!timing.aborted,
             metrics: samples
         })}`);
     } catch (err) {
@@ -1074,6 +1182,7 @@ const server = http.createServer(async (req, res) => {
                         draftAccepted: cols.length > 34 && cols[34] !== '' ? parseInt(cols[34], 10) : null,
                         draftGenerated: cols.length > 35 && cols[35] !== '' ? parseInt(cols[35], 10) : null,
                         draftMeanLen: cols.length > 36 && cols[36] !== '' ? parseFloat(cols[36]) : null,
+                        aborted: cols.length > 37 && cols[37] === '1',
                     });
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1215,6 +1324,90 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/builds' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ builds: getLlamaServerBuilds() }));
+        }
+
+        // --- BENCH: run llama-bench from a configured build (Bench tab) ---
+        else if (req.url === '/api/bench/start' && req.method === 'POST') {
+            let cfg;
+            try { cfg = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
+            if (benchRunning) {
+                res.writeHead(409, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'A bench run is already in progress' }));
+            }
+            // llama-bench needs the VRAM the model server is holding; refuse
+            // rather than letting both fight over it and produce garbage numbers.
+            if (llamaProcess) {
+                res.writeHead(409, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'Stop the running model first -- llama-bench needs its VRAM for clean numbers' }));
+            }
+            if (!cfg.modelPath) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: 'modelPath is required' }));
+            }
+            const benchBin = getLlamaServerBinary(cfg.build).replace(/llama-server$/, 'llama-bench');
+            const args = ['-m', cfg.modelPath];
+            if (cfg.fa != null) args.push('-fa', cfg.fa ? '1' : '0');
+            if (cfg.cacheK) args.push('-ctk', cfg.cacheK);
+            if (cfg.cacheV) args.push('-ctv', cfg.cacheV);
+            if (cfg.nPrompt != null && cfg.nPrompt !== '') args.push('-p', String(cfg.nPrompt));
+            if (cfg.nGen != null && cfg.nGen !== '') args.push('-n', String(cfg.nGen));
+            if (cfg.depths) args.push('-d', String(cfg.depths));
+            if (cfg.reps != null && cfg.reps !== '') args.push('-r', String(cfg.reps));
+            if (cfg.devices) args.push('-dev', String(cfg.devices));
+            if (cfg.splitMode) args.push('-sm', String(cfg.splitMode));
+            if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
+            if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
+
+            benchOutput = [];
+            benchRunning = true;
+            benchLastCommand = `${benchBin} ${args.join(' ')}`;
+            const benchLog = (line) => {
+                benchOutput.push(line);
+                if (benchOutput.length > BENCH_OUTPUT_MAX_LINES) benchOutput = benchOutput.slice(-BENCH_OUTPUT_MAX_LINES);
+                broadcastState(`BENCH:${line}`);
+            };
+            benchLog(`$ ${benchLastCommand}`);
+            try {
+                benchProcess = spawn(benchBin, args);
+            } catch (err) {
+                benchRunning = false;
+                benchLog(`[bench] failed to spawn: ${err.message}`);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ error: err.message }));
+            }
+            let benchLineBuf = '';
+            const onBenchData = (d) => {
+                benchLineBuf += d.toString();
+                const lines = benchLineBuf.split(/\r\n|\r|\n/);
+                benchLineBuf = lines.pop();
+                for (const line of lines) benchLog(line);
+            };
+            benchProcess.stdout.on('data', onBenchData);
+            benchProcess.stderr.on('data', onBenchData);
+            benchProcess.on('error', (err) => {
+                benchRunning = false;
+                benchProcess = null;
+                benchLog(`[bench] error: ${err.message}`);
+                broadcastState('BENCH_DONE:error');
+            });
+            benchProcess.on('exit', (code, signal) => {
+                if (benchLineBuf) benchLog(benchLineBuf);
+                benchRunning = false;
+                benchProcess = null;
+                benchLog(`[bench] exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
+                broadcastState(`BENCH_DONE:${code ?? 'signal'}`);
+            });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true, command: benchLastCommand }));
+        }
+        else if (req.url === '/api/bench/stop' && req.method === 'POST') {
+            if (benchProcess) benchProcess.kill('SIGTERM');
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true }));
+        }
+        else if (req.url === '/api/bench/status' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ running: benchRunning, command: benchLastCommand, output: benchOutput }));
         }
 
         // --- FLAG REFERENCE (searchable popover) ---
