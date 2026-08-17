@@ -246,10 +246,16 @@ document.getElementById('btn-advanced-toggle').addEventListener('click', () => {
     const isHidden = panel.classList.toggle('hidden');
     icon.innerHTML = isHidden ? '&#9654;' : '&#9660;';
 });
-document.getElementById('mtp-toggle').addEventListener('change', (e) => {
-    document.getElementById('mtp-draft-n-row').classList.toggle('hidden', !e.target.checked);
+// Speculative decoding: any combination of strategy checkboxes; the shared
+// options row (draft n-max/n-min, draft model) only shows when at least one
+// strategy is selected.
+function getCheckedSpecTypes() {
+    return [...document.querySelectorAll('.spec-type-cb:checked')].map(cb => cb.value);
+}
+document.querySelectorAll('.spec-type-cb').forEach(cb => cb.addEventListener('change', () => {
+    document.getElementById('spec-options').classList.toggle('hidden', getCheckedSpecTypes().length === 0);
     refreshCommandPreview();
-});
+}));
 
 // --- Fetch Local Models ---
 async function fetchModels() {
@@ -742,10 +748,15 @@ async function applyConfigToUI(config) {
         if ([...selB.options].some(o => o.value === config.deviceB)) selB.value = config.deviceB;
     }
 
-    // Restore MTP settings
-    const mtpEnabled = config.specType === 'draft-mtp';
-    document.getElementById('mtp-toggle').checked = mtpEnabled;
+    // Restore speculative decoding settings -- specType is a comma-separated
+    // list of strategies (old configs stored a single value, which parses as a
+    // one-item list here and restores as one checked box).
+    const specTypes = (config.specType || '').split(',').map(s => s.trim()).filter(Boolean);
+    document.querySelectorAll('.spec-type-cb').forEach(cb => { cb.checked = specTypes.includes(cb.value); });
+    document.getElementById('spec-options').classList.toggle('hidden', specTypes.length === 0);
     if (config.specDraftNMax != null) document.getElementById('mtp-draft-n').value = config.specDraftNMax;
+    document.getElementById('spec-draft-n-min').value = config.specDraftNMin ?? '';
+    document.getElementById('spec-draft-model').value = config.specDraftModel || '';
 
     // Restore sampling params -- ?? '' (not a hardcoded numeric default) so a
     // field the user deliberately left blank (buildConfigFromUI's
@@ -832,7 +843,8 @@ function populateLaunchConfig(config) {
 // used to seed the raw-command box's content, NOT as the thing actually sent
 // to run the server (see the rawCommand branch in server4.js /api/start).
 function buildConfigFromUI() {
-    const mtpEnabled = document.getElementById('mtp-toggle').checked;
+    const specTypes = getCheckedSpecTypes();
+    const specEnabled = specTypes.length > 0;
     // Dropdown value wins if detection populated it and it's still selected,
     // otherwise fall back to whatever's in the manual text field. GPU B is
     // forced to "None" whenever RPC is enabled (see applyRpcToggleUI), so
@@ -853,8 +865,10 @@ function buildConfigFromUI() {
         cacheK: document.getElementById('server-cache-k').value,
         cacheV: document.getElementById('server-cache-v').value,
         tensorSplit: (deviceB || rpcEnabled) ? parseInt(document.getElementById('server-tensor-split').value) : null,
-        specType: mtpEnabled ? 'draft-mtp' : null,
-        specDraftNMax: mtpEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
+        specType: specEnabled ? specTypes.join(',') : null,
+        specDraftNMax: specEnabled ? parseInt(document.getElementById('mtp-draft-n').value || '2') : null,
+        specDraftNMin: specEnabled ? numFieldOrNull('spec-draft-n-min', parseInt) : null,
+        specDraftModel: specEnabled ? (document.getElementById('spec-draft-model').value.trim() || null) : null,
         reasoningPreserve: document.getElementById('reasoning-preserve-toggle').checked,
         temp: numFieldOrNull('server-temp', parseFloat),
         topK: numFieldOrNull('server-top-k', parseInt),
@@ -1019,7 +1033,8 @@ document.getElementById('btn-start-server').addEventListener('click', () => {
 
 // Any GUI field that feeds buildConfigFromUI() regenerates the command preview.
 ['model-select', 'server-ctx', 'server-ngl', 'worker-ssh', 'server-fa',
- 'server-cache-k', 'server-cache-v', 'mtp-draft-n', 'reasoning-preserve-toggle',
+ 'server-cache-k', 'server-cache-v', 'mtp-draft-n', 'spec-draft-n-min',
+ 'spec-draft-model', 'reasoning-preserve-toggle',
  'server-verbosity', 'extra-args', 'device-select-a', 'device-select-b',
  'device-manual-a', 'device-manual-b',
  'server-temp', 'server-top-k', 'server-top-p', 'server-min-p',
@@ -1259,10 +1274,15 @@ let chatContext = []; // Stores conversation history for the API
 // server's PREFILL_PROGRESS broadcasts during the current generation.
 let activePrefillSamples = [];
 let activeTimelineEls = null; // { svg, prefillLine, thinkLine, answerLine } for the in-flight response bubble
+// Latest prefill t/s from the server's PREFILL_PROGRESS broadcasts -- consumed
+// by submitPrompt's 1s tpsLoop so prefill actually lands in the live Tokens/sec
+// chart (the loop used to null out the whole Prefill dataset every tick).
+let livePrefillTps = null;
 
 function handlePrefillProgress(progress, tps, nTokens) {
     if (!isNaN(progress) && !isNaN(tps)) {
         activePrefillSamples.push({ progress, tps });
+        livePrefillTps = tps;
     }
     const pct = isNaN(progress) ? 0 : (progress * 100).toFixed(1);
     // status-indicator's ticking text is owned solely by submitPrompt's own
@@ -1511,6 +1531,7 @@ async function submitPrompt() {
     tpsChart.data.datasets[0].data = []; // Prefill Speed
     tpsChart.data.datasets[1].data = []; // Gen Speed
     tpsChart.update('none');
+    livePrefillTps = null; // stale prefill from the previous request must not plot into this one
 
     // Reset live numbers
     document.getElementById('metric-prefill').innerText = '0.0 t/s';
@@ -1550,15 +1571,19 @@ async function submitPrompt() {
         document.getElementById('current-tps').innerText = tps.toFixed(1);
         document.getElementById('metric-gen').innerText = `${tps.toFixed(1)} t/s`;
         
-        tpsHistory.push({ time: Math.floor((Date.now()-startTime)/1000), tps });
+        // During the prefill phase (no token generated yet), record the latest
+        // prefill t/s reported by the server's PREFILL_PROGRESS broadcasts so
+        // it plots on the chart's left axis; once generation starts the entry
+        // gets null and only the gen line advances.
+        tpsHistory.push({ time: Math.floor((Date.now()-startTime)/1000), tps, prefillTps: timeToFirstToken === 0 ? livePrefillTps : null });
         if(tpsHistory.length > 30) tpsHistory.shift();
         // Full history for expand modal
         tpsHistoryFull.push({ time: new Date().toLocaleTimeString(), tps });
         if (tpsHistoryFull.length > 200) tpsHistoryFull.shift();
         refreshExpandedChartLive();
-        
-        tpsChart.data.labels = tpsHistory.map(h => h.time); 
-        tpsChart.data.datasets[0].data = tpsHistory.map(h => null);
+
+        tpsChart.data.labels = tpsHistory.map(h => h.time);
+        tpsChart.data.datasets[0].data = tpsHistory.map(h => h.prefillTps ?? null);
         tpsChart.data.datasets[1].data = tpsHistory.map(h => h.tps);
         tpsChart.update('none');
 
@@ -1687,11 +1712,11 @@ async function submitPrompt() {
                             currentContextTokens = data.usage.prompt_tokens + data.usage.completion_tokens;
                             updateContextUI(currentContextTokens, currentContextLimit);
 
-                            // Plot the Prefill speed spike at the start of the chart
-                            if (tpsChart.data.datasets[0].data.length > 0) {
-                                tpsChart.data.datasets[0].data[0] = parseFloat(sessionData.promptTps);
-                                tpsChart.update('none');
-                            }
+                            // Prefill now plots live from tpsLoop's per-tick
+                            // prefillTps samples (fed by PREFILL_PROGRESS
+                            // broadcasts) -- the old "write promptTps into
+                            // data[0] here" hack fought that series and was
+                            // wiped by the next tick's rebuild anyway.
                         }
 
                         if (data.choices && data.choices.length > 0) {
@@ -2871,28 +2896,30 @@ document.getElementById('btn-new-chat').addEventListener('click', () => {
 });
 
 // --- CSV Viewer ---
+// Single forward character scan -- same fix as server4.js's splitCsvLine: the
+// previous indexOf-based version could send its cursor backwards on a `""""`
+// sequence (escaped empty string inside a quoted field) and loop forever,
+// freezing the tab on rows the server writes for configs with empty values.
 function parseCSVLine(line) {
+    if (!line) return [];
     const cols = [];
-    let i = 0;
-    while (i < line.length) {
-        if (line[i] === '"') {
-            let end = line.indexOf('"', i + 1);
-            let field = '';
-            while (end < line.length && line[end + 1] === '"') {
-                field += line.slice(i + 1, end).replace(/""/g, '"');
-                i = end + 2;
-                end = line.indexOf('"', i + 1);
-            }
-            field += line.slice(i + 1, end);
+    let field = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (inQuotes) {
+            if (c === '"') {
+                if (line[i + 1] === '"') { field += '"'; i++; } // escaped quote
+                else inQuotes = false; // closing quote
+            } else field += c;
+        } else if (c === '"' && field.length === 0) {
+            inQuotes = true; // opening quote of a quoted field
+        } else if (c === ',') {
             cols.push(field);
-            i = end + 2;
-            if (line[i] === ',') i++;
-        } else {
-            const comma = line.indexOf(',', i);
-            if (comma === -1) { cols.push(line.slice(i)); break; }
-            else { cols.push(line.slice(i, comma)); i = comma + 1; }
-        }
+            field = '';
+        } else field += c;
     }
+    cols.push(field);
     return cols;
 }
 
@@ -3467,6 +3494,7 @@ function renderRequestTable(rows, tbodyId, emptyId, clickVarName) {
             <td class="px-4 py-1.5 text-right font-mono text-blue-400">${r.promptTps != null ? Number(r.promptTps).toFixed(1) : '--'}</td>
             <td class="px-4 py-1.5 text-right font-mono">${r.genTokens ?? '--'}</td>
             <td class="px-4 py-1.5 text-right font-mono text-green-400">${r.genTps != null ? Number(r.genTps).toFixed(1) : '--'}</td>
+            <td class="px-4 py-1.5 text-right font-mono text-purple-400" title="${r.draftAcceptRate != null ? `${r.draftAccepted ?? '?'} accepted / ${r.draftGenerated ?? '?'} generated draft tokens${r.draftMeanLen != null ? `, mean accepted run ${Number(r.draftMeanLen).toFixed(2)}` : ''}` : 'no speculative drafting on this request'}">${r.draftAcceptRate != null ? (r.draftAcceptRate * 100).toFixed(0) + '%' : '--'}</td>
             <td class="px-4 py-1.5 text-right font-mono">${r.wallTime != null ? Number(r.wallTime).toFixed(1) : '--'}</td>
         </tr>
     `).join('');
@@ -3618,6 +3646,10 @@ function handleMonitorCompletion(payload) {
         promptTokens: payload.promptTokens, promptTps: payload.promptTps,
         genTokens: payload.genTokens, genTps: payload.genTps,
         wallTime: payload.wallTime != null ? parseFloat(payload.wallTime) : null,
+        draftAcceptRate: payload.draftAcceptRate ?? null,
+        draftAccepted: payload.draftAccepted ?? null,
+        draftGenerated: payload.draftGenerated ?? null,
+        draftMeanLen: payload.draftMeanLen ?? null,
         // Carried inline so this specific row's omni graph doesn't need a
         // round trip to /api/logs/samples -- only backfilled (History) rows
         // need that fallback.
@@ -3696,6 +3728,10 @@ async function backfillHistoryData() {
             timestamp: r.timestamp, model: r.model, runId: r.runId,
             promptTokens: r.promptTokens, promptTps: r.promptTps,
             genTokens: r.genTokens, genTps: r.genTps, wallTime: r.wallTime,
+            draftAcceptRate: r.draftAcceptRate ?? null,
+            draftAccepted: r.draftAccepted ?? null,
+            draftGenerated: r.draftGenerated ?? null,
+            draftMeanLen: r.draftMeanLen ?? null,
             metrics: null // backfilled rows fetch samples on demand via /api/logs/samples
         }));
         if (statusEl) statusEl.textContent = '';

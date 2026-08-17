@@ -230,13 +230,36 @@
                 </div>
 
                 <div class="space-y-2 pt-1">
-                    <label class="flex items-center gap-2 text-xs font-semibold text-gray-200">
-                        <input type="checkbox" id="mtp-toggle" class="accent-indigo-500 rounded">
-                        Enable MTP (Speculative Draft) <span class="text-indigo-400 cursor-help" title="Uses the model's built-in MTP head for speculative decoding (--spec-type draft-mtp). Forces -np 1.">?</span>
+                    <label class="block text-xs font-semibold text-gray-200">
+                        Speculative Decoding <span class="text-indigo-400 cursor-help" title="--spec-type a,b,c -- comma-separated list of speculative decoding strategies to attempt. Check any combination; forces -np 1. Per-request draft acceptance rate is logged to Monitor Mode so you can tune this.">?</span>
                     </label>
-                    <div id="mtp-draft-n-row" class="hidden pl-6">
-                        <label class="block text-[10px] text-gray-400 mb-1">Draft N Max</label>
-                        <input type="number" id="mtp-draft-n" value="2" min="1" max="6" class="w-24 bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                    <div id="spec-type-list" class="grid grid-cols-2 gap-x-2 gap-y-1 pl-1">
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="draft-mtp" class="spec-type-cb accent-indigo-500 rounded">draft-mtp <span class="text-indigo-400 cursor-help" title="Uses the model's built-in MTP head (model must support it).">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="draft-simple" class="spec-type-cb accent-indigo-500 rounded">draft-simple <span class="text-indigo-400 cursor-help" title="Classic separate small draft model. Requires a Draft Model path below.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="draft-eagle3" class="spec-type-cb accent-indigo-500 rounded">draft-eagle3 <span class="text-indigo-400 cursor-help" title="EAGLE3 draft head. Requires a compatible Draft Model path below.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="draft-dflash" class="spec-type-cb accent-indigo-500 rounded">draft-dflash <span class="text-indigo-400 cursor-help" title="DFlash draft model. Requires a compatible Draft Model path below.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="draft-dspark" class="spec-type-cb accent-indigo-500 rounded">draft-dspark <span class="text-indigo-400 cursor-help" title="DSpark draft model. Requires a compatible Draft Model path below.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="ngram-simple" class="spec-type-cb accent-indigo-500 rounded">ngram-simple <span class="text-indigo-400 cursor-help" title="Drafts by simple n-gram lookup over the existing context. No draft model needed; cheap, works best on repetitive text.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="ngram-map-k" class="spec-type-cb accent-indigo-500 rounded">ngram-map-k <span class="text-indigo-400 cursor-help" title="N-gram map keyed lookup variant. No draft model needed.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="ngram-map-k4v" class="spec-type-cb accent-indigo-500 rounded">ngram-map-k4v <span class="text-indigo-400 cursor-help" title="N-gram map k4v lookup variant. No draft model needed.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="ngram-mod" class="spec-type-cb accent-indigo-500 rounded">ngram-mod <span class="text-indigo-400 cursor-help" title="Adaptive n-gram drafting (self-resets on low acceptance streaks). No draft model needed.">?</span></label>
+                        <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" value="ngram-cache" class="spec-type-cb accent-indigo-500 rounded">ngram-cache <span class="text-indigo-400 cursor-help" title="N-gram cache drafting. No draft model needed.">?</span></label>
+                    </div>
+                    <div id="spec-options" class="hidden pl-1 space-y-2">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1">Draft N Max <span class="text-indigo-400 cursor-help" title="--spec-draft-n-max N -- number of tokens to draft per step (default: 3). Higher = bigger wins when acceptance is high, more wasted work when it's low.">?</span></label>
+                                <input type="number" id="mtp-draft-n" value="2" min="1" max="16" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1">Draft N Min <span class="text-indigo-400 cursor-help" title="--spec-draft-n-min N -- minimum number of draft tokens to use. Leave blank to omit the flag (llama-server default).">?</span></label>
+                                <input type="number" id="spec-draft-n-min" placeholder="none" min="0" step="1" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-sm">
+                            </div>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Draft Model <span class="text-indigo-400 cursor-help" title="--spec-draft-model PATH -- separate draft model for the draft-simple/eagle3/dflash/dspark strategies. Not needed for draft-mtp or the ngram-* strategies. Launch fails with a visible error if a strategy that needs it is checked without it.">?</span></label>
+                            <input type="text" id="spec-draft-model" placeholder="/path/to/draft.gguf (only for draft-simple/eagle3/dflash/dspark)" class="w-full bg-gray-900 border border-gray-700 rounded-md px-2 py-1 text-[11px] font-mono">
+                        </div>
                     </div>
                 </div>
                 <div class="pt-2 border-t border-gray-700/40">
@@ -445,6 +468,7 @@
                                 <th class="text-right font-medium px-4 py-2">Prompt t/s</th>
                                 <th class="text-right font-medium px-4 py-2">Gen tok</th>
                                 <th class="text-right font-medium px-4 py-2">Gen t/s</th>
+                                <th class="text-right font-medium px-4 py-2" title="Speculative draft acceptance: accepted / generated draft tokens for this request. Blank when speculative decoding was off or nothing was drafted.">Draft acc</th>
                                 <th class="text-right font-medium px-4 py-2">Wall (s)</th>
                             </tr>
                         </thead>
@@ -478,6 +502,7 @@
                                 <th class="text-right font-medium px-4 py-2">Prompt t/s</th>
                                 <th class="text-right font-medium px-4 py-2">Gen tok</th>
                                 <th class="text-right font-medium px-4 py-2">Gen t/s</th>
+                                <th class="text-right font-medium px-4 py-2" title="Speculative draft acceptance: accepted / generated draft tokens for this request. Blank when speculative decoding was off or nothing was drafted.">Draft acc</th>
                                 <th class="text-right font-medium px-4 py-2">Wall (s)</th>
                             </tr>
                         </thead>

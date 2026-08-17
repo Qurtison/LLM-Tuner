@@ -233,9 +233,16 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
     if (config.fa) args.push('-fa', 'on');
     if (config.cacheK) args.push('--cache-type-k', config.cacheK);
     if (config.cacheV) args.push('--cache-type-v', config.cacheV);
+    // specType is a comma-separated list of strategies (llama-server accepts
+    // e.g. `--spec-type draft-mtp,ngram-simple`); older configs stored a
+    // single value, which is just a one-item list.
     if (config.specType) {
         args.push('--spec-type', config.specType);
         args.push('--spec-draft-n-max', (config.specDraftNMax || 2).toString());
+        if (config.specDraftNMin != null && !Number.isNaN(config.specDraftNMin)) {
+            args.push('--spec-draft-n-min', config.specDraftNMin.toString());
+        }
+        if (config.specDraftModel) args.push('--spec-draft-model', config.specDraftModel);
         args.push('-np', '1');
     }
     if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
@@ -362,8 +369,10 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
         const text = d.toString();
         process.stdout.write(text);
 
-        // Append to in-memory ring buffer for /api/master/logs (item 5)
-        const rawLines = text.split('\n');
+        // Append to in-memory ring buffer for /api/master/logs (item 5).
+        // Split on \r too -- carriage-return-updated progress output (download
+        // bars, in-place status lines) would otherwise never produce a "line".
+        const rawLines = text.split(/\r\n|\r|\n/);
         for (const l of rawLines) {
             if (l.length > 0) {
                 masterLogBuffer.push(l);
@@ -373,10 +382,15 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
             }
         }
 
-        // Buffer partial lines to handle chunk boundaries (item 7)
+        // Buffer partial lines to handle chunk boundaries (item 7). \r counts
+        // as a line terminator here for the same reason as above -- otherwise a
+        // \r-only output phase grows this buffer (and re-splits all of it per
+        // chunk) for as long as the phase lasts. The cap is a last-resort bound
+        // for a process that emits unbounded output with no line breaks at all.
         logLineBuffer += text;
-        const bufferedLines = logLineBuffer.split('\n');
+        const bufferedLines = logLineBuffer.split(/\r\n|\r|\n/);
         logLineBuffer = bufferedLines.pop() || '';
+        if (logLineBuffer.length > 1_000_000) logLineBuffer = logLineBuffer.slice(-4096);
 
         for (const line of bufferedLines) {
             if (line.includes('load_model: loading model')) {
@@ -447,7 +461,39 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                         const timing = taskTimingsByTaskId.get(taskId) || {};
                         taskTimingsByTaskId.delete(taskId);
                         if (m) {
-                            logCompletedRequest({ ...timing, wallTimeS: (parseFloat(m[1]) / 1000).toFixed(2) }).catch(() => { });
+                            // Capture samples and the completion timestamp NOW --
+                            // the sample buffer is shared, so waiting out the
+                            // flush delay would let the next request's samples
+                            // bleed into this one's series, and the prefill/gen
+                            // split in logCompletedRequest counts genMs back
+                            // from this moment, not from whenever we flush.
+                            const pending = {
+                                timing: { ...timing, wallTimeS: (parseFloat(m[1]) / 1000).toFixed(2) },
+                                samples: takeRequestSamples(),
+                                completedAt: Date.now(),
+                                timer: null,
+                            };
+                            pending.timer = setTimeout(() => {
+                                pendingCompletionsByTaskId.delete(taskId);
+                                logCompletedRequest(pending.timing, pending.samples, pending.completedAt).catch(() => { });
+                            }, COMPLETION_FLUSH_DELAY_MS);
+                            pendingCompletionsByTaskId.set(taskId, pending);
+                        }
+                    } else if (lastSegment.startsWith('draft acceptance')) {
+                        // `draft acceptance = 0.76471 (   13 accepted /    17 generated), mean len =  1.76`
+                        // -- only printed when the request actually drafted tokens.
+                        const dm = lastSegment.match(/=\s*([\d.]+)\s*\(\s*(\d+)\s*accepted\s*\/\s*(\d+)\s*generated\s*\)(?:\s*,\s*mean len\s*=\s*([\d.]+))?/);
+                        const pending = pendingCompletionsByTaskId.get(taskId);
+                        if (dm && pending) {
+                            clearTimeout(pending.timer);
+                            pendingCompletionsByTaskId.delete(taskId);
+                            Object.assign(pending.timing, {
+                                draftAcceptRate: parseFloat(dm[1]),
+                                draftAccepted: parseInt(dm[2], 10),
+                                draftGenerated: parseInt(dm[3], 10),
+                                draftMeanLen: dm[4] != null ? parseFloat(dm[4]) : null,
+                            });
+                            logCompletedRequest(pending.timing, pending.samples, pending.completedAt).catch(() => { });
                         }
                     }
                 }
@@ -504,7 +550,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
 // this row, as JSON. Lets a later model-select/launch-mode change look up
 // "what did I run last time for this exact combo" and restore it exactly,
 // rather than reconstructing a guess from the scattered individual columns.
-const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json\n";
+const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len\n";
 const LOGS_DIR = path.join(ROOT_DIR, 'logs');
 const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
 
@@ -527,30 +573,31 @@ function csvQuote(val) {
 
 // Minimal CSV parser that respects double-quoted fields with embedded commas
 // -- shared by /api/logs/summary and /api/logs/recent.
+// Single forward character scan -- the previous indexOf-based version could
+// send its cursor BACKWARDS on a `""""` sequence (an escaped empty string
+// inside a quoted field, e.g. configJson's `""argString"":""""`), re-parsing
+// the same line in an infinite loop and OOMing the whole server on the first
+// /api/logs/summary call after such a row existed in the CSV.
 function splitCsvLine(line) {
+    if (!line) return [];
     const cols = [];
-    let i = 0;
-    while (i < line.length) {
-        if (line[i] === '"') {
-            // Quoted field: find closing quote (escaped quotes are "")
-            let end = line.indexOf('"', i + 1);
-            let field = '';
-            while (end < line.length && line[end + 1] === '"') {
-                field += line.slice(i + 1, end).replace(/""/g, '"');
-                i = end + 2;
-                end = line.indexOf('"', i + 1);
-            }
-            field += line.slice(i + 1, end);
+    let field = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const c = line[i];
+        if (inQuotes) {
+            if (c === '"') {
+                if (line[i + 1] === '"') { field += '"'; i++; } // escaped quote
+                else inQuotes = false; // closing quote
+            } else field += c;
+        } else if (c === '"' && field.length === 0) {
+            inQuotes = true; // opening quote of a quoted field
+        } else if (c === ',') {
             cols.push(field);
-            i = end + 2; // skip closing quote
-            if (line[i] === ',') i++; // skip comma
-        } else {
-            // Unquoted field
-            const comma = line.indexOf(',', i);
-            if (comma === -1) { cols.push(line.slice(i)); break; }
-            else { cols.push(line.slice(i, comma)); i = comma + 1; }
-        }
+            field = '';
+        } else field += c;
     }
+    cols.push(field);
     return cols;
 }
 
@@ -601,7 +648,13 @@ async function appendBenchmarkRow(data) {
         data.reasonTokens ?? '',
         data.wallTime ?? '',
         data.loadTime ?? '',
-        csvQuote(data.configJson || '')
+        csvQuote(data.configJson || ''),
+        // Speculative-decoding stats (blank when the run had no draft line).
+        // Strictly appended after config_json -- consumers index it as col 32.
+        data.draftAcceptRate ?? '',
+        data.draftAccepted ?? '',
+        data.draftGenerated ?? '',
+        data.draftMeanLen ?? ''
     ];
     await fs.appendFile(CSV_FILE, fields.join(',') + '\n');
     return runId;
@@ -617,6 +670,17 @@ async function appendBenchmarkRow(data) {
 // interleave in the stdout stream, so *timing* accumulation is keyed by task
 // id, not a single shared buffer.
 const taskTimingsByTaskId = new Map();
+
+// Completions whose "total time" line has arrived but whose CSV write /
+// COMPLETION broadcast is briefly deferred: llama-server prints the
+// per-request `draft acceptance = ...` summary a few lines AFTER "total time"
+// (see print_timings() in tools/server/server-context.cpp -- prompt eval /
+// eval / total time / graphs reused, THEN the draft stats, and only when
+// speculative decoding actually drafted something). Holding the completion
+// for a beat lets that line join the same record; non-speculative runs (no
+// acceptance line ever) flush on the timer with the draft fields absent.
+const pendingCompletionsByTaskId = new Map(); // taskId -> { timing, samples, completedAt, timer }
+const COMPLETION_FLUSH_DELAY_MS = 500;
 
 // Per-request telemetry sampling for Monitor Mode's "omni graph" (GPU
 // power/temp/util over the course of a request, not just the final tps
@@ -745,21 +809,24 @@ async function fetchCurrentTelemetry() {
 // CSV row and broadcasts a COMPLETION SSE event so any connected client
 // (Monitor Mode) can update live -- independent of whether this dashboard's
 // own chat UI happened to be the one that sent the request.
-async function logCompletedRequest(timing) {
+async function logCompletedRequest(timing, samples, completedAt) {
     try {
-        // Grab this request's sample series (see markRequestActive/takeRequestSamples
-        // above) before anything else -- it's a shared buffer that stops
-        // accumulating once activeRequestCount hits 0, so pull it now.
-        const samples = takeRequestSamples();
+        // `samples` and `completedAt` were captured on the "total time" log
+        // line (see the pendingCompletionsByTaskId machinery in handleLogs) --
+        // the actual write/broadcast may run up to COMPLETION_FLUSH_DELAY_MS
+        // later, waiting for a possible draft-acceptance line, so neither can
+        // be read "now".
+        samples = samples || [];
+        completedAt = completedAt || Date.now();
         // Split the sample series into a prefill-phase line and a gen-phase
         // line using the real, completion-time-computed durations (not a live
         // per-sample estimate, which we have no way to get server-side --
         // llama.cpp's own progress lines are rate-limited, see markRequestActivity's
         // comment). genMs is the actual generation-phase duration, so counting
-        // back from "now" (right after the total-time log line) gives a real
+        // back from the total-time log line's timestamp gives a real
         // prefill/gen boundary timestamp to split the samples on.
         if (samples.length > 0 && timing.genMs != null) {
-            const prefillEndTime = Date.now() - timing.genMs;
+            const prefillEndTime = completedAt - timing.genMs;
             for (const s of samples) {
                 if (s.t < prefillEndTime) {
                     s.prefillTps = timing.promptTps ?? null;
@@ -794,10 +861,14 @@ async function logCompletedRequest(timing) {
             genTokens: timing.genTokens ?? '',
             wallTime: timing.wallTimeS ?? '',
             loadTime: finalLoadTime || '',
-            configJson: currentLaunchConfig ? JSON.stringify(currentLaunchConfig) : ''
+            configJson: currentLaunchConfig ? JSON.stringify(currentLaunchConfig) : '',
             // netThroughput/reasonTokens are frontend-only concepts (a client-side
             // delta calc, and reasoning-token counting from rendered content) --
             // left blank here, same as any other row missing optional fields.
+            draftAcceptRate: timing.draftAcceptRate,
+            draftAccepted: timing.draftAccepted,
+            draftGenerated: timing.draftGenerated,
+            draftMeanLen: timing.draftMeanLen,
         });
         rememberRequestSamples(runId, samples);
         broadcastState(`COMPLETION:${JSON.stringify({
@@ -807,6 +878,10 @@ async function logCompletedRequest(timing) {
             promptTps: timing.promptTps, genTps: timing.genTps,
             promptTokens: timing.promptTokens, genTokens: timing.genTokens,
             wallTime: timing.wallTimeS,
+            draftAcceptRate: timing.draftAcceptRate ?? null,
+            draftAccepted: timing.draftAccepted ?? null,
+            draftGenerated: timing.draftGenerated ?? null,
+            draftMeanLen: timing.draftMeanLen ?? null,
             metrics: samples
         })}`);
     } catch (err) {
@@ -993,6 +1068,12 @@ const server = http.createServer(async (req, res) => {
                         promptTokens: parseInt(cols[13], 10) || null,
                         genTokens: parseInt(cols[28], 10) || null,
                         wallTime: parseFloat(cols[30]) || null,
+                        // Draft stats (cols 33+) only exist on rows logged since
+                        // speculative-decoding capture was added; null elsewhere.
+                        draftAcceptRate: cols.length > 33 && cols[33] !== '' ? parseFloat(cols[33]) : null,
+                        draftAccepted: cols.length > 34 && cols[34] !== '' ? parseInt(cols[34], 10) : null,
+                        draftGenerated: cols.length > 35 && cols[35] !== '' ? parseInt(cols[35], 10) : null,
+                        draftMeanLen: cols.length > 36 && cols[36] !== '' ? parseFloat(cols[36]) : null,
                     });
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1371,7 +1452,10 @@ async function initServer() {
     // updating, tear it down manually: `docker compose -f
     // docker-compose.master.yml down`.
 
-    pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname });
+    // stdio must be 'ignore': the default pipes are never read here, so once
+    // monitor.py printed 64KB (e.g. a stream of warnings) it would block on
+    // write and its /stats endpoint would silently stall.
+    pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname, stdio: 'ignore' });
 
     const shutdownHandler = async () => {
         // Directly-spawned process -- must be killed explicitly or it's
