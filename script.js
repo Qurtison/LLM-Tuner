@@ -4040,6 +4040,34 @@ async function startBenchRun(body, { clearOutput = true } = {}) {
     }
 }
 
+document.getElementById('tab-bench').addEventListener('click', async () => {
+    isMonitorModeActive = false;
+    isHistoryModeActive = false;
+    stopSessionOmniRefresh();
+    setTabButtonActive('tab-bench', true);
+    setTabButtonActive('tab-interactive', false);
+    setTabButtonActive('tab-monitor', false);
+    setTabButtonActive('tab-history', false);
+    document.getElementById('bench-view').classList.remove('hidden');
+    document.getElementById('bench-view').classList.add('flex');
+    document.getElementById('monitor-view').classList.add('hidden');
+    document.getElementById('monitor-view').classList.remove('flex');
+    document.getElementById('history-view').classList.add('hidden');
+    document.getElementById('history-view').classList.remove('flex');
+    document.getElementById('chat-container').classList.add('hidden');
+    document.getElementById('chat-input-bar').classList.add('hidden');
+    await initBenchTab();
+    // Restore output/state from the server so a refresh or late tab-open
+    // doesn't lose a run that's already in progress or just finished.
+    try {
+        const status = await (await fetch('/api/bench/status')).json();
+        const pre = document.getElementById('bench-output');
+        pre.textContent = (status.output || []).join('\n');
+        pre.scrollTop = pre.scrollHeight;
+        setBenchRunningUI(!!status.running);
+    } catch (e) { /* leave as-is */ }
+});
+
 document.getElementById('bench-run').addEventListener('click', () => {
     benchAutoQueue = []; benchAutoTotal = 0;
     startBenchRun({
