@@ -1034,7 +1034,10 @@ const server = http.createServer(async (req, res) => {
         // --- UI ---
         if (req.url === '/' || req.url === '/index.html') {
             const content = await fs.readFile(path.join(__dirname, 'index.html'), 'utf-8');
-            res.writeHead(200, { 'Content-Type': 'text/html' });
+            // no-store: index.html and script.js evolve together; a cached copy
+            // of one against a fresh copy of the other produces bizarre
+            // rendering bugs (e.g. new renderer writing into an old <pre>).
+            res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
             return res.end(content);
         }
 
@@ -1105,7 +1108,11 @@ const server = http.createServer(async (req, res) => {
             };
             try {
                 const content = await fs.readFile(filePath);
-                res.writeHead(200, { 'Content-Type': types[path.extname(filePath)] || 'application/octet-stream' });
+                const headers = { 'Content-Type': types[path.extname(filePath)] || 'application/octet-stream' };
+                // vendor/ assets are stable; the app's own js/css must never be
+                // cached against a mismatched index.html (see the html handler).
+                if (!req.url.startsWith('/vendor/')) headers['Cache-Control'] = 'no-store';
+                res.writeHead(200, headers);
                 return res.end(content);
             } catch (err) {
                 res.writeHead(404);
