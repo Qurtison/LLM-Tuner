@@ -1393,6 +1393,8 @@ function handlePrefillProgress(progress, tps, nTokens) {
         livePrefillTps = tps;
     }
     updateLiveRequestCard('prefill', { progress, tps, nTokens });
+    const abLive = document.getElementById('ab-live');
+    if (abLive) abLive.textContent = `prefill ${(progress * 100).toFixed(1)}% — ${isNaN(nTokens) ? '?' : nTokens.toLocaleString()} tok @ ${isNaN(tps) ? '?' : tps.toFixed(1)} t/s`;
     const pct = isNaN(progress) ? 0 : (progress * 100).toFixed(1);
     // status-indicator's ticking text is owned solely by submitPrompt's own
     // tpsLoop (1s interval) -- it used to also get overwritten from here,
@@ -1443,6 +1445,8 @@ function handleGenProgress(tps, nDecoded) {
     // status-indicator is owned by submitPrompt's tpsLoop -- see the matching
     // note in handlePrefillProgress above.
     updateLiveRequestCard('gen', { tps, nDecoded });
+    const abLiveG = document.getElementById('ab-live');
+    if (abLiveG) abLiveG.textContent = `generating ${isNaN(nDecoded) ? '?' : nDecoded.toLocaleString()} tok @ ${isNaN(tps) ? '?' : tps.toFixed(1)} t/s`;
 
     // Live gen speed in the sidebar card
     if (!isNaN(tps)) {
@@ -3768,6 +3772,8 @@ function stopSessionOmniRefresh() {
 // switch to it, so it doesn't need live event-driven upkeep.
 function handleMonitorCompletion(payload) {
     if (abCaptureResolve) { const r = abCaptureResolve; abCaptureResolve = null; r(payload); }
+    const abLiveC = document.getElementById('ab-live');
+    if (abLiveC && abLiveC.textContent) abLiveC.textContent = `last: ${payload.genTokens ?? '?'} tok gen @ ${payload.genTps != null ? Number(payload.genTps).toFixed(1) : '?'} t/s${payload.draftAcceptRate != null ? `, draft acc ${(payload.draftAcceptRate * 100).toFixed(0)}%` : ''}`;
     updateLiveRequestCard('idle', {});
     monitorDataPoints.push({ time: payload.timestamp || Date.now(), promptTps: payload.promptTps, genTps: payload.genTps });
     if (monitorDataPoints.length > SESSION_HISTORY_CAP) monitorDataPoints.shift();
@@ -3889,6 +3895,7 @@ document.getElementById('tab-interactive').addEventListener('click', () => {
     setTabButtonActive('tab-history', false);
     setTabButtonActive('tab-bench', false);
     document.getElementById('bench-view').classList.add('hidden');
+    if (typeof benchOmniPollTimer !== 'undefined' && benchOmniPollTimer) { clearInterval(benchOmniPollTimer); benchOmniPollTimer = null; }
     document.getElementById('monitor-view').classList.add('hidden');
     document.getElementById('monitor-view').classList.remove('flex');
     document.getElementById('history-view').classList.add('hidden');
@@ -3904,6 +3911,7 @@ document.getElementById('tab-monitor').addEventListener('click', () => {
     setTabButtonActive('tab-history', false);
     setTabButtonActive('tab-bench', false);
     document.getElementById('bench-view').classList.add('hidden');
+    if (typeof benchOmniPollTimer !== 'undefined' && benchOmniPollTimer) { clearInterval(benchOmniPollTimer); benchOmniPollTimer = null; }
     document.getElementById('monitor-view').classList.remove('hidden');
     document.getElementById('monitor-view').classList.add('flex');
     document.getElementById('history-view').classList.add('hidden');
@@ -3926,6 +3934,7 @@ document.getElementById('tab-history').addEventListener('click', () => {
     setTabButtonActive('tab-monitor', false);
     setTabButtonActive('tab-bench', false);
     document.getElementById('bench-view').classList.add('hidden');
+    if (typeof benchOmniPollTimer !== 'undefined' && benchOmniPollTimer) { clearInterval(benchOmniPollTimer); benchOmniPollTimer = null; }
     document.getElementById('history-view').classList.remove('hidden');
     document.getElementById('history-view').classList.add('flex');
     document.getElementById('monitor-view').classList.add('hidden');
@@ -4116,7 +4125,9 @@ function stopBenchProgress() {
     if (benchTickTimer) clearInterval(benchTickTimer);
     benchTickTimer = null;
     benchRunStartedAt = 0;
-    stopBenchOmniPoll();
+    // one fetch for the finished run's full series; the 2s poll itself keeps
+    // running as long as the Bench tab is open (see tab handlers)
+    fetch('/api/bench/status').then(r => r.json()).then(st => { if (st.samples?.length) renderBenchOmni(st.samples); }).catch(() => {});
 }
 // (p-values + n-values) x depths = expected result rows for one run
 function expectedBenchRows(nPrompt, nGen, depths) {
@@ -4269,6 +4280,7 @@ document.getElementById('tab-bench').addEventListener('click', async () => {
     document.getElementById('chat-container').classList.add('hidden');
     document.getElementById('chat-input-bar').classList.add('hidden');
     await initBenchTab();
+    startBenchOmniPoll(); // live telemetry while the tab is open (bench runs AND launch sweeps)
     // Restore output/state from the server so a refresh or late tab-open
     // doesn't lose a run that's already in progress or just finished.
     try {
