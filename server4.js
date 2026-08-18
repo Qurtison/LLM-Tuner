@@ -1532,6 +1532,16 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true, output: benchOutput }));
         }
+        else if (req.url === '/api/bench/dequeue' && req.method === 'POST') {
+            // Remove a not-yet-started run from the server-side matrix queue.
+            let dq;
+            try { dq = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
+            const before = benchQueue.length;
+            benchQueue = benchQueue.filter(q => q.label !== dq.label);
+            if (benchQueue.length !== before) benchLog(`[matrix] dequeued: ${dq.label}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true, removed: before - benchQueue.length, queueRemaining: benchQueue.length }));
+        }
         else if (req.url === '/api/bench/stop' && req.method === 'POST') {
             benchQueue = []; benchQueueTotal = 0; // stop also cancels queued matrix runs
             if (benchProcess) benchProcess.kill('SIGTERM');

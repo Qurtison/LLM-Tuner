@@ -4179,6 +4179,8 @@ async function initBenchTab() {
 let benchIsRunning = false;
 function setBenchRunningUI(running) {
     benchIsRunning = running;
+    const rq = document.getElementById('bench-run-queued');
+    if (rq) { rq.disabled = running; rq.style.opacity = running ? '0.45' : ''; rq.style.cursor = running ? 'not-allowed' : ''; }
     document.getElementById('bench-run').classList.toggle('hidden', running);
     document.getElementById('bench-stop-btn').classList.toggle('hidden', !running);
     if (!running && benchAutoQueue.length === 0) document.getElementById('bench-status').textContent = '';
@@ -4390,6 +4392,22 @@ function renderBenchChunk(lines) {
     }
     return chunks.join('');
 }
+// Starred blocks: visual bookmarks on the collapsible rows, persisted by
+// block identity (title|timestamp). Toggled via delegation so re-renders
+// don't shed the handlers.
+let benchStars = {};
+try { benchStars = JSON.parse(localStorage.getItem('bench_stars') || '{}'); } catch (e) {}
+document.getElementById('bench-output').addEventListener('click', (e) => {
+    const btn = e.target.closest('.bench-star');
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation(); // don't toggle the <details> open/closed
+    const key = btn.dataset.starkey;
+    if (benchStars[key]) delete benchStars[key]; else benchStars[key] = 1;
+    try { localStorage.setItem('bench_stars', JSON.stringify(benchStars)); } catch (err) {}
+    renderBenchOutput();
+});
+
 function renderBenchOutput() {
     const el = document.getElementById('bench-output');
     if (!el) return;
@@ -4410,10 +4428,13 @@ function renderBenchOutput() {
         rawTitle = rawTitle.replace(/^sweep:/, 'llama-server:').replace(/^matrix run /, 'llama-bench ');
         const title = escapeHtml(rawTitle);
         const open = (isNewest && b.status === 'running') || blocks.length === 1 ? ' open' : '';
-        return `<details class="border border-gray-800 rounded-lg mb-2"${open}>
+        const starKey = `${rawTitle}|${b.time}`;
+        const starred = !!benchStars[starKey];
+        return `<details class="border ${starred ? 'border-yellow-700/60' : 'border-gray-800'} rounded-lg mb-2"${open}>
             <summary class="cursor-pointer select-none px-3 py-1.5 text-[11px] text-gray-300 flex gap-3 items-baseline">
                 <span class="text-indigo-300 font-semibold">${title}</span>
                 <span class="text-gray-600">${escapeHtml(b.time)}</span>${statusBadge}
+                <button type="button" class="bench-star ml-auto ${starred ? 'text-yellow-400' : 'text-gray-600 hover:text-yellow-400'}" data-starkey="${escapeHtml(starKey)}" title="Bookmark this block">${starred ? '★' : '☆'}</button>
             </summary>
             <div class="px-3 pb-2">${renderBenchChunk(b.lines)}</div>
         </details>`;
@@ -4556,9 +4577,12 @@ function renderBenchCustomRows() {
         </div>`;
     }).join('');
     el.querySelectorAll('[data-benchdel]').forEach(b => b.addEventListener('click', () => {
-        benchCustomRows.splice(parseInt(b.dataset.benchdel), 1);
+        const removed = benchCustomRows.splice(parseInt(b.dataset.benchdel), 1)[0];
         persistBenchCustomRows();
         renderBenchCustomRows();
+        // if a matrix is mid-flight, also pull it from the server queue so it
+        // won't run after the current test completes
+        if (removed) fetch('/api/bench/dequeue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: removed.label }) }).catch(() => {});
     }));
     const runQueuedBtn = document.getElementById('bench-run-queued');
     if (runQueuedBtn) {
