@@ -903,6 +903,12 @@ async function fetchCurrentTelemetry() {
             body.local_second_gpu = 'amd';
         } else if (currentLaunchConfig?.rpcTarget) {
             body.worker_ssh = currentLaunchConfig.rpcTarget;
+        } else if (!currentLaunchConfig) {
+            // No model launched (bench runs, sweeps between launches): there's
+            // no config to consult, but the second GPU still exists and its
+            // telemetry is exactly what bench charts are for. Without this,
+            // GPU B graphed as all-zeros during every bench run.
+            body.local_second_gpu = 'amd';
         }
         const res = await fetch('http://localhost:8081/stats', {
             method: 'POST',

@@ -1038,12 +1038,11 @@
             <h2 id="expand-modal-title" class="text-lg font-bold text-white">Expanded Chart</h2>
             <button onclick="closeExpandModal()" class="text-gray-400 hover:text-white">✕ Close</button>
         </div>
-        <!-- Height capped at 50% of width (aspect-ratio 2/1), not the full modal
-             height -- a full-viewport-tall chart is unreadable. max-height keeps
-             it from overflowing on a narrow/tall window where width/2 would still
-             be too much. -->
+        <!-- Height capped at a third of width (aspect-ratio 3/1) -- wide and
+             shallow reads better for time series. max-height keeps it from
+             overflowing on a narrow/tall window. -->
         <div class="flex-1 flex items-start justify-center overflow-auto">
-        <div class="bg-gray-900 border border-gray-700 rounded-xl relative w-full p-4" style="aspect-ratio: 2 / 1; max-height: 100%;">
+        <div class="bg-gray-900 border border-gray-700 rounded-xl relative w-full p-4" style="aspect-ratio: 3 / 1; max-height: 100%;">
             <canvas id="expandedChartCanvas"></canvas>
         </div>
         </div>

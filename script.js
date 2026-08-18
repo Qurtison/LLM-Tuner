@@ -3402,24 +3402,92 @@ const omniPointLabelsPlugin = {
     }
 };
 
+// HTML tooltip for the omni charts: stacks properly ABOVE the canvas-drawn
+// per-line labels (they used to fight, both unreadable), and waits 3s of
+// hover before showing the full table -- the instant per-line labels cover
+// the quick-glance case.
+let omniTooltipEl = null;
+function omniExternalTooltip(context) {
+    const { chart, tooltip } = context;
+    if (!omniTooltipEl) {
+        omniTooltipEl = document.createElement('div');
+        omniTooltipEl.style.cssText = 'position:fixed;pointer-events:none;z-index:9999;background:rgba(10,14,26,0.96);border:1px solid #374151;border-radius:8px;padding:8px 10px;font:11px ui-monospace,monospace;display:none;max-width:340px;';
+        document.body.appendChild(omniTooltipEl);
+    }
+    if (!chart.$omniHoverBound) {
+        chart.$omniHoverBound = true;
+        chart.canvas.addEventListener('mouseenter', () => {
+            chart.$omniHoverStart = Date.now();
+            chart.$omniHoverTimer = setTimeout(() => { try { chart.update('none'); } catch (e) {} }, 3100);
+        });
+        chart.canvas.addEventListener('mouseleave', () => {
+            clearTimeout(chart.$omniHoverTimer);
+            chart.$omniHoverStart = null;
+            omniTooltipEl.style.display = 'none';
+        });
+    }
+    if (!tooltip || tooltip.opacity === 0 || !chart.$omniHoverStart || Date.now() - chart.$omniHoverStart < 3000) {
+        omniTooltipEl.style.display = 'none';
+        return;
+    }
+    const title = (tooltip.title || []).join(' ');
+    const lines = (tooltip.dataPoints || []).map(dp =>
+        `<div style="color:${dp.dataset.borderColor}">${escapeHtml(dp.dataset.label)}: ${escapeHtml(String(dp.formattedValue))}</div>`).join('');
+    omniTooltipEl.innerHTML = `<div style="color:#9ca3af;margin-bottom:4px">${escapeHtml(title)}</div>${lines}`;
+    const rect = chart.canvas.getBoundingClientRect();
+    omniTooltipEl.style.display = 'block';
+    let x = rect.left + tooltip.caretX + 14, y = rect.top + tooltip.caretY;
+    const w = omniTooltipEl.offsetWidth, h = omniTooltipEl.offsetHeight;
+    if (x + w > window.innerWidth - 8) x = rect.left + tooltip.caretX - w - 14;
+    if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
+    omniTooltipEl.style.left = x + 'px';
+    omniTooltipEl.style.top = y + 'px';
+}
+
+// Legend hover solos that line: every other dataset hides, and only the
+// hovered line's y-axis stays, for the duration of the hover.
+function omniSoloDataset(chart, idx) {
+    if (!chart.$omniSolo) {
+        chart.$omniSolo = {
+            hidden: chart.data.datasets.map((d, i) => chart.getDatasetMeta(i).hidden),
+            axes: {},
+        };
+        for (const ax of ['y', 'y2', 'y3']) {
+            if (chart.options.scales[ax]) chart.$omniSolo.axes[ax] = chart.options.scales[ax].display;
+        }
+    }
+    const soloAxis = chart.data.datasets[idx].yAxisID || 'y';
+    chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = i !== idx; });
+    for (const ax of Object.keys(chart.$omniSolo.axes)) {
+        chart.options.scales[ax].display = (ax === soloAxis);
+    }
+    chart.update('none');
+}
+function omniUnsolo(chart) {
+    if (!chart.$omniSolo) return;
+    chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = chart.$omniSolo.hidden[i]; });
+    for (const ax of Object.keys(chart.$omniSolo.axes)) chart.options.scales[ax].display = chart.$omniSolo.axes[ax];
+    chart.$omniSolo = null;
+    chart.update('none');
+}
+
 function buildOmniOptions() {
     return {
         responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
         interaction: { intersect: false, mode: 'index' },
         plugins: {
-            legend: { display: true, labels: { color: '#9ca3af', font: { size: 9 }, boxWidth: 10, padding: 6 } },
+            legend: {
+                display: true, labels: { color: '#9ca3af', font: { size: 9 }, boxWidth: 10, padding: 6 },
+                onHover: (e, item, legend) => omniSoloDataset(legend.chart, item.datasetIndex),
+                onLeave: (e, item, legend) => omniUnsolo(legend.chart),
+            },
+            // Rendered as an HTML overlay (omniExternalTooltip) -- proper
+            // stacking above the canvas point labels, 3s hover delay.
             tooltip: {
-                titleFont: { size: 10 }, bodyFont: { size: 11 }, padding: 8,
-                usePointStyle: true, boxWidth: 8, boxHeight: 8,
-                // Color each tooltip line's TEXT to match its line, not just the
-                // small swatch -- the default white-on-dark text made every row
-                // look the same regardless of which line it belonged to.
+                enabled: false,
+                external: omniExternalTooltip,
                 callbacks: {
-                    // Linear x-axis title defaults to the raw epoch-ms number --
-                    // format it back into a real time like the axis ticks.
                     title: (items) => items.length ? formatOmniTimeLabel(items[0].parsed.x) : '',
-                    labelTextColor: (item) => item.dataset.borderColor,
-                    label: (item) => item.formattedValue == null ? null : `${item.dataset.label}: ${item.formattedValue}`
                 }
             }
         },
@@ -4079,7 +4147,15 @@ function renderBenchOmni(samples) {
             options: opts,
             plugins: [omniPointLabelsPlugin]
         });
+        canvas.style.cursor = 'pointer';
+        canvas.title = 'Click to expand';
+        canvas.addEventListener('click', () => {
+            if (benchOmniChartInst.$lastSamples?.length) {
+                renderOmniChartCore(benchOmniChartInst.$lastSamples, 'Bench Run Telemetry', 'rgba(74,222,128,1)');
+            }
+        });
     }
+    benchOmniChartInst.$lastSamples = samples || [];
     benchOmniChartInst.data.datasets = buildOmniDatasets(samples || [], 'rgba(74,222,128,1)');
     benchOmniChartInst.update('none');
 }
