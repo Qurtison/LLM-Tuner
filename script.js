@@ -4318,6 +4318,42 @@ document.getElementById('bench-auto-resume').addEventListener('click', () => {
     } catch (e) {}
 });
 
+// --- Custom matrix rows: snapshots of the manual bench form (Target+Params,
+// incl. extra args), run with their OWN settings instead of the recommended
+// defaults. Persisted alongside the auto-generated rows.
+let benchCustomRows = [];
+try { benchCustomRows = JSON.parse(localStorage.getItem('bench_custom_rows') || '[]'); } catch (e) {}
+function persistBenchCustomRows() {
+    try { localStorage.setItem('bench_custom_rows', JSON.stringify(benchCustomRows)); } catch (e) {}
+}
+document.getElementById('bench-add-row-btn').addEventListener('click', () => {
+    const body = {
+        build: document.getElementById('bench-build').value,
+        modelPath: document.getElementById('bench-model').value,
+        devices: getBenchDevices(),
+        splitMode: document.getElementById('bench-sm').value || null,
+        tensorSplit: document.getElementById('bench-ts').value.trim() || null,
+        fa: document.getElementById('bench-fa').checked,
+        cacheK: document.getElementById('bench-kv').value || null,
+        cacheV: document.getElementById('bench-kv').value || null,
+        nPrompt: document.getElementById('bench-p').value.trim() || null,
+        nGen: document.getElementById('bench-n').value.trim() || null,
+        depths: document.getElementById('bench-d').value.trim() || null,
+        reps: document.getElementById('bench-r').value.trim() || null,
+        extraArgs: document.getElementById('bench-extra').value.trim() || null,
+    };
+    const bits = [body.devices || 'all-devices'];
+    if (body.tensorSplit) bits.push(`ts=${body.tensorSplit}`);
+    if (body.splitMode) bits.push(`sm=${body.splitMode}`);
+    if (!body.fa) bits.push('fa=0');
+    if (body.cacheK) bits.push(`kv=${body.cacheK}`);
+    if (body.extraArgs) bits.push(body.extraArgs);
+    bits.push((body.modelPath || '').split('/').pop().replace(/\.gguf$/, ''));
+    benchCustomRows.push({ label: `custom: ${bits.join(' ')}`, body });
+    persistBenchCustomRows();
+    document.getElementById('bench-status').textContent = `matrix row added (${benchCustomRows.length} custom) -- open Auto Matrix to run`;
+});
+
 // --- Auto Matrix: generated checklist of build+device comparison runs ---
 document.getElementById('bench-auto-btn').addEventListener('click', async () => {
     const panel = document.getElementById('bench-auto-panel');
@@ -4362,13 +4398,25 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
             }
         }
     }
+    for (const c of benchCustomRows) {
+        rows.push({ custom: true, body: c.body, igpu: false, label: `<span class="text-amber-300">${escapeHtml(c.label)}</span>` });
+    }
     window.__benchAutoRows = rows;
     list.innerHTML = rows.map((r, i) => `
         <label class="flex items-center gap-2">
             <input type="checkbox" class="bench-auto-cb accent-indigo-500 rounded" data-i="${i}" ${r.igpu ? '' : 'checked'}>
-            <span>${r.label}</span>
+            <span class="flex-1">${r.label}</span>
             ${r.ts != null ? `<span class="text-gray-500">-ts</span> <input type="text" value="${r.ts}" data-ts="${i}" class="w-16 bg-gray-950 border border-gray-700 rounded px-1 text-[10px] font-mono">` : ''}
+            ${r.custom ? `<button type="button" data-customdel="${i}" class="text-gray-600 hover:text-red-400 px-1">✕</button>` : ''}
         </label>`).join('');
+    list.querySelectorAll('[data-customdel]').forEach(b => b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        const row = window.__benchAutoRows[parseInt(b.dataset.customdel)];
+        benchCustomRows = benchCustomRows.filter(c => c.body !== row.body);
+        persistBenchCustomRows();
+        document.getElementById('bench-auto-btn').click(); // re-render (toggles twice)
+        document.getElementById('bench-auto-btn').click();
+    }));
 });
 
 // The matrix queue survives page reloads: persisted to localStorage on every
@@ -4403,6 +4451,7 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
     if (checked.length === 0) { document.getElementById('bench-auto-status').textContent = 'nothing checked'; return; }
     benchAutoQueue = checked.map(i => {
         const r = rows[i];
+        if (r.custom) return { ...r.body }; // custom rows carry their own full settings
         const tsInput = document.querySelector(`input[data-ts="${i}"]`);
         return {
             build: r.build, modelPath, devices: r.devices,
@@ -4416,35 +4465,65 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
     runNextAutoBench();
 });
 
-// --- Sidebar Resizer ---
-const resizer = document.getElementById('sidebar-resizer');
+// --- Sidebar Resizers (right: telemetry, left: launch config) ---
 const sidebar = document.getElementById('telemetry-sidebar');
-let isResizing = false;
-
-resizer.addEventListener('mousedown', (e) => {
-    isResizing = true;
+const launchSidebar = document.getElementById('launch-sidebar');
+// Which sidebar a drag is resizing: null | 'left' | 'right'
+let resizingSide = null;
+document.getElementById('sidebar-resizer').addEventListener('mousedown', () => {
+    resizingSide = 'right';
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+});
+document.getElementById('left-resizer').addEventListener('mousedown', () => {
+    resizingSide = 'left';
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
 });
 window.addEventListener('mousemove', (e) => {
-    if (!isResizing) return;
-    const newWidth = document.body.clientWidth - e.clientX;
-    if (newWidth > 200 && newWidth < 1200) {
-        sidebar.style.width = newWidth + 'px';
+    if (!resizingSide) return;
+    if (resizingSide === 'right') {
+        const newWidth = document.body.clientWidth - e.clientX;
+        if (newWidth > 200 && newWidth < 1200) sidebar.style.width = newWidth + 'px';
+    } else {
+        if (e.clientX > 180 && e.clientX < 900) launchSidebar.style.width = e.clientX + 'px';
     }
 });
 window.addEventListener('mouseup', () => {
-    if(isResizing) {
-        isResizing = false;
+    if (resizingSide) {
+        resizingSide = null;
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
-        try { localStorage.setItem('cluster_sidebar_width', sidebar.style.width); } catch(e){}
+        try {
+            localStorage.setItem('cluster_sidebar_width', sidebar.style.width);
+            localStorage.setItem('launch_sidebar_width', launchSidebar.style.width);
+        } catch(e){}
     }
 });
+
+// Collapse/expand toggles -- display:none rather than class games, since both
+// asides carry responsive show/hide classes of their own.
+function setSidebarCollapsed(side, collapsed) {
+    const aside = side === 'left' ? launchSidebar : sidebar;
+    const res = document.getElementById(side === 'left' ? 'left-resizer' : 'sidebar-resizer');
+    aside.style.display = collapsed ? 'none' : '';
+    res.style.display = collapsed ? 'none' : '';
+    document.getElementById(side === 'left' ? 'toggle-left-sidebar' : 'toggle-right-sidebar')
+        .textContent = side === 'left' ? (collapsed ? '⟩⟩' : '⟨⟨') : (collapsed ? '⟨⟨' : '⟩⟩');
+    try { localStorage.setItem(`sidebar_collapsed_${side}`, collapsed ? '1' : ''); } catch(e){}
+}
+document.getElementById('toggle-left-sidebar').addEventListener('click', () =>
+    setSidebarCollapsed('left', launchSidebar.style.display !== 'none'));
+document.getElementById('toggle-right-sidebar').addEventListener('click', () =>
+    setSidebarCollapsed('right', sidebar.style.display !== 'none'));
 
 try {
     const savedWidth = localStorage.getItem('cluster_sidebar_width');
     if (savedWidth) sidebar.style.width = savedWidth;
+    const savedLeft = localStorage.getItem('launch_sidebar_width');
+    if (savedLeft) launchSidebar.style.width = savedLeft;
+    if (localStorage.getItem('sidebar_collapsed_left') === '1') setSidebarCollapsed('left', true);
+    if (localStorage.getItem('sidebar_collapsed_right') === '1') setSidebarCollapsed('right', true);
 } catch(e) {}
 
 
