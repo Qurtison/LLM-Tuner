@@ -1427,6 +1427,16 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true, command: benchLastCommand }));
         }
+        else if (req.url === '/api/bench/note' && req.method === 'POST') {
+            // Client-composed result blocks (e.g. Launch Sweep tables) appended
+            // into the same transcript/accordion/history file as bench runs.
+            let noteBody;
+            try { noteBody = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
+            const noteLines = Array.isArray(noteBody.lines) ? noteBody.lines.slice(0, 200) : [];
+            for (const l of noteLines) benchLog(String(l).slice(0, 2000));
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true }));
+        }
         else if (req.url === '/api/bench/clear' && req.method === 'POST') {
             benchOutput = [];
             res.writeHead(200, { 'Content-Type': 'application/json' });

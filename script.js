@@ -4139,7 +4139,7 @@ function renderBenchLogLine(line) {
     const esc = escapeHtml(line);
     if (line.startsWith('===== ')) return `<div class="text-indigo-300 font-semibold pt-2">${esc}</div>`;
     if (line.startsWith('$ ')) return `<div class="text-amber-400 whitespace-pre-wrap break-all">${esc}</div>`;
-    if (line.startsWith('[bench]') || line.startsWith('[matrix]')) return `<div class="text-orange-400">${esc}</div>`;
+    if (line.startsWith('[bench]') || line.startsWith('[matrix]') || line.startsWith('[sweep]')) return `<div class="text-orange-400">${esc}</div>`;
     if (!line.trim()) return '<div class="h-1"></div>';
     return `<div class="text-gray-500 whitespace-pre-wrap break-all">${esc}</div>`;
 }
@@ -4192,8 +4192,8 @@ function splitBenchBlocks(lines) {
             const devM = line.match(/-dev\s+(\S+)/);
             if (devM) cur.dev = devM[1];
         }
-        if (line.includes('[bench] exited with code 0')) cur.status = 'ok';
-        else if (line.includes('[bench] exited') || line.includes('[bench] error')) cur.status = 'fail';
+        if (line.includes('[bench] exited with code 0') || line.startsWith('[sweep] done')) cur.status = 'ok';
+        else if (line.includes('[bench] exited') || line.includes('[bench] error') || line.startsWith('[sweep] failed')) cur.status = 'fail';
         cur.lines.push(line);
     }
     return blocks;
@@ -4674,6 +4674,24 @@ document.getElementById('ab-run-btn').addEventListener('click', async () => {
             abStatus(`${row.label}: ${e.message}`);
         }
         abRenderRows(); abPersist();
+        // Preserve this config's results in the shared bench transcript
+        // (accordion + logs/bench-history.log) so sweeps survive like runs do.
+        try {
+            const noteLines = [
+                `===== sweep: ${row.label} =====`,
+                `--- ${new Date().toLocaleString()} ---`,
+            ];
+            if (row.status === 'done' && (row.results || []).length > 0) {
+                noteLines.push('| rep | prompt tok | prompt t/s | gen tok | gen t/s | draft acc | wall (s) |');
+                noteLines.push('| --- | --- | --- | --- | --- | --- | --- |');
+                row.results.forEach((r, ri) => noteLines.push(
+                    `| ${ri + 1} | ${r.promptTokens ?? ''} | ${r.promptTps != null ? Number(r.promptTps).toFixed(1) : ''} | ${r.genTokens ?? ''} | ${r.genTps != null ? Number(r.genTps).toFixed(1) : ''} | ${r.draftAcceptRate != null ? (r.draftAcceptRate * 100).toFixed(0) + '%' : ''} | ${r.wallTime != null ? Number(r.wallTime).toFixed(1) : ''} |`));
+                noteLines.push('[sweep] done');
+            } else {
+                noteLines.push(`[sweep] failed: ${row.error || 'no results captured'}`);
+            }
+            await fetch('/api/bench/note', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ lines: noteLines }) });
+        } catch (e) { /* transcript note is best-effort */ }
     }
     await fetch('/api/stop', { method: 'POST' }).catch(() => {});
     abRunning = false;
