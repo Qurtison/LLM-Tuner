@@ -99,7 +99,7 @@ function maybeStartNextQueued() {
     }
     const next = benchQueue.shift();
     const k = benchQueueTotal - benchQueue.length;
-    benchLog(`===== matrix run ${k}/${benchQueueTotal}: ${next.label || next.devices || 'run'} =====`);
+    benchLog(`===== llama-bench ${k}/${benchQueueTotal}: ${next.label || next.devices || 'run'} =====`);
     const err = launchBenchProcess(next);
     if (err) maybeStartNextQueued();
 }
@@ -1477,7 +1477,7 @@ const server = http.createServer(async (req, res) => {
                 benchQueue = cfg.queue.slice(1);
                 benchQueueTotal = cfg.queue.length;
                 const first = cfg.queue[0];
-                benchLog(`===== matrix run 1/${benchQueueTotal}: ${first.label || first.devices || 'run'} =====`);
+                benchLog(`===== llama-bench 1/${benchQueueTotal}: ${first.label || first.devices || 'run'} =====`);
                 const err = launchBenchProcess(first);
                 if (err) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: err })); }
                 res.writeHead(200, { 'Content-Type': 'application/json' });

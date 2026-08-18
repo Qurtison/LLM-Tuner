@@ -4185,8 +4185,8 @@ function appendBenchLine(line) {
         setBenchRunningUI(true);
         startBenchProgress(expectedBenchRows(pM?.[1], nM?.[1], dM?.[1]));
     }
-    if (line.startsWith('===== matrix run ')) {
-        const m = line.match(/matrix run (\d+)\/(\d+): (.*?) =====/);
+    if (line.startsWith('===== llama-bench ') || line.startsWith('===== matrix run ')) {
+        const m = line.match(/(?:llama-bench|matrix run) (\d+)\/(\d+): (.*?) =====/);
         if (m) document.getElementById('bench-auto-status').textContent = `matrix ${m[1]}/${m[2]}: ${m[3]}`;
     }
     scheduleBenchRender();
@@ -4377,7 +4377,10 @@ function renderBenchOutput() {
             : b.status === 'fail' ? '<span class="text-orange-400">failed</span>'
             : b.status === 'interrupted' ? '<span class="text-gray-500">interrupted</span>'
             : '<span class="text-amber-400">running…</span>';
-        const title = escapeHtml(b.title || (b.dev ? `run — ${b.dev}` : 'run'));
+        let rawTitle = b.title || (b.dev ? `llama-bench — ${b.dev}` : 'llama-bench');
+        // historical blocks used older wording -- map at display time
+        rawTitle = rawTitle.replace(/^sweep:/, 'llama-server:').replace(/^matrix run /, 'llama-bench ');
+        const title = escapeHtml(rawTitle);
         const open = (isNewest && b.status === 'running') || blocks.length === 1 ? ' open' : '';
         return `<details class="border border-gray-800 rounded-lg mb-2"${open}>
             <summary class="cursor-pointer select-none px-3 py-1.5 text-[11px] text-gray-300 flex gap-3 items-baseline">
@@ -4839,7 +4842,7 @@ document.getElementById('ab-run-btn').addEventListener('click', async () => {
         // (accordion + logs/bench-history.log) so sweeps survive like runs do.
         try {
             const noteLines = [
-                `===== sweep: ${row.label} =====`,
+                `===== llama-server: ${row.label} =====`,
                 `--- ${new Date().toLocaleString()} ---`,
             ];
             if (row.status === 'done' && (row.results || []).length > 0) {
