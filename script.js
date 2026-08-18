@@ -4317,7 +4317,13 @@ document.getElementById('bench-stop-btn').addEventListener('click', () => {
 });
 document.getElementById('bench-clear-btn').addEventListener('click', () => {
     fetch('/api/bench/clear', { method: 'POST' }).catch(() => {});
-    setBenchOutput([]); // full history stays in logs/bench-history.log
+    setBenchOutput([]); // view only -- the disk log keeps everything (Restore undoes this)
+});
+document.getElementById('bench-restore-btn').addEventListener('click', async () => {
+    try {
+        const data = await (await fetch('/api/bench/restore', { method: 'POST' })).json();
+        setBenchOutput(data.output || []);
+    } catch (e) {}
 });
 document.getElementById('bench-auto-resume').addEventListener('click', () => {
     try {

@@ -1442,6 +1442,15 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true }));
         }
+        else if (req.url === '/api/bench/restore' && req.method === 'POST') {
+            // Undo for clear: reload the transcript tail from the disk log.
+            try {
+                const hist = await fs.readFile(path.join(LOGS_DIR, 'bench-history.log'), 'utf-8');
+                benchOutput = hist.split('\n').filter(l => l !== '').slice(-1500);
+            } catch { benchOutput = []; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true, output: benchOutput }));
+        }
         else if (req.url === '/api/bench/stop' && req.method === 'POST') {
             if (benchProcess) benchProcess.kill('SIGTERM');
             res.writeHead(200, { 'Content-Type': 'application/json' });

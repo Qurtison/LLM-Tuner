@@ -682,7 +682,6 @@
                     <button id="bench-add-row-btn" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Snapshot the Target+Params fields above (including extra args) as a custom matrix row -- it runs with ITS OWN settings, not the recommended defaults.">+ Matrix row</button>
                     <button id="bench-auto-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Generates the recommended comparison matrix from your detected builds and devices: solo runs per GPU (backend vs backend) and cross-GPU pairs, all with the recommended settings. Check the runs you want, pick a model, run them back to back.">Auto Matrix</button>
                     <button id="bench-stop-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-red-400 rounded-md text-xs font-semibold transition-colors hidden">Stop</button>
-                    <button id="bench-clear-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs font-semibold transition-colors" title="Clears the on-screen results. The full transcript of every run is kept in logs/bench-history.log regardless.">Clear</button>
                 </div>
 
                 <div id="bench-custom-list" class="space-y-1"></div>
@@ -752,7 +751,13 @@
                 <div class="h-48"><canvas id="benchOmniChart"></canvas></div>
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1 min-h-[16rem]">
-                <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Output</h3>
+                <div class="flex justify-between items-center mb-2">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Output</h3>
+                    <div class="flex gap-2">
+                        <button id="bench-restore-btn" class="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded text-[10px] transition-colors" title="Reload the full transcript from logs/bench-history.log (undo for Clear view).">Restore from log</button>
+                        <button id="bench-clear-btn" class="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded text-[10px] transition-colors" title="Clears THIS view only. The permanent transcript in logs/bench-history.log is untouched -- Restore from log brings everything back.">Clear view</button>
+                    </div>
+                </div>
                 <div id="bench-output" class="text-[11px] font-mono text-gray-300 overflow-x-auto overflow-y-auto max-h-[32rem] space-y-0.5"></div>
             </div>
         </div>
