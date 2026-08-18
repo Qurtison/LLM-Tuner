@@ -511,8 +511,6 @@ eventSource.onmessage = (e) => {
         else if (data.log.startsWith('BENCH_DONE:')) {
             stopBenchProgress();
             setBenchRunningUI(false);
-            if (benchAutoQueue.length > 0) runNextAutoBench();
-            else if (benchAutoTotal > 0) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; }
         }
         else if (data.log.startsWith('BENCH:')) {
             appendBenchLine(data.log.slice('BENCH:'.length));
@@ -3363,8 +3361,8 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
-        { label: 'VRAM A (GB)', data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2', hidden: true },
-        { label: 'VRAM B (GB)', data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2', hidden: true },
+        { label: 'VRAM A (GB)', data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
+        { label: 'VRAM B (GB)', data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
         { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
     ];
 }
@@ -3465,6 +3463,18 @@ function omniSoloDataset(chart, idx) {
     }
     chart.update('none');
 }
+// Show only the axes that some visible dataset actually uses.
+function omniSyncAxes(chart) {
+    const used = new Set();
+    chart.data.datasets.forEach((d, i) => {
+        const meta = chart.getDatasetMeta(i);
+        const hidden = meta.hidden === null ? !!d.hidden : meta.hidden;
+        if (!hidden) used.add(d.yAxisID || 'y');
+    });
+    for (const ax of ['y', 'y2', 'y3']) {
+        if (chart.options.scales[ax]) chart.options.scales[ax].display = used.has(ax);
+    }
+}
 function omniUnsolo(chart) {
     if (!chart.$omniSolo) return;
     chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = chart.$omniSolo.hidden[i]; });
@@ -3482,6 +3492,27 @@ function buildOmniOptions() {
                 display: true, labels: { color: '#9ca3af', font: { size: 9 }, boxWidth: 10, padding: 6 },
                 onHover: (e, item, legend) => omniSoloDataset(legend.chart, item.datasetIndex),
                 onLeave: (e, item, legend) => omniUnsolo(legend.chart),
+                // single click: toggle a line (axes follow what's visible).
+                // double click: LOCK the solo -- exactly the hover view, kept,
+                // so further single clicks add lines back in from there.
+                onClick: (e, item, legend) => {
+                    const chart = legend.chart;
+                    const now = Date.now();
+                    const isDouble = chart.$lastLegendClick
+                        && chart.$lastLegendClick.i === item.datasetIndex
+                        && now - chart.$lastLegendClick.t < 350;
+                    chart.$lastLegendClick = { i: item.datasetIndex, t: now };
+                    chart.$omniSolo = null; // clicks define a NEW baseline; hover restore must not undo them
+                    if (isDouble) {
+                        chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = i !== item.datasetIndex; });
+                    } else {
+                        const meta = chart.getDatasetMeta(item.datasetIndex);
+                        const currentlyHidden = meta.hidden === null ? !!chart.data.datasets[item.datasetIndex].hidden : meta.hidden;
+                        meta.hidden = !currentlyHidden;
+                    }
+                    omniSyncAxes(chart);
+                    chart.update('none');
+                },
             },
             // Rendered as an HTML overlay (omniExternalTooltip) -- proper
             // stacking above the canvas point labels, 3s hover delay.
@@ -4127,6 +4158,17 @@ function appendBenchLine(line) {
     benchOutputLines.push(line);
     if (benchOutputLines.length > 4000) benchOutputLines = benchOutputLines.slice(-3000);
     if (/\u00b1|±/.test(line) && /^\s*\|/.test(line)) { benchRunRowsDone++; updateBenchProgressText(); }
+    if (line.startsWith('$ ')) {
+        // A run started (possibly server-chained from the matrix queue) --
+        // derive expected result rows from the command itself.
+        const pM = line.match(/ -p (\S+)/), nM = line.match(/ -n (\S+)/), dM = line.match(/ -d (\S+)/);
+        setBenchRunningUI(true);
+        startBenchProgress(expectedBenchRows(pM?.[1], nM?.[1], dM?.[1]));
+    }
+    if (line.startsWith('===== matrix run ')) {
+        const m = line.match(/matrix run (\d+)\/(\d+): (.*?) =====/);
+        if (m) document.getElementById('bench-auto-status').textContent = `matrix ${m[1]}/${m[2]}: ${m[3]}`;
+    }
     scheduleBenchRender();
 }
 function setBenchOutput(lines) {
@@ -4169,7 +4211,9 @@ function startBenchOmniPoll() {
     benchOmniPollTimer = setInterval(async () => {
         try {
             const data = await (await fetch('/api/logs/active-samples')).json();
-            renderBenchOmni(data.samples || []);
+            // keep showing the last finished run's series between runs instead
+            // of blanking the chart with an empty active buffer
+            if (data.samples?.length) renderBenchOmni(data.samples);
         } catch (e) {}
     }, 2000);
 }
@@ -4187,7 +4231,6 @@ function benchElapsedText() {
 }
 function updateBenchProgressText() {
     const parts = [];
-    if (benchAutoTotal > 0) parts.push(`matrix ${benchAutoTotal - benchAutoQueue.length}/${benchAutoTotal}`);
     if (benchRunRowsExpected > 0) parts.push(`results ${benchRunRowsDone}/${benchRunRowsExpected}`);
     parts.push(benchElapsedText());
     document.getElementById('bench-status').textContent = 'running · ' + parts.filter(Boolean).join(' · ');
@@ -4340,7 +4383,6 @@ async function startBenchRun(body) {
             return false;
         }
         setBenchRunningUI(true);
-        startBenchProgress(expectedBenchRows(body.nPrompt, body.nGen, body.depths));
         return true;
     } catch (e) {
         document.getElementById('bench-status').textContent = 'failed to start: ' + e.message;
@@ -4372,8 +4414,12 @@ document.getElementById('tab-bench').addEventListener('click', async () => {
         const status = await (await fetch('/api/bench/status')).json();
         setBenchOutput(status.output || []);
         setBenchRunningUI(!!status.running);
-        renderBenchOmni(status.samples || []);
+        if (status.samples?.length) renderBenchOmni(status.samples);
         if (status.running) startBenchOmniPoll();
+        if (status.queueTotal > 0) {
+            document.getElementById('bench-auto-status').textContent =
+                `matrix in progress -- ${status.queueRemaining} of ${status.queueTotal} runs still queued (server-side)`;
+        }
     } catch (e) { /* leave as-is */ }
 });
 
@@ -4396,8 +4442,7 @@ document.getElementById('bench-run').addEventListener('click', () => {
     });
 });
 document.getElementById('bench-stop-btn').addEventListener('click', () => {
-    benchAutoQueue = []; benchAutoTotal = 0; // stopping also cancels the rest of a matrix
-    persistAutoQueue();
+    // server cancels its queue too; nothing client-side to clean up anymore
     fetch('/api/bench/stop', { method: 'POST' }).catch(() => {});
 });
 document.getElementById('bench-clear-btn').addEventListener('click', () => {
@@ -4414,10 +4459,9 @@ document.getElementById('bench-auto-resume').addEventListener('click', () => {
     try {
         const saved = JSON.parse(localStorage.getItem('bench_auto_queue') || 'null');
         if (!saved || !saved.queue?.length) return;
-        benchAutoQueue = saved.queue;
-        benchAutoTotal = saved.total || saved.queue.length;
+        localStorage.removeItem('bench_auto_queue');
         document.getElementById('bench-auto-resume').classList.add('hidden');
-        runNextAutoBench();
+        submitMatrixQueue(saved.queue); // hand a pre-server-queue-era leftover to the server runner
     } catch (e) {}
 });
 
@@ -4544,26 +4588,14 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
 // The matrix queue survives page reloads: persisted to localStorage on every
 // change, offered back as a Resume button if the page comes up with runs
 // still pending (the in-flight run itself lives server-side and keeps going).
-function persistAutoQueue() {
-    try {
-        if (benchAutoQueue.length > 0) localStorage.setItem('bench_auto_queue', JSON.stringify({ queue: benchAutoQueue, total: benchAutoTotal }));
-        else localStorage.removeItem('bench_auto_queue');
-    } catch (e) {}
-}
-function runNextAutoBench() {
-    const next = benchAutoQueue.shift();
-    persistAutoQueue();
-    if (!next) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; return; }
-    const k = benchAutoTotal - benchAutoQueue.length;
-    document.getElementById('bench-auto-status').textContent = `run ${k}/${benchAutoTotal}: ${next.devices || 'all devices'}`;
-    document.getElementById('bench-status').textContent = `matrix ${k}/${benchAutoTotal}`;
-    appendBenchLine(`\n===== matrix run ${k}/${benchAutoTotal}: ${next.devices} [build ${next.build}] =====`);
-    startBenchRun(next).then(ok => {
-        if (!ok) {
-            appendBenchLine('[matrix] run failed to start -- aborting remaining runs');
-            benchAutoQueue = []; benchAutoTotal = 0;
-        }
-    });
+
+// The matrix queue now lives SERVER-side (survives tab closes/refreshes);
+// the client just submits the whole list in one request.
+async function submitMatrixQueue(queue) {
+    const ok = await startBenchRun({ queue });
+    document.getElementById('bench-auto-status').textContent = ok
+        ? `matrix submitted -- ${queue.length} runs (server-side; safe to close the tab)`
+        : 'failed to submit matrix';
 }
 document.getElementById('bench-auto-run').addEventListener('click', () => {
     const modelPath = document.getElementById('bench-auto-model').value;
@@ -4573,18 +4605,18 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
     if (checked.length === 0) { document.getElementById('bench-auto-status').textContent = 'nothing checked'; return; }
     benchAutoQueue = checked.map(i => {
         const r = rows[i];
-        if (r.custom) return { ...r.body }; // custom rows carry their own full settings
+        if (r.custom) return { ...r.body, label: r.label.replace(/<[^>]*>/g, '') }; // custom rows carry their own full settings
         const tsInput = document.querySelector(`input[data-ts="${i}"]`);
         return {
             build: r.build, modelPath, devices: r.devices,
+            label: `${r.devices || 'all'} [${r.build}]`,
             tensorSplit: tsInput ? (tsInput.value.trim() || null) : null,
             splitMode: null, fa: true, cacheK: 'q8_0', cacheV: 'q8_0',
             nPrompt: '8192', nGen: '128', depths: '0,32768,98304', reps: null, extraArgs: null,
         };
     });
-    benchAutoTotal = benchAutoQueue.length;
-    persistAutoQueue();
-    runNextAutoBench();
+    submitMatrixQueue(benchAutoQueue.map(q => ({ ...q })));
+    benchAutoQueue = []; benchAutoTotal = 0;
 });
 
 // --- Sidebar Resizers (right: telemetry, left: launch config) ---

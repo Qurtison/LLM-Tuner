@@ -35,6 +35,72 @@ let currentLaunchConfig = null;
 let liveProgress = {};
 
 // --- BENCH STATE (llama-bench runner, Bench tab) ---
+let benchQueue = [];        // server-side matrix queue (survives page closes)
+let benchQueueTotal = 0;
+function launchBenchProcess(cfg) {
+    const benchBin = getLlamaServerBinary(cfg.build).replace(/llama-server$/, 'llama-bench');
+    const args = ['-m', cfg.modelPath];
+    if (cfg.fa != null) args.push('-fa', cfg.fa ? '1' : '0');
+    if (cfg.cacheK) args.push('-ctk', cfg.cacheK);
+    if (cfg.cacheV) args.push('-ctv', cfg.cacheV);
+    if (cfg.nPrompt != null && cfg.nPrompt !== '') args.push('-p', String(cfg.nPrompt));
+    if (cfg.nGen != null && cfg.nGen !== '') args.push('-n', String(cfg.nGen));
+    if (cfg.depths) args.push('-d', String(cfg.depths));
+    if (cfg.reps != null && cfg.reps !== '') args.push('-r', String(cfg.reps));
+    if (cfg.devices) args.push('-dev', String(cfg.devices));
+    if (cfg.splitMode) args.push('-sm', String(cfg.splitMode));
+    if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
+    if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
+
+    benchRunning = true;
+    benchLastCommand = `${benchBin} ${args.join(' ')}`;
+    benchLog(`--- ${new Date().toLocaleString()} ---`);
+    benchLog(`$ ${benchLastCommand}`);
+    try {
+        benchProcess = spawn(benchBin, args);
+    } catch (err) {
+        benchRunning = false;
+        benchLog(`[bench] failed to spawn: ${err.message}`);
+        return err.message;
+    }
+    let benchLineBuf = '';
+    const onBenchData = (d) => {
+        benchLineBuf += d.toString();
+        const lines = benchLineBuf.split(/\r\n|\r|\n/);
+        benchLineBuf = lines.pop();
+        for (const line of lines) benchLog(line);
+    };
+    benchProcess.stdout.on('data', onBenchData);
+    benchProcess.stderr.on('data', onBenchData);
+    const finishRun = (logLine, doneTag) => {
+        benchRunning = false;
+        benchProcess = null;
+        benchLastSamples = takeRequestSamples();
+        benchLog(logLine);
+        broadcastState(doneTag);
+        maybeStartNextQueued();
+    };
+    benchProcess.on('error', (err) => finishRun(`[bench] error: ${err.message}`, 'BENCH_DONE:error'));
+    benchProcess.on('exit', (code, signal) => {
+        if (benchLineBuf) benchLog(benchLineBuf);
+        finishRun(`[bench] exited with ${signal ? `signal ${signal}` : `code ${code}`}`, `BENCH_DONE:${code ?? 'signal'}`);
+    });
+    return null;
+}
+function maybeStartNextQueued() {
+    if (benchQueue.length === 0) { benchQueueTotal = 0; return; }
+    if (llamaProcess) {
+        benchLog('[matrix] a model was launched mid-matrix -- aborting remaining runs');
+        benchQueue = []; benchQueueTotal = 0;
+        return;
+    }
+    const next = benchQueue.shift();
+    const k = benchQueueTotal - benchQueue.length;
+    benchLog(`===== matrix run ${k}/${benchQueueTotal}: ${next.label || next.devices || 'run'} =====`);
+    const err = launchBenchProcess(next);
+    if (err) maybeStartNextQueued();
+}
+
 let benchProcess = null;
 // Cumulative across runs (capped) -- the client renders this verbatim, so
 // switching tabs / refreshing restores the WHOLE session's results, not just
@@ -1373,6 +1439,9 @@ const server = http.createServer(async (req, res) => {
         }
 
         // --- BENCH: run llama-bench from a configured build (Bench tab) ---
+        // Accepts a single config, or { queue: [cfg, ...] } -- the queue lives
+        // SERVER-side and chains run-to-run on process exit, so closing the
+        // browser tab no longer kills a matrix mid-flight.
         else if (req.url === '/api/bench/start' && req.method === 'POST') {
             let cfg;
             try { cfg = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
@@ -1386,63 +1455,27 @@ const server = http.createServer(async (req, res) => {
                 res.writeHead(409, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ error: 'Stop the running model first -- llama-bench needs its VRAM for clean numbers' }));
             }
+            if (Array.isArray(cfg.queue)) {
+                if (cfg.queue.length === 0 || cfg.queue.some(c => !c.modelPath)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    return res.end(JSON.stringify({ error: 'queue must be non-empty configs with modelPath' }));
+                }
+                benchQueue = cfg.queue.slice(1);
+                benchQueueTotal = cfg.queue.length;
+                const first = cfg.queue[0];
+                benchLog(`===== matrix run 1/${benchQueueTotal}: ${first.label || first.devices || 'run'} =====`);
+                const err = launchBenchProcess(first);
+                if (err) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: err })); }
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ ok: true, queued: benchQueue.length, command: benchLastCommand }));
+            }
             if (!cfg.modelPath) {
                 res.writeHead(400, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ error: 'modelPath is required' }));
             }
-            const benchBin = getLlamaServerBinary(cfg.build).replace(/llama-server$/, 'llama-bench');
-            const args = ['-m', cfg.modelPath];
-            if (cfg.fa != null) args.push('-fa', cfg.fa ? '1' : '0');
-            if (cfg.cacheK) args.push('-ctk', cfg.cacheK);
-            if (cfg.cacheV) args.push('-ctv', cfg.cacheV);
-            if (cfg.nPrompt != null && cfg.nPrompt !== '') args.push('-p', String(cfg.nPrompt));
-            if (cfg.nGen != null && cfg.nGen !== '') args.push('-n', String(cfg.nGen));
-            if (cfg.depths) args.push('-d', String(cfg.depths));
-            if (cfg.reps != null && cfg.reps !== '') args.push('-r', String(cfg.reps));
-            if (cfg.devices) args.push('-dev', String(cfg.devices));
-            if (cfg.splitMode) args.push('-sm', String(cfg.splitMode));
-            if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
-            if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
-
-            benchRunning = true;
-            benchLastCommand = `${benchBin} ${args.join(' ')}`;
-            benchLog(`--- ${new Date().toLocaleString()} ---`);
-            benchLog(`$ ${benchLastCommand}`);
-            try {
-                benchProcess = spawn(benchBin, args);
-            } catch (err) {
-                benchRunning = false;
-                benchLog(`[bench] failed to spawn: ${err.message}`);
-                res.writeHead(500, { 'Content-Type': 'application/json' });
-                return res.end(JSON.stringify({ error: err.message }));
-            }
-            let benchLineBuf = '';
-            const onBenchData = (d) => {
-                benchLineBuf += d.toString();
-                const lines = benchLineBuf.split(/\r\n|\r|\n/);
-                benchLineBuf = lines.pop();
-                for (const line of lines) benchLog(line);
-            };
-            benchProcess.stdout.on('data', onBenchData);
-            benchProcess.stderr.on('data', onBenchData);
-            const stopBenchSampling = () => {
-                benchLastSamples = takeRequestSamples();
-            };
-            benchProcess.on('error', (err) => {
-                benchRunning = false;
-                benchProcess = null;
-                stopBenchSampling();
-                benchLog(`[bench] error: ${err.message}`);
-                broadcastState('BENCH_DONE:error');
-            });
-            benchProcess.on('exit', (code, signal) => {
-                if (benchLineBuf) benchLog(benchLineBuf);
-                benchRunning = false;
-                benchProcess = null;
-                stopBenchSampling();
-                benchLog(`[bench] exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
-                broadcastState(`BENCH_DONE:${code ?? 'signal'}`);
-            });
+            benchQueue = []; benchQueueTotal = 0;
+            const err = launchBenchProcess(cfg);
+            if (err) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: err })); }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true, command: benchLastCommand }));
         }
@@ -1483,6 +1516,7 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify({ ok: true, output: benchOutput }));
         }
         else if (req.url === '/api/bench/stop' && req.method === 'POST') {
+            benchQueue = []; benchQueueTotal = 0; // stop also cancels queued matrix runs
             if (benchProcess) benchProcess.kill('SIGTERM');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true }));
@@ -1490,6 +1524,7 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/bench/status' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ running: benchRunning, command: benchLastCommand, output: benchOutput,
+                queueRemaining: benchQueue.length, queueTotal: benchQueueTotal,
                 samples: benchRunning ? activeRequestSamples : benchLastSamples }));
         }
 
