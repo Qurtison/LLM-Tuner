@@ -33,6 +33,9 @@ let currentLaunchConfig = null;
 // per-request/monitor charts get REAL per-tick rates and prefill progress,
 // not just a flat completion-time average painted across the whole phase.
 let liveProgress = {};
+// net-throughput delta state for server-recorded samples
+let lastSampleNetBytes = null;
+let lastSampleNetTime = null;
 
 // --- BENCH STATE (llama-bench runner, Bench tab) ---
 let benchQueue = [];        // server-side matrix queue (survives page closes)
@@ -899,8 +902,19 @@ async function takeOneTelemetrySample(statsArg) {
                 broadcastState(`CTX_LIVE:${slot.n_prompt_tokens ?? 0}:${slot.n_ctx}:${slot.is_processing ? 1 : 0}`);
             }
         } catch { /* endpoint disabled/unreachable -- context card just stays client-driven */ }
+        // Net MB/s from the byte-counter delta -- used to be a client-only
+        // computation, leaving the omni Net line permanently empty for
+        // server-recorded samples.
+        let netMbps = null;
+        const nb = stats.master?.net_bytes;
+        if (typeof nb === 'number' && lastSampleNetBytes != null && nb >= lastSampleNetBytes && lastSampleNetTime) {
+            const dt = (Date.now() - lastSampleNetTime) / 1000;
+            if (dt > 0.05) netMbps = +(((nb - lastSampleNetBytes) / 1048576) / dt).toFixed(2);
+        }
+        if (typeof nb === 'number') { lastSampleNetBytes = nb; lastSampleNetTime = Date.now(); }
         activeRequestSamples.push({
             t: Date.now(),
+            netMbps,
             masterPwr: stats.master?.gpu_pwr ?? 0, masterTemp: stats.master?.gpu_temp ?? 0,
             masterGpuUtil: stats.master?.gpu_util ?? 0, masterCpuUtil: stats.master?.cpu_util ?? 0,
             workerPwr: stats.worker?.gpu_pwr ?? 0, workerTemp: stats.worker?.gpu_temp ?? 0,

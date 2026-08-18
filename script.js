@@ -2755,9 +2755,19 @@ async function pollTelemetry() {
     }
 }
 
+let currentTelemetryRateMs = 1000;
 function setTelemetryInterval(ms) {
+    currentTelemetryRateMs = ms;
     if (telemetryInterval) clearInterval(telemetryInterval);
     telemetryInterval = setInterval(pollTelemetry, ms);
+    // chart refresh cadence follows the recording rate, so Fast mode's extra
+    // samples show up as they land instead of arriving in 2s batches.
+    // try/catch: the initial call runs at script-load time, before the chart
+    // timer `let`s below are initialized (TDZ) -- nothing to restart then.
+    try {
+        if (sessionOmniRefreshTimer) { stopSessionOmniRefresh(); startSessionOmniRefresh(); }
+        if (benchOmniPollTimer) { clearInterval(benchOmniPollTimer); benchOmniPollTimer = null; startBenchOmniPoll(); }
+    } catch (e) { /* load-time call: timers not declared yet */ }
 }
 setTelemetryInterval(1000);
 
@@ -3463,6 +3473,16 @@ function omniSoloDataset(chart, idx) {
     }
     chart.update('none');
 }
+// Replace a chart's datasets WITHOUT losing per-dataset visibility state:
+// assigning a fresh array resets Chart.js's metas, which was wiping hover
+// solos and single-click toggles on every 2s data tick.
+function setOmniDatasets(chart, datasets) {
+    const hidden = chart.data.datasets.map((d, i) => chart.getDatasetMeta(i).hidden);
+    chart.data.datasets = datasets;
+    hidden.forEach((h, i) => { if (h !== null && h !== undefined && i < datasets.length) chart.getDatasetMeta(i).hidden = h; });
+    chart.update('none');
+}
+
 // Show only the axes that some visible dataset actually uses.
 function omniSyncAxes(chart) {
     const used = new Set();
@@ -3645,7 +3665,7 @@ function refreshExpandedHwChartLive() {
     const metrics = currentExpandedHwMetricsRef;
     const phaseColors = { prefill: '#eab308', think: '#3b82f6', answer: '#22c55e' };
     const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
-    expandedChartInst.data.datasets = buildOmniDatasets(metrics, tpsLineColor);
+    setOmniDatasets(expandedChartInst, buildOmniDatasets(metrics, tpsLineColor));
     expandedChartInst.update('none');
 }
 
@@ -3820,8 +3840,9 @@ async function renderSessionOmniPreview() {
     if (lastPolledTelemetry && lastPolledTelemetry.t > cutoff) {
         const lastIdle = sessionIdleSamples[sessionIdleSamples.length - 1];
         const lastReal = slice[slice.length - 1];
-        const haveRecentPoint = (lastIdle && lastIdle.t > lastPolledTelemetry.t - 2500)
-            || (lastReal && lastReal.t > lastPolledTelemetry.t - 2500);
+        const idleGapMs = Math.max(600, currentTelemetryRateMs * 1.25);
+        const haveRecentPoint = (lastIdle && lastIdle.t > lastPolledTelemetry.t - idleGapMs)
+            || (lastReal && lastReal.t > lastPolledTelemetry.t - idleGapMs);
         if (!haveRecentPoint) {
             const s = lastPolledTelemetry.stats;
             sessionIdleSamples.push({
@@ -3846,8 +3867,7 @@ async function renderSessionOmniPreview() {
     // once concatenated; a line chart needs ascending x to render as a
     // sensible line rather than zig-zagging.
     slice.sort((a, b) => a.t - b.t);
-    sessionOmniPreviewChart.data.datasets = buildOmniDatasets(slice, SESSION_OMNI_TPS_COLOR);
-    sessionOmniPreviewChart.update('none');
+    setOmniDatasets(sessionOmniPreviewChart, buildOmniDatasets(slice, SESSION_OMNI_TPS_COLOR));
 }
 
 // The "last 2 minutes" window needs to keep sliding even with no new
@@ -3858,7 +3878,7 @@ async function renderSessionOmniPreview() {
 // some OTHER client, e.g. opencode/curl).
 function startSessionOmniRefresh() {
     if (sessionOmniRefreshTimer) return;
-    sessionOmniRefreshTimer = setInterval(renderSessionOmniPreview, 2000);
+    sessionOmniRefreshTimer = setInterval(renderSessionOmniPreview, Math.max(500, currentTelemetryRateMs));
 }
 function stopSessionOmniRefresh() {
     clearInterval(sessionOmniRefreshTimer);
@@ -4202,8 +4222,7 @@ function renderBenchOmni(samples) {
         });
     }
     benchOmniChartInst.$lastSamples = samples || [];
-    benchOmniChartInst.data.datasets = buildOmniDatasets(samples || [], 'rgba(74,222,128,1)');
-    benchOmniChartInst.update('none');
+    setOmniDatasets(benchOmniChartInst, buildOmniDatasets(samples || [], 'rgba(74,222,128,1)'));
 }
 let benchOmniPollTimer = null;
 function startBenchOmniPoll() {
@@ -4215,7 +4234,7 @@ function startBenchOmniPoll() {
             // of blanking the chart with an empty active buffer
             if (data.samples?.length) renderBenchOmni(data.samples);
         } catch (e) {}
-    }, 2000);
+    }, Math.max(500, currentTelemetryRateMs));
 }
 function stopBenchOmniPoll() {
     clearInterval(benchOmniPollTimer);
