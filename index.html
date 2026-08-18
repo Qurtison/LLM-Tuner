@@ -90,6 +90,10 @@
         .hover\:bg-indigo-500:hover { background-color: #6366f1; }
         .hover\:bg-gray-700:hover { background-color: #374151; }
         .break-all { word-break: break-all; }
+        .bg-amber-700 { background-color: #b45309; }
+        .hover\:bg-amber-600:hover { background-color: #d97706; }
+        .select-none { user-select: none; }
+        .pl-3 { padding-left: 0.75rem; }
         .inline-block { display: inline-block; }
     </style>
 </head>
@@ -666,6 +670,7 @@
                     <button id="bench-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run</button>
                     <button id="bench-auto-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Generates the recommended comparison matrix from your detected builds and devices: solo runs per GPU (backend vs backend) and cross-GPU pairs, all with the recommended settings. Check the runs you want, pick a model, run them back to back.">Auto Matrix</button>
                     <button id="bench-stop-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-red-400 rounded-md text-xs font-semibold transition-colors hidden">Stop</button>
+                    <button id="bench-clear-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs font-semibold transition-colors" title="Clears the on-screen results. The full transcript of every run is kept in logs/bench-history.log regardless.">Clear</button>
                 </div>
 
                 <!-- Auto matrix: generated checklist of build+device combos -->
@@ -678,6 +683,7 @@
                     <div id="bench-auto-list" class="space-y-1 text-[11px] text-gray-300"></div>
                     <div class="flex gap-2 items-center">
                         <button id="bench-auto-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run Matrix</button>
+                        <button id="bench-auto-resume" class="hidden px-4 py-1.5 bg-amber-700 hover:bg-amber-600 text-white rounded-md text-xs font-semibold transition-colors">Resume matrix</button>
                         <span id="bench-auto-status" class="text-[10px] text-gray-500"></span>
                     </div>
                 </div>

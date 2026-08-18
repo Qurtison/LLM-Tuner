@@ -36,10 +36,20 @@ let liveProgress = {};
 
 // --- BENCH STATE (llama-bench runner, Bench tab) ---
 let benchProcess = null;
-let benchOutput = [];          // full output of the current/last run
-const BENCH_OUTPUT_MAX_LINES = 2000;
+// Cumulative across runs (capped) -- the client renders this verbatim, so
+// switching tabs / refreshing restores the WHOLE session's results, not just
+// the current run. Every line is also appended to logs/bench-history.log,
+// which survives dashboard restarts (the last chunk is reloaded on boot).
+let benchOutput = [];
+const BENCH_OUTPUT_MAX_LINES = 4000;
 let benchRunning = false;
 let benchLastCommand = '';
+function benchLog(line) {
+    benchOutput.push(line);
+    if (benchOutput.length > BENCH_OUTPUT_MAX_LINES) benchOutput = benchOutput.slice(-3000);
+    broadcastState(`BENCH:${line}`);
+    fs.appendFile(path.join(LOGS_DIR, 'bench-history.log'), line + '\n').catch(() => {});
+}
 
 // --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
 // dashboard.config.json is user-editable and gitignored (see dashboard.config.example.json);
@@ -1358,14 +1368,9 @@ const server = http.createServer(async (req, res) => {
             if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
             if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
 
-            benchOutput = [];
             benchRunning = true;
             benchLastCommand = `${benchBin} ${args.join(' ')}`;
-            const benchLog = (line) => {
-                benchOutput.push(line);
-                if (benchOutput.length > BENCH_OUTPUT_MAX_LINES) benchOutput = benchOutput.slice(-BENCH_OUTPUT_MAX_LINES);
-                broadcastState(`BENCH:${line}`);
-            };
+            benchLog(`--- ${new Date().toLocaleString()} ---`);
             benchLog(`$ ${benchLastCommand}`);
             try {
                 benchProcess = spawn(benchBin, args);
@@ -1399,6 +1404,11 @@ const server = http.createServer(async (req, res) => {
             });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true, command: benchLastCommand }));
+        }
+        else if (req.url === '/api/bench/clear' && req.method === 'POST') {
+            benchOutput = [];
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true }));
         }
         else if (req.url === '/api/bench/stop' && req.method === 'POST') {
             if (benchProcess) benchProcess.kill('SIGTERM');

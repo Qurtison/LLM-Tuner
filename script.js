@@ -4009,6 +4009,14 @@ async function initBenchTab() {
     } catch (e) {
         document.getElementById('bench-model').innerHTML = '<option value="">failed to load models</option>';
     }
+    try {
+        const saved = JSON.parse(localStorage.getItem('bench_auto_queue') || 'null');
+        if (saved?.queue?.length) {
+            const btn = document.getElementById('bench-auto-resume');
+            btn.textContent = `Resume matrix (${saved.queue.length} runs pending)`;
+            btn.classList.remove('hidden');
+        }
+    } catch (e) {}
 }
 function setBenchRunningUI(running) {
     document.getElementById('bench-run').classList.toggle('hidden', running);
@@ -4110,6 +4118,11 @@ function renderBenchTable(lines) {
         <table class="text-[11px]"><thead><tr class="text-gray-500 border-b border-gray-800">${th}</tr></thead><tbody>${trs}</tbody></table>
     </div>`;
 }
+// Device/backend init spam is identical every run -- fold each burst of it
+// into a collapsed <details> so results dominate the view.
+function isBenchBoilerplate(l) {
+    return /^(ggml_|\s+Device \d|load_backend|build: |llama_model_load|main: )/.test(l) && !/error/i.test(l);
+}
 function renderBenchOutput() {
     const el = document.getElementById('bench-output');
     if (!el) return;
@@ -4118,12 +4131,18 @@ function renderBenchOutput() {
     const chunks = [];
     let i = 0;
     while (i < benchOutputLines.length) {
-        if (isTableLine(benchOutputLines[i])) {
+        const line = benchOutputLines[i];
+        if (isTableLine(line)) {
             const tbl = [];
             while (i < benchOutputLines.length && isTableLine(benchOutputLines[i])) { tbl.push(benchOutputLines[i]); i++; }
             chunks.push(renderBenchTable(tbl));
+        } else if (isBenchBoilerplate(line)) {
+            const grp = [];
+            while (i < benchOutputLines.length && isBenchBoilerplate(benchOutputLines[i])) { grp.push(benchOutputLines[i]); i++; }
+            chunks.push(`<details class="text-gray-600"><summary class="cursor-pointer text-[10px] select-none">backend init (${grp.length} lines)</summary>` +
+                grp.map(l => `<div class="text-gray-600 text-[10px] whitespace-pre-wrap break-all pl-3">${escapeHtml(l)}</div>`).join('') + '</details>');
         } else {
-            chunks.push(renderBenchLogLine(benchOutputLines[i]));
+            chunks.push(renderBenchLogLine(line));
             i++;
         }
     }
@@ -4131,8 +4150,7 @@ function renderBenchOutput() {
     if (nearBottom) el.scrollTop = el.scrollHeight;
 }
 
-async function startBenchRun(body, { clearOutput = true } = {}) {
-    if (clearOutput) setBenchOutput([]);
+async function startBenchRun(body) {
     try {
         const resp = await fetch('/api/bench/start', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -4197,7 +4215,22 @@ document.getElementById('bench-run').addEventListener('click', () => {
 });
 document.getElementById('bench-stop-btn').addEventListener('click', () => {
     benchAutoQueue = []; benchAutoTotal = 0; // stopping also cancels the rest of a matrix
+    persistAutoQueue();
     fetch('/api/bench/stop', { method: 'POST' }).catch(() => {});
+});
+document.getElementById('bench-clear-btn').addEventListener('click', () => {
+    fetch('/api/bench/clear', { method: 'POST' }).catch(() => {});
+    setBenchOutput([]); // full history stays in logs/bench-history.log
+});
+document.getElementById('bench-auto-resume').addEventListener('click', () => {
+    try {
+        const saved = JSON.parse(localStorage.getItem('bench_auto_queue') || 'null');
+        if (!saved || !saved.queue?.length) return;
+        benchAutoQueue = saved.queue;
+        benchAutoTotal = saved.total || saved.queue.length;
+        document.getElementById('bench-auto-resume').classList.add('hidden');
+        runNextAutoBench();
+    } catch (e) {}
 });
 
 // --- Auto Matrix: generated checklist of build+device comparison runs ---
@@ -4246,14 +4279,24 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
         </label>`).join('');
 });
 
+// The matrix queue survives page reloads: persisted to localStorage on every
+// change, offered back as a Resume button if the page comes up with runs
+// still pending (the in-flight run itself lives server-side and keeps going).
+function persistAutoQueue() {
+    try {
+        if (benchAutoQueue.length > 0) localStorage.setItem('bench_auto_queue', JSON.stringify({ queue: benchAutoQueue, total: benchAutoTotal }));
+        else localStorage.removeItem('bench_auto_queue');
+    } catch (e) {}
+}
 function runNextAutoBench() {
     const next = benchAutoQueue.shift();
+    persistAutoQueue();
     if (!next) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; return; }
     const k = benchAutoTotal - benchAutoQueue.length;
     document.getElementById('bench-auto-status').textContent = `run ${k}/${benchAutoTotal}: ${next.devices || 'all devices'}`;
     document.getElementById('bench-status').textContent = `matrix ${k}/${benchAutoTotal}`;
     appendBenchLine(`\n===== matrix run ${k}/${benchAutoTotal}: ${next.devices} [build ${next.build}] =====`);
-    startBenchRun(next, { clearOutput: false }).then(ok => {
+    startBenchRun(next).then(ok => {
         if (!ok) {
             appendBenchLine('[matrix] run failed to start -- aborting remaining runs');
             benchAutoQueue = []; benchAutoTotal = 0;
@@ -4277,7 +4320,7 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
         };
     });
     benchAutoTotal = benchAutoQueue.length;
-    setBenchOutput([]);
+    persistAutoQueue();
     runNextAutoBench();
 });
 
