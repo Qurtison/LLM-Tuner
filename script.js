@@ -4125,6 +4125,114 @@ function renderBenchTable(lines) {
 function isBenchBoilerplate(l) {
     return /^(ggml_|\s+Device \d|load_backend|build: |llama_model_load|main: )/.test(l) && !/error/i.test(l);
 }
+// Output is grouped into per-run accordion blocks, NEWEST FIRST -- the
+// running block stays open at the top, finished ones collapse to a summary
+// line (title + timestamp + pass/fail).
+function splitBenchBlocks(lines) {
+    const blocks = [];
+    let cur = null;
+    const newBlock = () => { cur = { lines: [], title: '', time: '', dev: '', hasCmd: false, status: 'running' }; blocks.push(cur); };
+    for (const line of lines) {
+        if (line.startsWith('===== ')) { newBlock(); cur.title = line.replace(/=+/g, '').trim(); continue; }
+        if (line.startsWith('--- ') && (!cur || cur.hasCmd)) { newBlock(); }
+        if (!cur) newBlock();
+        if (line.startsWith('--- ')) { cur.time = line.replace(/---/g, '').trim(); continue; }
+        if (line.startsWith('$ ')) {
+            cur.hasCmd = true;
+            const devM = line.match(/-dev\s+(\S+)/);
+            if (devM) cur.dev = devM[1];
+        }
+        if (line.includes('[bench] exited with code 0')) cur.status = 'ok';
+        else if (line.includes('[bench] exited') || line.includes('[bench] error')) cur.status = 'fail';
+        cur.lines.push(line);
+    }
+    return blocks;
+}
+function renderBenchChunk(lines) {
+    const isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
+    const chunks = [];
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        if (isTableLine(line)) {
+            const tbl = [];
+            while (i < lines.length && isTableLine(lines[i])) { tbl.push(lines[i]); i++; }
+            chunks.push(renderBenchTable(tbl));
+        } else if (isBenchBoilerplate(line)) {
+            const grp = [];
+            while (i < lines.length && isBenchBoilerplate(lines[i])) { grp.push(lines[i]); i++; }
+            chunks.push(`<details class="text-gray-600"><summary class="cursor-pointer text-[10px] select-none">backend init (${grp.length} lines)</summary>` +
+                grp.map(l => `<div class="text-gray-600 text-[10px] whitespace-pre-wrap break-all pl-3">${escapeHtml(l)}</div>`).join('') + '</details>');
+        } else {
+            chunks.push(renderBenchLogLine(line));
+            i++;
+        }
+    }
+    return chunks.join('');
+}
+function renderBenchOutput() {
+    const el = document.getElementById('bench-output');
+    if (!el) return;
+    const prevScroll = el.scrollTop;
+    const blocks = splitBenchBlocks(benchOutputLines);
+    const html = blocks.slice().reverse().map((b, ri) => {
+        const isNewest = ri === 0;
+        const statusBadge = b.status === 'ok' ? '<span class="text-green-400">done</span>'
+            : b.status === 'fail' ? '<span class="text-orange-400">failed</span>'
+            : '<span class="text-amber-400">running…</span>';
+        const title = escapeHtml(b.title || (b.dev ? `run — ${b.dev}` : 'run'));
+        const open = (isNewest && b.status === 'running') || blocks.length === 1 ? ' open' : '';
+        return `<details class="border border-gray-800 rounded-lg mb-2"${open}>
+            <summary class="cursor-pointer select-none px-3 py-1.5 text-[11px] text-gray-300 flex gap-3 items-baseline">
+                <span class="text-indigo-300 font-semibold">${title}</span>
+                <span class="text-gray-600">${escapeHtml(b.time)}</span>${statusBadge}
+            </summary>
+            <div class="px-3 pb-2">${renderBenchChunk(b.lines)}</div>
+        </details>`;
+    }).join('');
+    el.innerHTML = html;
+    el.scrollTop = prevScroll;
+}
+function renderBenchLogLine(line) {
+    const esc = escapeHtml(line);
+    if (line.startsWith('===== ')) return `<div class="text-indigo-300 font-semibold pt-2">${esc}</div>`;
+    if (line.startsWith('$ ')) return `<div class="text-amber-400 whitespace-pre-wrap break-all">${esc}</div>`;
+    if (line.startsWith('[bench]') || line.startsWith('[matrix]')) return `<div class="text-orange-400">${esc}</div>`;
+    if (!line.trim()) return '<div class="h-1"></div>';
+    return `<div class="text-gray-500 whitespace-pre-wrap break-all">${esc}</div>`;
+}
+function renderBenchTable(lines) {
+    const rows = lines
+        .map(l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()))
+        .filter(cells => !cells.every(c => /^:?-{2,}:?$/.test(c)));
+    if (rows.length === 0) return '';
+    const header = rows[0];
+    const dataRows = rows.slice(1);
+    if (dataRows.length === 0) return renderBenchLogLine(lines[0]);
+    // Collapse columns identical across every data row into a caption line.
+    const constCols = [], varCols = [];
+    header.forEach((h, ci) => {
+        const vals = dataRows.map(r => r[ci] ?? '');
+        if (dataRows.length > 1 && vals.every(v => v === vals[0])) constCols.push(ci);
+        else varCols.push(ci);
+    });
+    const caption = constCols.map(ci => `${escapeHtml(header[ci])}: <span class="text-gray-300">${escapeHtml(dataRows[0]?.[ci] ?? '')}</span>`).join(' · ');
+    const th = varCols.map(ci => `<th class="text-left font-medium px-2 py-1">${escapeHtml(header[ci])}</th>`).join('');
+    const trs = dataRows.map(r => '<tr class="border-b border-gray-800/50">' + varCols.map(ci => {
+        const v = r[ci] ?? '';
+        const numeric = /^[\d.,\s±\u00b1]+$/.test(v);
+        return `<td class="px-2 py-1 whitespace-nowrap ${numeric ? 'text-right text-green-300' : ''}">${escapeHtml(v)}</td>`;
+    }).join('') + '</tr>').join('');
+    return `<div class="my-2 border border-gray-800 rounded-lg overflow-hidden inline-block">
+        ${caption ? `<div class="px-2 py-1 text-[10px] text-gray-500 bg-gray-800/40">${caption}</div>` : ''}
+        <table class="text-[11px]"><thead><tr class="text-gray-500 border-b border-gray-800">${th}</tr></thead><tbody>${trs}</tbody></table>
+    </div>`;
+}
+// Device/backend init spam is identical every run -- fold each burst of it
+// into a collapsed <details> so results dominate the view.
+function isBenchBoilerplate(l) {
+    return /^(ggml_|\s+Device \d|load_backend|build: |llama_model_load|main: )/.test(l) && !/error/i.test(l);
+}
 function renderBenchOutput() {
     const el = document.getElementById('bench-output');
     if (!el) return;
