@@ -511,6 +511,9 @@ eventSource.onmessage = (e) => {
         else if (data.log.startsWith('BENCH_DONE:')) {
             stopBenchProgress();
             setBenchRunningUI(false);
+            if (benchCurrentRunLabel) {
+                setBenchRowStatus(benchCurrentRunLabel, data.log === 'BENCH_DONE:0' ? 'done' : 'failed');
+            }
             benchCurrentRunLabel = null;
             renderBenchCustomRows();
         }
@@ -4502,16 +4505,28 @@ function persistBenchCustomRows() {
     try { localStorage.setItem('bench_custom_rows', JSON.stringify(benchCustomRows)); } catch (e) {}
 }
 let benchCurrentRunLabel = null;
+// label -> 'done' | 'failed', persisted so a refresh mid-matrix keeps history
+let benchRowStatus = {};
+try { benchRowStatus = JSON.parse(localStorage.getItem('bench_row_status') || '{}'); } catch (e) {}
+function setBenchRowStatus(label, status) {
+    benchRowStatus[label] = status;
+    try { localStorage.setItem('bench_row_status', JSON.stringify(benchRowStatus)); } catch (e) {}
+}
 function renderBenchCustomRows() {
     const el = document.getElementById('bench-custom-list');
     if (!el) return;
     el.innerHTML = benchCustomRows.map((c, i) => {
         const running = benchCurrentRunLabel && benchCurrentRunLabel === c.label;
+        const done = benchRowStatus[c.label];
+        const badge = running ? '<span class="text-amber-400 font-semibold">running…</span>'
+            : done === 'done' ? '<span class="text-green-400">completed</span>'
+            : done === 'failed' ? '<span class="text-orange-400">failed</span>'
+            : '<span class="text-gray-600">queued for matrix</span>';
         return `
         <div class="flex items-center gap-2 text-[11px]">
             <span class="text-gray-600">${i + 1}.</span>
             <span class="font-mono ${running ? 'text-amber-300' : 'text-gray-300'} flex-1">${escapeHtml(c.label)}</span>
-            ${running ? '<span class="text-amber-400 font-semibold">running…</span>' : '<span class="text-gray-600">queued for matrix</span>'}
+            ${badge}
             <button data-benchdel="${i}" class="text-gray-600 hover:text-red-400 px-1">✕</button>
         </div>`;
     }).join('');
@@ -4647,6 +4662,8 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
             nPrompt: '8192', nGen: '128', depths: '0,32768,98304', reps: null, extraArgs: null,
         };
     });
+    for (const q of benchAutoQueue) { if (q.label) delete benchRowStatus[q.label]; }
+    try { localStorage.setItem('bench_row_status', JSON.stringify(benchRowStatus)); } catch (e) {}
     submitMatrixQueue(benchAutoQueue.map(q => ({ ...q })));
     benchAutoQueue = []; benchAutoTotal = 0;
 });
