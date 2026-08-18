@@ -40,6 +40,7 @@ let lastSampleNetTime = null;
 // --- BENCH STATE (llama-bench runner, Bench tab) ---
 let benchQueue = [];        // server-side matrix queue (survives page closes)
 let benchQueueTotal = 0;
+let benchCurrentLabel = ''; // label of the run in flight (for reconnecting clients)
 function launchBenchProcess(cfg) {
     const benchBin = getLlamaServerBinary(cfg.build).replace(/llama-server$/, 'llama-bench');
     const args = ['-m', cfg.modelPath];
@@ -99,7 +100,8 @@ function maybeStartNextQueued() {
     }
     const next = benchQueue.shift();
     const k = benchQueueTotal - benchQueue.length;
-    benchLog(`===== llama-bench ${k}/${benchQueueTotal}: ${next.label || next.devices || 'run'} =====`);
+    benchCurrentLabel = next.label || next.devices || 'run';
+    benchLog(`===== llama-bench ${k}/${benchQueueTotal}: ${benchCurrentLabel} =====`);
     const err = launchBenchProcess(next);
     if (err) maybeStartNextQueued();
 }
@@ -1477,7 +1479,8 @@ const server = http.createServer(async (req, res) => {
                 benchQueue = cfg.queue.slice(1);
                 benchQueueTotal = cfg.queue.length;
                 const first = cfg.queue[0];
-                benchLog(`===== llama-bench 1/${benchQueueTotal}: ${first.label || first.devices || 'run'} =====`);
+                benchCurrentLabel = first.label || first.devices || 'run';
+                benchLog(`===== llama-bench 1/${benchQueueTotal}: ${benchCurrentLabel} =====`);
                 const err = launchBenchProcess(first);
                 if (err) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ error: err })); }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1539,6 +1542,7 @@ const server = http.createServer(async (req, res) => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ running: benchRunning, command: benchLastCommand, output: benchOutput,
                 queueRemaining: benchQueue.length, queueTotal: benchQueueTotal,
+                currentLabel: benchRunning ? benchCurrentLabel : '',
                 samples: benchRunning ? activeRequestSamples : benchLastSamples }));
         }
 

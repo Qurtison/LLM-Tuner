@@ -4451,6 +4451,12 @@ document.getElementById('tab-bench').addEventListener('click', async () => {
             document.getElementById('bench-auto-status').textContent =
                 `matrix in progress -- ${status.queueRemaining} of ${status.queueTotal} runs still queued (server-side)`;
         }
+        // Reconnecting mid-run: restore which row is active so its badge and
+        // eventual completed/failed status survive the refresh.
+        if (status.running && status.currentLabel) {
+            benchCurrentRunLabel = status.currentLabel;
+            renderBenchCustomRows();
+        }
     } catch (e) { /* leave as-is */ }
 });
 
