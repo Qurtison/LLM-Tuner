@@ -4265,7 +4265,14 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
                 const key = `${a.id},${c.id}|${a.description}|${c.description}`;
                 if (pairSeen.has(key)) continue;
                 pairSeen.add(key);
-                rows.push({ build: b.id, devices: `${a.id},${c.id}`, ts: '37/63', igpu: false,
+                // Default -ts from the pair's actual VRAM ratio (total, not
+                // free -- free just reflects whatever happens to be loaded).
+                let ts = null;
+                if (a.totalMib > 0 && c.totalMib > 0) {
+                    const pctA = Math.round(a.totalMib / (a.totalMib + c.totalMib) * 100);
+                    ts = `${pctA}/${100 - pctA}`;
+                }
+                rows.push({ build: b.id, devices: `${a.id},${c.id}`, ts, igpu: false,
                             label: `${a.id},${c.id} pair <span class="text-gray-600">[${b.label}]</span>` });
             }
         }
