@@ -127,8 +127,9 @@
                 <!-- Loads a saved profile (model, launch mode, devices, every field,
                      the raw command) immediately on selection. Saving happens at the
                      bottom of this panel, right above Load Model. -->
-                <div class="flex gap-1.5 items-center">
-                    <select id="load-profile-select" class="flex-1 bg-gray-800 border border-gray-700 rounded-md px-2 py-1.5 text-xs text-gray-400">
+                <div class="flex gap-1.5 items-center w-full">
+                    <span class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider shrink-0">Profile</span>
+                    <select id="load-profile-select" class="flex-1 min-w-0 bg-gray-800 border border-indigo-900/60 rounded-md px-2 py-1.5 text-xs text-gray-300">
                         <option value="">Load Saved Profile...</option>
                     </select>
                     <button type="button" id="btn-delete-profile" title="Delete selected profile" class="px-2 py-1.5 bg-red-900/30 hover:bg-red-900/50 border border-red-800/40 rounded text-[11px] text-red-400">×</button>
@@ -597,7 +598,11 @@
         </div>
 
         <div id="bench-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
-            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <div class="flex gap-1 shrink-0">
+                <button type="button" id="bench-subtab-hw" class="px-3 py-1.5 rounded-md text-xs font-semibold bg-indigo-600 text-white">llama-bench — hardware</button>
+                <button type="button" id="bench-subtab-server" class="px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-400 hover:text-gray-200">llama-server — spec sweep</button>
+            </div>
+            <div id="bench-card-hw" class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                 <div class="flex justify-between items-center">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">llama-bench <span class="text-indigo-400 cursor-help font-normal normal-case" title="Runs llama-bench from the selected build. The model server must be stopped first (the bench needs the VRAM). Depths (-d) test prompt/gen speed at context depth -- the key number for long-context tuning. NOTE: llama-bench measures raw decode with NO speculative decoding; its gen numbers are no-spec baselines.">?</span></h3>
                     <span id="bench-status" class="text-[10px] text-gray-500"></span>
@@ -680,6 +685,8 @@
                     <button id="bench-clear-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs font-semibold transition-colors" title="Clears the on-screen results. The full transcript of every run is kept in logs/bench-history.log regardless.">Clear</button>
                 </div>
 
+                <div id="bench-custom-list" class="space-y-1"></div>
+
                 <!-- Auto matrix: generated checklist of build+device combos -->
                 <div id="bench-auto-panel" class="hidden border border-indigo-900/50 rounded-lg p-3 space-y-2">
                     <div class="text-[10px] font-semibold text-indigo-300 uppercase tracking-wider">Auto Matrix <span class="text-gray-500 normal-case font-normal">-- recommended settings: -p 8192 -n 128 -d 0,32768,98304, FA on, KV q8_0. Solo runs need a model that fits ONE card.</span></div>
@@ -695,7 +702,7 @@
                     </div>
                 </div>
             </div>
-            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+            <div id="bench-card-sweep" class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3 hidden">
                 <div class="flex justify-between items-center">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Launch Sweep <span class="text-indigo-400 cursor-help font-normal normal-case" title="Benches the REAL llama-server including the speculative stack (llama-bench can't). Runs ANY number of queued configs sequentially. Configure the launch sidebar as usual, Add snapshots it as a row; Run launches each config, sends the test prompt, harvests the stats, stops, and moves on. Don't refresh the page mid-sweep -- the runner lives client-side.">?</span></h3>
                     <span id="ab-status" class="text-[10px] text-gray-500"></span>

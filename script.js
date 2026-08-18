@@ -4338,6 +4338,22 @@ try { benchCustomRows = JSON.parse(localStorage.getItem('bench_custom_rows') || 
 function persistBenchCustomRows() {
     try { localStorage.setItem('bench_custom_rows', JSON.stringify(benchCustomRows)); } catch (e) {}
 }
+function renderBenchCustomRows() {
+    const el = document.getElementById('bench-custom-list');
+    if (!el) return;
+    el.innerHTML = benchCustomRows.map((c, i) => `
+        <div class="flex items-center gap-2 text-[11px]">
+            <span class="text-gray-600">${i + 1}.</span>
+            <span class="font-mono text-amber-300 flex-1">${escapeHtml(c.label)}</span>
+            <span class="text-gray-600">queued for matrix</span>
+            <button data-benchdel="${i}" class="text-gray-600 hover:text-red-400 px-1">✕</button>
+        </div>`).join('');
+    el.querySelectorAll('[data-benchdel]').forEach(b => b.addEventListener('click', () => {
+        benchCustomRows.splice(parseInt(b.dataset.benchdel), 1);
+        persistBenchCustomRows();
+        renderBenchCustomRows();
+    }));
+}
 document.getElementById('bench-add-row-btn').addEventListener('click', () => {
     const body = {
         build: document.getElementById('bench-build').value,
@@ -4363,8 +4379,10 @@ document.getElementById('bench-add-row-btn').addEventListener('click', () => {
     bits.push((body.modelPath || '').split('/').pop().replace(/\.gguf$/, ''));
     benchCustomRows.push({ label: `custom: ${bits.join(' ')}`, body });
     persistBenchCustomRows();
-    document.getElementById('bench-status').textContent = `matrix row added (${benchCustomRows.length} custom) -- open Auto Matrix to run`;
+    renderBenchCustomRows();
+    document.getElementById('bench-status').textContent = `matrix row added -- open Auto Matrix to run`;
 });
+renderBenchCustomRows();
 
 // --- Auto Matrix: generated checklist of build+device comparison runs ---
 document.getElementById('bench-auto-btn').addEventListener('click', async () => {
@@ -4426,6 +4444,7 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
         const row = window.__benchAutoRows[parseInt(b.dataset.customdel)];
         benchCustomRows = benchCustomRows.filter(c => c.body !== row.body);
         persistBenchCustomRows();
+        renderBenchCustomRows();
         document.getElementById('bench-auto-btn').click(); // re-render (toggles twice)
         document.getElementById('bench-auto-btn').click();
     }));
@@ -4703,3 +4722,21 @@ document.getElementById('ab-clear-btn').addEventListener('click', () => {
     abRows = []; abPersist(); abRenderRows(); abRenderResults();
 });
 abRestore();
+
+
+// --- Bench sub-tabs: hardware (llama-bench) vs spec sweep (llama-server) ---
+function setBenchSubtab(which) {
+    const hw = which === 'hw';
+    document.getElementById('bench-card-hw').classList.toggle('hidden', !hw);
+    document.getElementById('bench-card-sweep').classList.toggle('hidden', hw);
+    document.getElementById('bench-subtab-hw').className = hw
+        ? 'px-3 py-1.5 rounded-md text-xs font-semibold bg-indigo-600 text-white'
+        : 'px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-400 hover:text-gray-200';
+    document.getElementById('bench-subtab-server').className = !hw
+        ? 'px-3 py-1.5 rounded-md text-xs font-semibold bg-indigo-600 text-white'
+        : 'px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-400 hover:text-gray-200';
+    try { localStorage.setItem('bench_subtab', which); } catch (e) {}
+}
+document.getElementById('bench-subtab-hw').addEventListener('click', () => setBenchSubtab('hw'));
+document.getElementById('bench-subtab-server').addEventListener('click', () => setBenchSubtab('server'));
+try { setBenchSubtab(localStorage.getItem('bench_subtab') || 'hw'); } catch (e) {}
