@@ -1664,6 +1664,13 @@ async function initServer() {
     await initLogsDir();
     await cleanupPort(8081); // Restored safe orphan-process protection
 
+    // Reload the tail of the bench transcript so a dashboard restart doesn't
+    // present an empty Bench tab (the full history lives in the file).
+    try {
+        const benchHist = await fs.readFile(path.join(LOGS_DIR, 'bench-history.log'), 'utf-8');
+        benchOutput = benchHist.split('\n').filter(l => l !== '').slice(-1500);
+    } catch { /* no history yet */ }
+
     // No more startup recovery scan for a leftover `master-node` Docker
     // container here -- the master never launches in Docker anymore, so the
     // only thing that scan could ever find post-refactor is a stale container
