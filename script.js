@@ -522,6 +522,11 @@ eventSource.onmessage = (e) => {
     const bootProgressFill = document.getElementById('boot-progress-fill');
 
     if (data.loadStartTime > 0 && !uiTimerInterval) {
+        // A new model launch means a new config -- carrying the previous
+        // config's requests in the running averages makes the number an
+        // uninterpretable blend of two setups (e.g. pre- and post-ngram
+        // speculation), so each launch starts its averages fresh.
+        resetRunningAverages();
         timerDiv.classList.remove('hidden');
         // Show boot overlay in chat area
         bootOverlay.classList.remove('hidden');
