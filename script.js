@@ -511,6 +511,8 @@ eventSource.onmessage = (e) => {
         else if (data.log.startsWith('BENCH_DONE:')) {
             stopBenchProgress();
             setBenchRunningUI(false);
+            benchCurrentRunLabel = null;
+            renderBenchCustomRows();
         }
         else if (data.log.startsWith('BENCH:')) {
             appendBenchLine(data.log.slice('BENCH:'.length));
@@ -4187,7 +4189,11 @@ function appendBenchLine(line) {
     }
     if (line.startsWith('===== llama-bench ') || line.startsWith('===== matrix run ')) {
         const m = line.match(/(?:llama-bench|matrix run) (\d+)\/(\d+): (.*?) =====/);
-        if (m) document.getElementById('bench-auto-status').textContent = `matrix ${m[1]}/${m[2]}: ${m[3]}`;
+        if (m) {
+            document.getElementById('bench-auto-status').textContent = `matrix ${m[1]}/${m[2]}: ${m[3]}`;
+            benchCurrentRunLabel = m[3];
+            renderBenchCustomRows();
+        }
     }
     scheduleBenchRender();
 }
@@ -4495,16 +4501,20 @@ try { benchCustomRows = JSON.parse(localStorage.getItem('bench_custom_rows') || 
 function persistBenchCustomRows() {
     try { localStorage.setItem('bench_custom_rows', JSON.stringify(benchCustomRows)); } catch (e) {}
 }
+let benchCurrentRunLabel = null;
 function renderBenchCustomRows() {
     const el = document.getElementById('bench-custom-list');
     if (!el) return;
-    el.innerHTML = benchCustomRows.map((c, i) => `
+    el.innerHTML = benchCustomRows.map((c, i) => {
+        const running = benchCurrentRunLabel && benchCurrentRunLabel === c.label;
+        return `
         <div class="flex items-center gap-2 text-[11px]">
             <span class="text-gray-600">${i + 1}.</span>
-            <span class="font-mono text-amber-300 flex-1">${escapeHtml(c.label)}</span>
-            <span class="text-gray-600">queued for matrix</span>
+            <span class="font-mono ${running ? 'text-amber-300' : 'text-gray-300'} flex-1">${escapeHtml(c.label)}</span>
+            ${running ? '<span class="text-amber-400 font-semibold">running…</span>' : '<span class="text-gray-600">queued for matrix</span>'}
             <button data-benchdel="${i}" class="text-gray-600 hover:text-red-400 px-1">✕</button>
-        </div>`).join('');
+        </div>`;
+    }).join('');
     el.querySelectorAll('[data-benchdel]').forEach(b => b.addEventListener('click', () => {
         benchCustomRows.splice(parseInt(b.dataset.benchdel), 1);
         persistBenchCustomRows();
