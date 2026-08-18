@@ -2358,6 +2358,7 @@ async function pollTelemetry() {
         // do_POST picks one or the other from this same body, so sending both
         // would silently drop the RPC worker's telemetry.
         const localSecondGpu = !!(document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim());
+        const rpcEnabled = !localSecondGpu && document.getElementById('rpc-toggle').checked;
         // Single-poller architecture: the dashboard SERVER polls monitor.py at
         // the selected rate (one nvidia-smi/amdgpu_top shellout per tick,
         // total) and this just reads its cache -- the sidebar, the omni
