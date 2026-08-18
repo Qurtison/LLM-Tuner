@@ -587,73 +587,97 @@
         <div id="bench-view" class="hidden flex-1 flex-col overflow-y-auto p-6 space-y-4">
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
                 <div class="flex justify-between items-center">
-                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">llama-bench <span class="text-indigo-400 cursor-help font-normal normal-case" title="Runs llama-bench from the selected build. The model server must be stopped first (the bench needs the VRAM). -d tests prompt/gen speed at context depth -- the key number for long-context tuning.">?</span></h3>
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">llama-bench <span class="text-indigo-400 cursor-help font-normal normal-case" title="Runs llama-bench from the selected build. The model server must be stopped first (the bench needs the VRAM). Depths (-d) test prompt/gen speed at context depth -- the key number for long-context tuning. NOTE: llama-bench measures raw decode with NO speculative decoding; its gen numbers are no-spec baselines.">?</span></h3>
                     <span id="bench-status" class="text-[10px] text-gray-500"></span>
                 </div>
-                <div class="grid grid-cols-4 gap-2">
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Build</label>
-                        <select id="bench-build" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs"></select>
+
+                <!-- Target: what runs where -->
+                <div class="border border-gray-800 rounded-lg p-3 space-y-2">
+                    <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Target</div>
+                    <div class="grid grid-cols-4 gap-2">
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Build</label>
+                            <select id="bench-build" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs"></select>
+                        </div>
+                        <div class="col-span-3">
+                            <label class="block text-[10px] text-gray-400 mb-1">Model</label>
+                            <select id="bench-model" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono"></select>
+                        </div>
                     </div>
-                    <div class="col-span-3">
-                        <label class="block text-[10px] text-gray-400 mb-1">Model</label>
-                        <select id="bench-model" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono"></select>
+                    <div class="grid grid-cols-4 gap-2">
+                        <div class="col-span-2">
+                            <label class="block text-[10px] text-gray-400 mb-1">Devices <span class="text-indigo-400 cursor-help" title="-dev -- which GPU(s) run the bench. Solo entries isolate one card; pair entries test the multi-GPU pipeline. Pick Custom to type anything.">?</span></label>
+                            <select id="bench-devices-select" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono"></select>
+                            <input type="text" id="bench-devices" placeholder="e.g. CUDA0,Vulkan2" class="hidden mt-1 w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Split mode</label>
+                            <select id="bench-sm" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
+                                <option value="">default (layer)</option>
+                                <option value="none">none</option>
+                                <option value="layer">layer</option>
+                                <option value="row">row</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Tensor split <span class="text-indigo-400 cursor-help" title="-ts, e.g. 37/63. Blank = auto.">?</span></label>
+                            <input type="text" id="bench-ts" placeholder="auto" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
                     </div>
                 </div>
-                <div class="grid grid-cols-4 gap-2">
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Devices <span class="text-indigo-400 cursor-help" title="-dev -- comma/slash separated, e.g. Vulkan2 or CUDA0 or Vulkan1,Vulkan2. Blank = all devices.">?</span></label>
-                        <input type="text" id="bench-devices" placeholder="all" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+
+                <!-- Params: how it runs -->
+                <div class="border border-gray-800 rounded-lg p-3 space-y-2">
+                    <div class="text-[10px] font-semibold text-gray-500 uppercase tracking-wider">Params</div>
+                    <div class="grid grid-cols-6 gap-2">
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Prompt tok (-p)</label>
+                            <input type="text" id="bench-p" value="8192" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Gen tok (-n)</label>
+                            <input type="text" id="bench-n" value="128" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
+                        <div class="col-span-2">
+                            <label class="block text-[10px] text-gray-400 mb-1">Depths (-d) <span class="text-indigo-400 cursor-help" title="Comma-separated context depths to test at. Depth 0 = empty context; higher depths show the long-context decay that matters for your real workload.">?</span></label>
+                            <input type="text" id="bench-d" value="0,32768,98304" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">Reps (-r)</label>
+                            <input type="text" id="bench-r" placeholder="5" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1">KV cache</label>
+                            <select id="bench-kv" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
+                                <option value="">f16</option>
+                                <option value="q8_0" selected>q8_0</option>
+                            </select>
+                        </div>
                     </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Split mode</label>
-                        <select id="bench-sm" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
-                            <option value="">default (layer)</option>
-                            <option value="none">none</option>
-                            <option value="layer">layer</option>
-                            <option value="row">row</option>
-                        </select>
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Tensor split <span class="text-indigo-400 cursor-help" title="-ts, e.g. 37/63. Blank = auto.">?</span></label>
-                        <input type="text" id="bench-ts" placeholder="auto" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                    </div>
-                    <div class="flex items-end pb-1">
+                    <div class="flex gap-3 items-center">
                         <label class="flex items-center gap-1.5 text-[11px] text-gray-300"><input type="checkbox" id="bench-fa" checked class="accent-indigo-500 rounded">Flash attn</label>
+                        <input type="text" id="bench-extra" placeholder="extra args, passed through verbatim" class="flex-1 bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
                     </div>
                 </div>
-                <div class="grid grid-cols-6 gap-2">
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Prompt tok (-p)</label>
-                        <input type="text" id="bench-p" value="8192" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Gen tok (-n)</label>
-                        <input type="text" id="bench-n" value="128" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                    </div>
-                    <div class="col-span-2">
-                        <label class="block text-[10px] text-gray-400 mb-1">Depths (-d) <span class="text-indigo-400 cursor-help" title="Comma-separated context depths to test at. Depth 0 = empty context; higher depths show the long-context decay that matters for your real workload.">?</span></label>
-                        <input type="text" id="bench-d" value="0,32768,131072" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">Reps (-r)</label>
-                        <input type="text" id="bench-r" placeholder="5" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                    </div>
-                    <div>
-                        <label class="block text-[10px] text-gray-400 mb-1">KV cache</label>
-                        <select id="bench-kv" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs">
-                            <option value="">f16</option>
-                            <option value="q8_0" selected>q8_0</option>
-                        </select>
-                    </div>
-                </div>
-                <div>
-                    <label class="block text-[10px] text-gray-400 mb-1">Extra args</label>
-                    <input type="text" id="bench-extra" placeholder="passed through to llama-bench verbatim" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
-                </div>
-                <div class="flex gap-2">
+
+                <div class="flex gap-2 items-center">
                     <button id="bench-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run</button>
+                    <button id="bench-auto-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Generates the recommended comparison matrix from your detected builds and devices: solo runs per GPU (backend vs backend) and cross-GPU pairs, all with the recommended settings. Check the runs you want, pick a model, run them back to back.">Auto Matrix</button>
                     <button id="bench-stop-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-red-400 rounded-md text-xs font-semibold transition-colors hidden">Stop</button>
+                </div>
+
+                <!-- Auto matrix: generated checklist of build+device combos -->
+                <div id="bench-auto-panel" class="hidden border border-indigo-900/50 rounded-lg p-3 space-y-2">
+                    <div class="text-[10px] font-semibold text-indigo-300 uppercase tracking-wider">Auto Matrix <span class="text-gray-500 normal-case font-normal">-- recommended settings: -p 8192 -n 128 -d 0,32768,98304, FA on, KV q8_0. Solo runs need a model that fits ONE card.</span></div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Model for all runs</label>
+                        <select id="bench-auto-model" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono"></select>
+                    </div>
+                    <div id="bench-auto-list" class="space-y-1 text-[11px] text-gray-300"></div>
+                    <div class="flex gap-2 items-center">
+                        <button id="bench-auto-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run Matrix</button>
+                        <span id="bench-auto-status" class="text-[10px] text-gray-500"></span>
+                    </div>
                 </div>
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1 min-h-[16rem]">

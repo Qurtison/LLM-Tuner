@@ -509,6 +509,8 @@ eventSource.onmessage = (e) => {
         }
         else if (data.log.startsWith('BENCH_DONE:')) {
             setBenchRunningUI(false);
+            if (benchAutoQueue.length > 0) runNextAutoBench();
+            else if (benchAutoTotal > 0) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; }
         }
         else if (data.log.startsWith('BENCH:')) {
             appendBenchLine(data.log.slice('BENCH:'.length));
@@ -3933,18 +3935,76 @@ document.getElementById('tab-history').addEventListener('click', () => {
 
 // --- Bench tab (llama-bench runner) ---
 let benchTabInitialized = false;
+let benchBuildsCache = [];
+let benchModelsCache = [];
+const benchDevicesByBuild = {}; // buildId -> devices[] from /api/devices
+let benchAutoQueue = [];
+let benchAutoTotal = 0;
+
+async function fetchBenchDevices(buildId) {
+    if (benchDevicesByBuild[buildId]) return benchDevicesByBuild[buildId];
+    try {
+        const data = await (await fetch(`/api/devices?build=${encodeURIComponent(buildId)}`)).json();
+        benchDevicesByBuild[buildId] = data.devices || [];
+    } catch { benchDevicesByBuild[buildId] = []; }
+    return benchDevicesByBuild[buildId];
+}
+// Same physical card exposed through two backends (e.g. the 4090 as both
+// CUDA0 and Vulkan1) has an identical description -- such a "pair" is not a
+// real pairing.
+function benchSamePhysical(a, b) { return a.description === b.description; }
+function benchIsIgpu(d) { return /intel|iris|integrated/i.test(d.description || ''); }
+
+async function populateBenchDeviceDropdown() {
+    const buildId = document.getElementById('bench-build').value;
+    const devices = await fetchBenchDevices(buildId);
+    const sel = document.getElementById('bench-devices-select');
+    const opts = ['<option value="">(all devices)</option>'];
+    for (const d of devices) {
+        opts.push(`<option value="${d.id}">${d.id} solo — ${d.description}</option>`);
+    }
+    for (let i = 0; i < devices.length; i++) {
+        for (let j = i + 1; j < devices.length; j++) {
+            const a = devices[i], b = devices[j];
+            if (benchSamePhysical(a, b)) continue;
+            opts.push(`<option value="${a.id},${b.id}">${a.id},${b.id} — pair</option>`);
+        }
+    }
+    opts.push('<option value="__custom__">Custom…</option>');
+    sel.innerHTML = opts.join('');
+    document.getElementById('bench-devices').classList.add('hidden');
+}
+function getBenchDevices() {
+    const sel = document.getElementById('bench-devices-select');
+    if (sel.value === '__custom__') return document.getElementById('bench-devices').value.trim() || null;
+    return sel.value || null;
+}
+
 async function initBenchTab() {
     if (benchTabInitialized) return;
     benchTabInitialized = true;
     try {
         const { builds } = await (await fetch('/api/builds')).json();
-        document.getElementById('bench-build').innerHTML =
-            builds.map(b => `<option value="${b.id}">${b.label}</option>`).join('');
+        benchBuildsCache = builds || [];
+        const buildSel = document.getElementById('bench-build');
+        buildSel.innerHTML = benchBuildsCache.map(b => `<option value="${b.id}">${b.label}</option>`).join('');
+        // Default to the build that exposes the most backends (usually the
+        // CUDA+Vulkan one) -- that's the right binary for comparisons.
+        const cudaBuild = benchBuildsCache.find(b => /cuda/i.test(b.id) || /cuda/i.test(b.label));
+        if (cudaBuild) buildSel.value = cudaBuild.id;
+        buildSel.addEventListener('change', populateBenchDeviceDropdown);
+        await populateBenchDeviceDropdown();
     } catch (e) { /* leave empty; server falls back to first build */ }
+    document.getElementById('bench-devices-select').addEventListener('change', (e) => {
+        document.getElementById('bench-devices').classList.toggle('hidden', e.target.value !== '__custom__');
+    });
     try {
-        const { models } = await (await fetch('/api/models')).json();
-        document.getElementById('bench-model').innerHTML =
-            (models || []).map(m => `<option value="${m.path}">${m.name} (${m.size} GB)</option>`).join('');
+        const data = await (await fetch('/api/models')).json();
+        benchModelsCache = (Array.isArray(data) ? data : (data.models || []))
+            .slice().sort((a, b) => parseFloat(a.size) - parseFloat(b.size));
+        const optsHtml = benchModelsCache.map(m => `<option value="${m.path}">${m.name} (${m.size} GB)</option>`).join('');
+        document.getElementById('bench-model').innerHTML = optsHtml;
+        document.getElementById('bench-auto-model').innerHTML = optsHtml; // smallest first: solo runs need a one-card fit
     } catch (e) {
         document.getElementById('bench-model').innerHTML = '<option value="">failed to load models</option>';
     }
@@ -3952,45 +4012,40 @@ async function initBenchTab() {
 function setBenchRunningUI(running) {
     document.getElementById('bench-run').classList.toggle('hidden', running);
     document.getElementById('bench-stop-btn').classList.toggle('hidden', !running);
-    document.getElementById('bench-status').textContent = running ? 'running...' : '';
+    if (!running && benchAutoQueue.length === 0) document.getElementById('bench-status').textContent = '';
+    else if (running && benchAutoTotal === 0) document.getElementById('bench-status').textContent = 'running...';
 }
 function appendBenchLine(line) {
     const pre = document.getElementById('bench-output');
     pre.textContent += (pre.textContent ? '\n' : '') + line;
     pre.scrollTop = pre.scrollHeight;
 }
-document.getElementById('tab-bench').addEventListener('click', async () => {
-    isMonitorModeActive = false;
-    isHistoryModeActive = false;
-    stopSessionOmniRefresh();
-    setTabButtonActive('tab-bench', true);
-    setTabButtonActive('tab-interactive', false);
-    setTabButtonActive('tab-monitor', false);
-    setTabButtonActive('tab-history', false);
-    document.getElementById('bench-view').classList.remove('hidden');
-    document.getElementById('bench-view').classList.add('flex');
-    document.getElementById('monitor-view').classList.add('hidden');
-    document.getElementById('monitor-view').classList.remove('flex');
-    document.getElementById('history-view').classList.add('hidden');
-    document.getElementById('history-view').classList.remove('flex');
-    document.getElementById('chat-container').classList.add('hidden');
-    document.getElementById('chat-input-bar').classList.add('hidden');
-    await initBenchTab();
-    // Restore output/state from the server so a refresh or late tab-open
-    // doesn't lose a run that's already in progress or just finished.
+
+async function startBenchRun(body, { clearOutput = true } = {}) {
+    if (clearOutput) document.getElementById('bench-output').textContent = '';
     try {
-        const status = await (await fetch('/api/bench/status')).json();
-        document.getElementById('bench-output').textContent = (status.output || []).join('\n');
-        const pre = document.getElementById('bench-output');
-        pre.scrollTop = pre.scrollHeight;
-        setBenchRunningUI(!!status.running);
-    } catch (e) { /* leave as-is */ }
-});
-document.getElementById('bench-run').addEventListener('click', async () => {
-    const body = {
+        const resp = await fetch('/api/bench/start', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            document.getElementById('bench-status').textContent = data.error || 'failed to start';
+            return false;
+        }
+        setBenchRunningUI(true);
+        return true;
+    } catch (e) {
+        document.getElementById('bench-status').textContent = 'failed to start: ' + e.message;
+        return false;
+    }
+}
+
+document.getElementById('bench-run').addEventListener('click', () => {
+    benchAutoQueue = []; benchAutoTotal = 0;
+    startBenchRun({
         build: document.getElementById('bench-build').value,
         modelPath: document.getElementById('bench-model').value,
-        devices: document.getElementById('bench-devices').value.trim() || null,
+        devices: getBenchDevices(),
         splitMode: document.getElementById('bench-sm').value || null,
         tensorSplit: document.getElementById('bench-ts').value.trim() || null,
         fa: document.getElementById('bench-fa').checked,
@@ -4001,24 +4056,92 @@ document.getElementById('bench-run').addEventListener('click', async () => {
         depths: document.getElementById('bench-d').value.trim() || null,
         reps: document.getElementById('bench-r').value.trim() || null,
         extraArgs: document.getElementById('bench-extra').value.trim() || null,
-    };
-    document.getElementById('bench-output').textContent = '';
-    try {
-        const resp = await fetch('/api/bench/start', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
-        });
-        const data = await resp.json();
-        if (!resp.ok) {
-            document.getElementById('bench-status').textContent = data.error || 'failed to start';
-            return;
-        }
-        setBenchRunningUI(true);
-    } catch (e) {
-        document.getElementById('bench-status').textContent = 'failed to start: ' + e.message;
-    }
+    });
 });
 document.getElementById('bench-stop-btn').addEventListener('click', () => {
+    benchAutoQueue = []; benchAutoTotal = 0; // stopping also cancels the rest of a matrix
     fetch('/api/bench/stop', { method: 'POST' }).catch(() => {});
+});
+
+// --- Auto Matrix: generated checklist of build+device comparison runs ---
+document.getElementById('bench-auto-btn').addEventListener('click', async () => {
+    const panel = document.getElementById('bench-auto-panel');
+    panel.classList.toggle('hidden');
+    if (panel.classList.contains('hidden')) return;
+    const list = document.getElementById('bench-auto-list');
+    list.innerHTML = '<span class="text-gray-500">detecting devices across builds…</span>';
+    // Solo runs: every distinct (device id + physical card) across all builds,
+    // so the same GPU shows up once per BACKEND (CUDA0 vs Vulkan1 = the
+    // backend comparison). Pairs: within each build, cross-physical-GPU combos.
+    const rows = [];
+    const soloSeen = new Set();
+    for (const b of benchBuildsCache) {
+        const devs = await fetchBenchDevices(b.id);
+        for (const d of devs) {
+            const key = d.id + '|' + d.description;
+            if (soloSeen.has(key)) continue;
+            soloSeen.add(key);
+            rows.push({ build: b.id, devices: d.id, ts: null, igpu: benchIsIgpu(d),
+                        label: `${d.id} solo — ${d.description} <span class="text-gray-600">[${b.label}]</span>` });
+        }
+    }
+    const pairSeen = new Set();
+    for (const b of benchBuildsCache) {
+        const devs = benchDevicesByBuild[b.id] || [];
+        for (let i = 0; i < devs.length; i++) {
+            for (let j = i + 1; j < devs.length; j++) {
+                const a = devs[i], c = devs[j];
+                if (benchSamePhysical(a, c) || benchIsIgpu(a) || benchIsIgpu(c)) continue;
+                const key = `${a.id},${c.id}|${a.description}|${c.description}`;
+                if (pairSeen.has(key)) continue;
+                pairSeen.add(key);
+                rows.push({ build: b.id, devices: `${a.id},${c.id}`, ts: '37/63', igpu: false,
+                            label: `${a.id},${c.id} pair <span class="text-gray-600">[${b.label}]</span>` });
+            }
+        }
+    }
+    window.__benchAutoRows = rows;
+    list.innerHTML = rows.map((r, i) => `
+        <label class="flex items-center gap-2">
+            <input type="checkbox" class="bench-auto-cb accent-indigo-500 rounded" data-i="${i}" ${r.igpu ? '' : 'checked'}>
+            <span>${r.label}</span>
+            ${r.ts != null ? `<span class="text-gray-500">-ts</span> <input type="text" value="${r.ts}" data-ts="${i}" class="w-16 bg-gray-950 border border-gray-700 rounded px-1 text-[10px] font-mono">` : ''}
+        </label>`).join('');
+});
+
+function runNextAutoBench() {
+    const next = benchAutoQueue.shift();
+    if (!next) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; return; }
+    const k = benchAutoTotal - benchAutoQueue.length;
+    document.getElementById('bench-auto-status').textContent = `run ${k}/${benchAutoTotal}: ${next.devices || 'all devices'}`;
+    document.getElementById('bench-status').textContent = `matrix ${k}/${benchAutoTotal}`;
+    appendBenchLine(`\n===== matrix run ${k}/${benchAutoTotal}: ${next.devices} [build ${next.build}] =====`);
+    startBenchRun(next, { clearOutput: false }).then(ok => {
+        if (!ok) {
+            appendBenchLine('[matrix] run failed to start -- aborting remaining runs');
+            benchAutoQueue = []; benchAutoTotal = 0;
+        }
+    });
+}
+document.getElementById('bench-auto-run').addEventListener('click', () => {
+    const modelPath = document.getElementById('bench-auto-model').value;
+    if (!modelPath) { document.getElementById('bench-auto-status').textContent = 'pick a model'; return; }
+    const rows = window.__benchAutoRows || [];
+    const checked = [...document.querySelectorAll('.bench-auto-cb:checked')].map(cb => parseInt(cb.dataset.i));
+    if (checked.length === 0) { document.getElementById('bench-auto-status').textContent = 'nothing checked'; return; }
+    benchAutoQueue = checked.map(i => {
+        const r = rows[i];
+        const tsInput = document.querySelector(`input[data-ts="${i}"]`);
+        return {
+            build: r.build, modelPath, devices: r.devices,
+            tensorSplit: tsInput ? (tsInput.value.trim() || null) : null,
+            splitMode: null, fa: true, cacheK: 'q8_0', cacheV: 'q8_0',
+            nPrompt: '8192', nGen: '128', depths: '0,32768,98304', reps: null, extraArgs: null,
+        };
+    });
+    benchAutoTotal = benchAutoQueue.length;
+    document.getElementById('bench-output').textContent = '';
+    runNextAutoBench();
 });
 
 // --- Sidebar Resizer ---
