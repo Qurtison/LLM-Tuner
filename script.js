@@ -3968,7 +3968,9 @@ async function populateBenchDeviceDropdown() {
         for (let j = i + 1; j < devices.length; j++) {
             const a = devices[i], b = devices[j];
             if (benchSamePhysical(a, b)) continue;
-            opts.push(`<option value="${a.id},${b.id}">${a.id},${b.id} — pair</option>`);
+            // llama-bench combines devices with '/'; a comma would mean
+            // "bench each device separately".
+            opts.push(`<option value="${a.id}/${b.id}">${a.id}+${b.id} — pair</option>`);
         }
     }
     opts.push('<option value="__custom__">Custom…</option>');
@@ -4272,8 +4274,8 @@ document.getElementById('bench-auto-btn').addEventListener('click', async () => 
                     const pctA = Math.round(a.totalMib / (a.totalMib + c.totalMib) * 100);
                     ts = `${pctA}/${100 - pctA}`;
                 }
-                rows.push({ build: b.id, devices: `${a.id},${c.id}`, ts, igpu: false,
-                            label: `${a.id},${c.id} pair <span class="text-gray-600">[${b.label}]</span>` });
+                rows.push({ build: b.id, devices: `${a.id}/${c.id}`, ts, igpu: false,
+                            label: `${a.id}+${c.id} pair <span class="text-gray-600">[${b.label}]</span>` });
             }
         }
     }
