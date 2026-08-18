@@ -3478,6 +3478,16 @@ function omniSoloDataset(chart, idx) {
     }
     chart.update('none');
 }
+// Reset all legend visibility on a chart back to defaults.
+function omniResetLines(chart) {
+    if (!chart) return;
+    chart.$omniSolo = null;
+    chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = !!d.hidden && false; });
+    chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = false; });
+    omniSyncAxes(chart);
+    chart.update('none');
+}
+
 // Replace a chart's datasets WITHOUT losing per-dataset visibility state:
 // assigning a fresh array resets Chart.js's metas, which was wiping hover
 // solos and single-click toggles on every 2s data tick.
@@ -3522,19 +3532,28 @@ function buildOmniOptions() {
                 // so further single clicks add lines back in from there.
                 onClick: (e, item, legend) => {
                     const chart = legend.chart;
+                    const idx = item.datasetIndex;
                     const now = Date.now();
                     const isDouble = chart.$lastLegendClick
-                        && chart.$lastLegendClick.i === item.datasetIndex
+                        && chart.$lastLegendClick.i === idx
                         && now - chart.$lastLegendClick.t < 350;
-                    chart.$lastLegendClick = { i: item.datasetIndex, t: now };
-                    chart.$omniSolo = null; // clicks define a NEW baseline; hover restore must not undo them
+                    chart.$lastLegendClick = { i: idx, t: now };
+                    // The click must act on the UNDERLYING state, not the
+                    // hover-solo projection currently painted on screen --
+                    // otherwise clicking a line while hovering its label
+                    // toggles the hover-induced "on" back off and you can
+                    // never add lines after a dblclick lock.
+                    let base = chart.$omniSolo
+                        ? chart.$omniSolo.hidden.map(h => h === null || h === undefined ? null : h)
+                        : chart.data.datasets.map((d, i) => chart.getDatasetMeta(i).hidden);
+                    const resolve = (h, i) => (h === null || h === undefined) ? !!chart.data.datasets[i].hidden : h;
                     if (isDouble) {
-                        chart.data.datasets.forEach((d, i) => { chart.getDatasetMeta(i).hidden = i !== item.datasetIndex; });
+                        base = chart.data.datasets.map((d, i) => i !== idx); // lock solo
                     } else {
-                        const meta = chart.getDatasetMeta(item.datasetIndex);
-                        const currentlyHidden = meta.hidden === null ? !!chart.data.datasets[item.datasetIndex].hidden : meta.hidden;
-                        meta.hidden = !currentlyHidden;
+                        base[idx] = !resolve(base[idx], idx); // toggle within the real state
                     }
+                    chart.$omniSolo = null; // the click defines a new baseline; hover-leave must not undo it
+                    base.forEach((h, i) => { chart.getDatasetMeta(i).hidden = resolve(h, i); });
                     omniSyncAxes(chart);
                     chart.update('none');
                 },
@@ -4547,6 +4566,11 @@ function renderBenchCustomRows() {
         runQueuedBtn.textContent = `Run queued rows (${benchCustomRows.length})`;
     }
 }
+document.getElementById('bench-omni-reset').addEventListener('click', () => omniResetLines(benchOmniChartInst));
+document.getElementById('session-omni-reset').addEventListener('click', (e) => {
+    e.stopPropagation(); // the session card's click opens the expand modal
+    omniResetLines(sessionOmniPreviewChart);
+});
 document.getElementById('bench-run-queued').addEventListener('click', () => {
     if (benchCustomRows.length === 0) return;
     const queue = benchCustomRows.map(c => ({ ...c.body, label: c.label }));
