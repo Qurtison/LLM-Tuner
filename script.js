@@ -4535,7 +4535,19 @@ function renderBenchCustomRows() {
         persistBenchCustomRows();
         renderBenchCustomRows();
     }));
+    const runQueuedBtn = document.getElementById('bench-run-queued');
+    if (runQueuedBtn) {
+        runQueuedBtn.classList.toggle('hidden', benchCustomRows.length === 0);
+        runQueuedBtn.textContent = `Run queued rows (${benchCustomRows.length})`;
+    }
 }
+document.getElementById('bench-run-queued').addEventListener('click', () => {
+    if (benchCustomRows.length === 0) return;
+    const queue = benchCustomRows.map(c => ({ ...c.body, label: c.label }));
+    for (const q of queue) delete benchRowStatus[q.label];
+    try { localStorage.setItem('bench_row_status', JSON.stringify(benchRowStatus)); } catch (e) {}
+    submitMatrixQueue(queue);
+});
 document.getElementById('bench-add-row-btn').addEventListener('click', () => {
     const body = {
         build: document.getElementById('bench-build').value,

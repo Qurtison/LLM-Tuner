@@ -678,13 +678,14 @@
                 </div>
 
                 <div class="flex gap-2 items-center">
-                    <button id="bench-run" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run</button>
+                    <button id="bench-run" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Runs the Target+Params form above ONCE, exactly as shown. Does not touch the queued rows.">Run form once</button>
                     <button id="bench-add-row-btn" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Snapshot the Target+Params fields above (including extra args) as a custom matrix row -- it runs with ITS OWN settings, not the recommended defaults.">+ Matrix row</button>
                     <button id="bench-auto-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Generates the recommended comparison matrix from your detected builds and devices: solo runs per GPU (backend vs backend) and cross-GPU pairs, all with the recommended settings. Check the runs you want, pick a model, run them back to back.">Auto Matrix</button>
                     <button id="bench-stop-btn" class="px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-red-400 rounded-md text-xs font-semibold transition-colors hidden">Stop</button>
                 </div>
 
                 <div id="bench-custom-list" class="space-y-1"></div>
+                <button id="bench-run-queued" class="hidden px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors" title="Runs the queued rows above, in order, server-side (each with its OWN saved settings -- the form above is not consulted).">Run queued rows</button>
 
                 <!-- Auto matrix: generated checklist of build+device combos -->
                 <div id="bench-auto-panel" class="hidden border border-indigo-900/50 rounded-lg p-3 space-y-2">
