@@ -2358,15 +2358,13 @@ async function pollTelemetry() {
         // do_POST picks one or the other from this same body, so sending both
         // would silently drop the RPC worker's telemetry.
         const localSecondGpu = !!(document.getElementById('device-select-b').value || document.getElementById('device-manual-b').value.trim());
-        const rpcEnabled = !localSecondGpu && document.getElementById('rpc-toggle').checked;
-        const workerSsh = rpcEnabled ? document.getElementById('worker-ssh').value : '';
-        const res = await fetch('http://localhost:8081/stats', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ worker_ssh: workerSsh, local_second_gpu: localSecondGpu ? 'amd' : '' }),
-            signal: AbortSignal.timeout(10000)
-        });
-        const stats = await res.json();
+        // Single-poller architecture: the dashboard SERVER polls monitor.py at
+        // the selected rate (one nvidia-smi/amdgpu_top shellout per tick,
+        // total) and this just reads its cache -- the sidebar, the omni
+        // recorder, and the charts all consume the same stream now.
+        const res = await fetch('/api/telemetry/latest', { signal: AbortSignal.timeout(10000) });
+        const wrapper = await res.json();
+        const stats = wrapper.stats || {};
 
         // monitor.py always queries nvidia-smi into the "master" slot and
         // amdgpu_top into the "worker" slot, regardless of which physical
@@ -2765,7 +2763,10 @@ function setTelemetryInterval(ms) {
 setTelemetryInterval(1000);
 
 document.getElementById('polling-rate').addEventListener('change', (e) => {
-    setTelemetryInterval(parseInt(e.target.value));
+    const ms = parseInt(e.target.value);
+    setTelemetryInterval(ms);
+    // the server is the actual poller now -- keep its rate in sync
+    fetch('/api/telemetry/rate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ms }) }).catch(() => {});
 });
 
 // --- Chat History UI ---
@@ -4099,7 +4100,9 @@ async function initBenchTab() {
         }
     } catch (e) {}
 }
+let benchIsRunning = false;
 function setBenchRunningUI(running) {
+    benchIsRunning = running;
     document.getElementById('bench-run').classList.toggle('hidden', running);
     document.getElementById('bench-stop-btn').classList.toggle('hidden', !running);
     if (!running && benchAutoQueue.length === 0) document.getElementById('bench-status').textContent = '';
@@ -4303,8 +4306,13 @@ function renderBenchOutput() {
     const blocks = splitBenchBlocks(benchOutputLines);
     const html = blocks.slice().reverse().map((b, ri) => {
         const isNewest = ri === 0;
+        // A block with no exit line is only "running" if it's the newest AND a
+        // bench is actually in flight -- anything else died mid-run (killed
+        // process, dashboard restart) and should say so.
+        if (b.status === 'running' && !(isNewest && benchIsRunning)) b.status = 'interrupted';
         const statusBadge = b.status === 'ok' ? '<span class="text-green-400">done</span>'
             : b.status === 'fail' ? '<span class="text-orange-400">failed</span>'
+            : b.status === 'interrupted' ? '<span class="text-gray-500">interrupted</span>'
             : '<span class="text-amber-400">running…</span>';
         const title = escapeHtml(b.title || (b.dev ? `run — ${b.dev}` : 'run'));
         const open = (isNewest && b.status === 'running') || blocks.length === 1 ? ' open' : '';

@@ -750,7 +750,11 @@
                 </div>
                 <div class="h-48"><canvas id="benchOmniChart"></canvas></div>
             </div>
-            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1 min-h-[16rem]">
+            <!-- No flex-1/min-h here: an explicit min-height overrides flex's
+                 min-content sizing, pinning the card to available height while
+                 its children spill past the bottom edge. Let it grow; the view
+                 scrolls. -->
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <div class="flex justify-between items-center mb-2">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Output</h3>
                     <div class="flex gap-2">

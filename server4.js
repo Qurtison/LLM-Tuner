@@ -50,11 +50,16 @@ let benchLastCommand = '';
 // exit so the buffer can't bleed into the next real request's series.
 let benchSampleTimer = null;
 let benchLastSamples = [];
+let benchLogWriteChain = Promise.resolve();
 function benchLog(line) {
     benchOutput.push(line);
     if (benchOutput.length > BENCH_OUTPUT_MAX_LINES) benchOutput = benchOutput.slice(-3000);
     broadcastState(`BENCH:${line}`);
-    fs.appendFile(path.join(LOGS_DIR, 'bench-history.log'), line + '\n').catch(() => {});
+    // Serialized: parallel un-awaited appendFile calls can land OUT OF ORDER
+    // in the file, which corrupted block parsing after a restart reload.
+    benchLogWriteChain = benchLogWriteChain
+        .then(() => fs.appendFile(path.join(LOGS_DIR, 'bench-history.log'), line + '\n'))
+        .catch(() => {});
 }
 
 // --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
@@ -810,11 +815,11 @@ const MAX_SAMPLES_PER_REQUEST = 300; // ~5 min at 1s/sample; caps memory for a p
 // this, a slow monitor.py would accumulate multiple concurrent in-flight
 // requests to it, adding more load to the exact thing that's already slow.
 let telemetrySampleInFlight = false;
-async function takeOneTelemetrySample() {
+async function takeOneTelemetrySample(statsArg) {
     if (telemetrySampleInFlight) return;
     telemetrySampleInFlight = true;
     try {
-        const stats = await fetchCurrentTelemetry();
+        const stats = statsArg || await fetchCurrentTelemetry();
         if (!stats) return;
         // Live context position from llama-server's /slots endpoint -- the only
         // client-agnostic source of real context usage (n_prompt_tokens tracks
@@ -853,20 +858,32 @@ async function takeOneTelemetrySample() {
 
 function markRequestActivity() {
     lastActivityTimestamp = Date.now();
-    if (!telemetrySamplingTimer) {
-        // Sample immediately rather than waiting for the first interval tick --
-        // short requests (a few hundred ms) can finish before a 1s-spaced tick
-        // ever fires, which previously meant zero samples for the common case.
-        takeOneTelemetrySample();
-        telemetrySamplingTimer = setInterval(async () => {
-            if (Date.now() - lastActivityTimestamp > ACTIVITY_TIMEOUT_MS) {
-                clearInterval(telemetrySamplingTimer);
-                telemetrySamplingTimer = null;
-                return; // leave activeRequestSamples as-is; takeRequestSamples() below reads it
-            }
-            await takeOneTelemetrySample();
-        }, SAMPLE_INTERVAL_MS);
-    }
+    // Immediate first sample -- short requests can finish before the shared
+    // 1s loop ever ticks. Cadence afterwards comes from the single unified
+    // telemetry loop below (no per-request interval anymore).
+    if (activeRequestSamples.length === 0) takeOneTelemetrySample();
+}
+
+// --- UNIFIED TELEMETRY LOOP ---
+// One poller for everything: polls monitor.py at the user-selected rate
+// (POST /api/telemetry/rate), caches the latest reading for the sidebar
+// (GET /api/telemetry/latest -- no nvidia-smi shellout per sidebar tick
+// anymore), and, while a request or bench run is active, records samples
+// into activeRequestSamples for the omni charts. Replaces three separate
+// pollers that all shelled out to nvidia-smi/amdgpu_top independently.
+let telemetryPollMs = 1000;
+let telemetryLoopTimer = null;
+let lastServerTelemetry = null;
+function startTelemetryLoop() {
+    if (telemetryLoopTimer) clearInterval(telemetryLoopTimer);
+    telemetryLoopTimer = setInterval(async () => {
+        if (telemetrySampleInFlight) return;
+        const stats = await fetchCurrentTelemetry();
+        if (!stats) return;
+        lastServerTelemetry = { t: Date.now(), stats };
+        const recording = benchRunning || (Date.now() - lastActivityTimestamp < ACTIVITY_TIMEOUT_MS);
+        if (recording) await takeOneTelemetrySample(stats);
+    }, telemetryPollMs);
 }
 
 // Called on a request's "total time" line -- hands back whatever samples have
@@ -1399,9 +1416,6 @@ const server = http.createServer(async (req, res) => {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ error: err.message }));
             }
-            if (!benchSampleTimer) {
-                benchSampleTimer = setInterval(() => { takeOneTelemetrySample().catch(() => {}); }, SAMPLE_INTERVAL_MS);
-            }
             let benchLineBuf = '';
             const onBenchData = (d) => {
                 benchLineBuf += d.toString();
@@ -1412,7 +1426,6 @@ const server = http.createServer(async (req, res) => {
             benchProcess.stdout.on('data', onBenchData);
             benchProcess.stderr.on('data', onBenchData);
             const stopBenchSampling = () => {
-                if (benchSampleTimer) { clearInterval(benchSampleTimer); benchSampleTimer = null; }
                 benchLastSamples = takeRequestSamples();
             };
             benchProcess.on('error', (err) => {
@@ -1432,6 +1445,18 @@ const server = http.createServer(async (req, res) => {
             });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ ok: true, command: benchLastCommand }));
+        }
+        else if (req.url === '/api/telemetry/latest' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify(lastServerTelemetry || { t: 0, stats: null }));
+        }
+        else if (req.url === '/api/telemetry/rate' && req.method === 'POST') {
+            let rateBody;
+            try { rateBody = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
+            telemetryPollMs = Math.max(250, Math.min(5000, parseInt(rateBody.ms) || 1000));
+            startTelemetryLoop();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify({ ok: true, ms: telemetryPollMs }));
         }
         else if (req.url === '/api/bench/note' && req.method === 'POST') {
             // Client-composed result blocks (e.g. Launch Sweep tables) appended
@@ -1714,6 +1739,7 @@ async function initServer() {
     // monitor.py printed 64KB (e.g. a stream of warnings) it would block on
     // write and its /stats endpoint would silently stall.
     pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname, stdio: 'ignore' });
+    startTelemetryLoop();
 
     const shutdownHandler = async () => {
         // Directly-spawned process -- must be killed explicitly or it's
