@@ -89,6 +89,8 @@
         .max-h-\[32rem\] { max-height: 32rem; }
         .hover\:bg-indigo-500:hover { background-color: #6366f1; }
         .hover\:bg-gray-700:hover { background-color: #374151; }
+        .break-all { word-break: break-all; }
+        .inline-block { display: inline-block; }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 font-sans h-screen flex flex-col md:flex-row overflow-hidden">
@@ -682,7 +684,7 @@
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 flex-1 min-h-[16rem]">
                 <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Output</h3>
-                <pre id="bench-output" class="text-[11px] font-mono text-gray-300 whitespace-pre overflow-x-auto overflow-y-auto max-h-[32rem]"></pre>
+                <div id="bench-output" class="text-[11px] font-mono text-gray-300 overflow-x-auto overflow-y-auto max-h-[32rem] space-y-0.5"></div>
             </div>
         </div>
 

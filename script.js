@@ -508,6 +508,7 @@ eventSource.onmessage = (e) => {
             if (!isNaN(used) && !isNaN(limit) && limit > 0) updateContextUI(used, limit);
         }
         else if (data.log.startsWith('BENCH_DONE:')) {
+            stopBenchProgress();
             setBenchRunningUI(false);
             if (benchAutoQueue.length > 0) runNextAutoBench();
             else if (benchAutoTotal > 0) { benchAutoTotal = 0; document.getElementById('bench-auto-status').textContent = 'matrix complete'; }
@@ -4015,14 +4016,123 @@ function setBenchRunningUI(running) {
     if (!running && benchAutoQueue.length === 0) document.getElementById('bench-status').textContent = '';
     else if (running && benchAutoTotal === 0) document.getElementById('bench-status').textContent = 'running...';
 }
+// Structured output: llama-bench emits markdown pipe-tables; render those as
+// real HTML tables (constant columns collapsed into a caption line so the
+// interesting columns fit without sideways scrolling) and style the log lines
+// around them. Re-renders are debounced since lines stream in fast.
+let benchOutputLines = [];
+let benchRenderTimer = null;
+// Progress: each completed llama-bench test prints one result row (they all
+// contain the +/- stddev marker), and the expected count is knowable from the
+// params (tests x depths), so the status line can show real progress.
+let benchRunStartedAt = 0;
+let benchRunRowsDone = 0;
+let benchRunRowsExpected = 0;
+let benchTickTimer = null;
+
 function appendBenchLine(line) {
-    const pre = document.getElementById('bench-output');
-    pre.textContent += (pre.textContent ? '\n' : '') + line;
-    pre.scrollTop = pre.scrollHeight;
+    benchOutputLines.push(line);
+    if (benchOutputLines.length > 4000) benchOutputLines = benchOutputLines.slice(-3000);
+    if (/\u00b1|±/.test(line) && /^\s*\|/.test(line)) { benchRunRowsDone++; updateBenchProgressText(); }
+    scheduleBenchRender();
+}
+function setBenchOutput(lines) {
+    benchOutputLines = (lines || []).slice();
+    scheduleBenchRender();
+}
+function scheduleBenchRender() {
+    if (benchRenderTimer) return;
+    benchRenderTimer = setTimeout(() => { benchRenderTimer = null; renderBenchOutput(); }, 200);
+}
+function benchElapsedText() {
+    if (!benchRunStartedAt) return '';
+    const s = Math.floor((Date.now() - benchRunStartedAt) / 1000);
+    return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
+}
+function updateBenchProgressText() {
+    const parts = [];
+    if (benchAutoTotal > 0) parts.push(`matrix ${benchAutoTotal - benchAutoQueue.length}/${benchAutoTotal}`);
+    if (benchRunRowsExpected > 0) parts.push(`results ${benchRunRowsDone}/${benchRunRowsExpected}`);
+    parts.push(benchElapsedText());
+    document.getElementById('bench-status').textContent = 'running · ' + parts.filter(Boolean).join(' · ');
+}
+function startBenchProgress(expectedRows) {
+    benchRunStartedAt = Date.now();
+    benchRunRowsDone = 0;
+    benchRunRowsExpected = expectedRows || 0;
+    if (benchTickTimer) clearInterval(benchTickTimer);
+    benchTickTimer = setInterval(updateBenchProgressText, 1000);
+    updateBenchProgressText();
+}
+function stopBenchProgress() {
+    if (benchTickTimer) clearInterval(benchTickTimer);
+    benchTickTimer = null;
+    benchRunStartedAt = 0;
+}
+// (p-values + n-values) x depths = expected result rows for one run
+function expectedBenchRows(nPrompt, nGen, depths) {
+    const tests = (nPrompt ? String(nPrompt).split(',').length : 0) + (nGen ? String(nGen).split(',').length : 0);
+    const d = depths ? String(depths).split(',').filter(Boolean).length : 1;
+    return tests * Math.max(d, 1);
+}
+function renderBenchLogLine(line) {
+    const esc = escapeHtml(line);
+    if (line.startsWith('===== ')) return `<div class="text-indigo-300 font-semibold pt-2">${esc}</div>`;
+    if (line.startsWith('$ ')) return `<div class="text-amber-400 whitespace-pre-wrap break-all">${esc}</div>`;
+    if (line.startsWith('[bench]') || line.startsWith('[matrix]')) return `<div class="text-orange-400">${esc}</div>`;
+    if (!line.trim()) return '<div class="h-1"></div>';
+    return `<div class="text-gray-500 whitespace-pre-wrap break-all">${esc}</div>`;
+}
+function renderBenchTable(lines) {
+    const rows = lines
+        .map(l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim()))
+        .filter(cells => !cells.every(c => /^:?-{2,}:?$/.test(c)));
+    if (rows.length === 0) return '';
+    const header = rows[0];
+    const dataRows = rows.slice(1);
+    if (dataRows.length === 0) return renderBenchLogLine(lines[0]);
+    // Collapse columns identical across every data row into a caption line.
+    const constCols = [], varCols = [];
+    header.forEach((h, ci) => {
+        const vals = dataRows.map(r => r[ci] ?? '');
+        if (dataRows.length > 1 && vals.every(v => v === vals[0])) constCols.push(ci);
+        else varCols.push(ci);
+    });
+    const caption = constCols.map(ci => `${escapeHtml(header[ci])}: <span class="text-gray-300">${escapeHtml(dataRows[0]?.[ci] ?? '')}</span>`).join(' · ');
+    const th = varCols.map(ci => `<th class="text-left font-medium px-2 py-1">${escapeHtml(header[ci])}</th>`).join('');
+    const trs = dataRows.map(r => '<tr class="border-b border-gray-800/50">' + varCols.map(ci => {
+        const v = r[ci] ?? '';
+        const numeric = /^[\d.,\s±\u00b1]+$/.test(v);
+        return `<td class="px-2 py-1 whitespace-nowrap ${numeric ? 'text-right text-green-300' : ''}">${escapeHtml(v)}</td>`;
+    }).join('') + '</tr>').join('');
+    return `<div class="my-2 border border-gray-800 rounded-lg overflow-hidden inline-block">
+        ${caption ? `<div class="px-2 py-1 text-[10px] text-gray-500 bg-gray-800/40">${caption}</div>` : ''}
+        <table class="text-[11px]"><thead><tr class="text-gray-500 border-b border-gray-800">${th}</tr></thead><tbody>${trs}</tbody></table>
+    </div>`;
+}
+function renderBenchOutput() {
+    const el = document.getElementById('bench-output');
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
+    const chunks = [];
+    let i = 0;
+    while (i < benchOutputLines.length) {
+        if (isTableLine(benchOutputLines[i])) {
+            const tbl = [];
+            while (i < benchOutputLines.length && isTableLine(benchOutputLines[i])) { tbl.push(benchOutputLines[i]); i++; }
+            chunks.push(renderBenchTable(tbl));
+        } else {
+            chunks.push(renderBenchLogLine(benchOutputLines[i]));
+            i++;
+        }
+    }
+    el.innerHTML = chunks.join('');
+    if (nearBottom) el.scrollTop = el.scrollHeight;
 }
 
 async function startBenchRun(body, { clearOutput = true } = {}) {
-    if (clearOutput) document.getElementById('bench-output').textContent = '';
+    if (clearOutput) setBenchOutput([]);
     try {
         const resp = await fetch('/api/bench/start', {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
@@ -4033,6 +4143,7 @@ async function startBenchRun(body, { clearOutput = true } = {}) {
             return false;
         }
         setBenchRunningUI(true);
+        startBenchProgress(expectedBenchRows(body.nPrompt, body.nGen, body.depths));
         return true;
     } catch (e) {
         document.getElementById('bench-status').textContent = 'failed to start: ' + e.message;
@@ -4061,9 +4172,7 @@ document.getElementById('tab-bench').addEventListener('click', async () => {
     // doesn't lose a run that's already in progress or just finished.
     try {
         const status = await (await fetch('/api/bench/status')).json();
-        const pre = document.getElementById('bench-output');
-        pre.textContent = (status.output || []).join('\n');
-        pre.scrollTop = pre.scrollHeight;
+        setBenchOutput(status.output || []);
         setBenchRunningUI(!!status.running);
     } catch (e) { /* leave as-is */ }
 });
@@ -4168,7 +4277,7 @@ document.getElementById('bench-auto-run').addEventListener('click', () => {
         };
     });
     benchAutoTotal = benchAutoQueue.length;
-    document.getElementById('bench-output').textContent = '';
+    setBenchOutput([]);
     runNextAutoBench();
 });
 
