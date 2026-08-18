@@ -44,6 +44,12 @@ let benchOutput = [];
 const BENCH_OUTPUT_MAX_LINES = 4000;
 let benchRunning = false;
 let benchLastCommand = '';
+// Telemetry during bench runs: same 1s sampler the request path uses, driven
+// by an explicit timer (bench output goes quiet for minutes during deep
+// prefills, so the activity-timeout sampler would stop mid-test). Snapshot on
+// exit so the buffer can't bleed into the next real request's series.
+let benchSampleTimer = null;
+let benchLastSamples = [];
 function benchLog(line) {
     benchOutput.push(line);
     if (benchOutput.length > BENCH_OUTPUT_MAX_LINES) benchOutput = benchOutput.slice(-3000);
@@ -1380,6 +1386,9 @@ const server = http.createServer(async (req, res) => {
                 res.writeHead(500, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ error: err.message }));
             }
+            if (!benchSampleTimer) {
+                benchSampleTimer = setInterval(() => { takeOneTelemetrySample().catch(() => {}); }, SAMPLE_INTERVAL_MS);
+            }
             let benchLineBuf = '';
             const onBenchData = (d) => {
                 benchLineBuf += d.toString();
@@ -1389,9 +1398,14 @@ const server = http.createServer(async (req, res) => {
             };
             benchProcess.stdout.on('data', onBenchData);
             benchProcess.stderr.on('data', onBenchData);
+            const stopBenchSampling = () => {
+                if (benchSampleTimer) { clearInterval(benchSampleTimer); benchSampleTimer = null; }
+                benchLastSamples = takeRequestSamples();
+            };
             benchProcess.on('error', (err) => {
                 benchRunning = false;
                 benchProcess = null;
+                stopBenchSampling();
                 benchLog(`[bench] error: ${err.message}`);
                 broadcastState('BENCH_DONE:error');
             });
@@ -1399,6 +1413,7 @@ const server = http.createServer(async (req, res) => {
                 if (benchLineBuf) benchLog(benchLineBuf);
                 benchRunning = false;
                 benchProcess = null;
+                stopBenchSampling();
                 benchLog(`[bench] exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
                 broadcastState(`BENCH_DONE:${code ?? 'signal'}`);
             });
@@ -1417,7 +1432,8 @@ const server = http.createServer(async (req, res) => {
         }
         else if (req.url === '/api/bench/status' && req.method === 'GET') {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            return res.end(JSON.stringify({ running: benchRunning, command: benchLastCommand, output: benchOutput }));
+            return res.end(JSON.stringify({ running: benchRunning, command: benchLastCommand, output: benchOutput,
+                samples: benchRunning ? activeRequestSamples : benchLastSamples }));
         }
 
         // --- FLAG REFERENCE (searchable popover) ---

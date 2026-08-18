@@ -4054,6 +4054,41 @@ function scheduleBenchRender() {
     if (benchRenderTimer) return;
     benchRenderTimer = setTimeout(() => { benchRenderTimer = null; renderBenchOutput(); }, 200);
 }
+// Bench telemetry omni chart -- same dataset builder as everywhere else.
+let benchOmniChartInst = null;
+function renderBenchOmni(samples) {
+    const canvas = document.getElementById('benchOmniChart');
+    if (!canvas) return;
+    if (!benchOmniChartInst) {
+        const opts = buildOmniOptions();
+        opts.scales.x.title.display = false;
+        benchOmniChartInst = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: { datasets: buildOmniDatasets([], 'rgba(74,222,128,1)') },
+            options: opts,
+            plugins: [omniPointLabelsPlugin]
+        });
+    }
+    benchOmniChartInst.data.datasets = buildOmniDatasets(samples || [], 'rgba(74,222,128,1)');
+    benchOmniChartInst.update('none');
+}
+let benchOmniPollTimer = null;
+function startBenchOmniPoll() {
+    if (benchOmniPollTimer) return;
+    benchOmniPollTimer = setInterval(async () => {
+        try {
+            const data = await (await fetch('/api/logs/active-samples')).json();
+            renderBenchOmni(data.samples || []);
+        } catch (e) {}
+    }, 2000);
+}
+function stopBenchOmniPoll() {
+    clearInterval(benchOmniPollTimer);
+    benchOmniPollTimer = null;
+    // one last fetch for the finished run's full series
+    fetch('/api/bench/status').then(r => r.json()).then(st => renderBenchOmni(st.samples || [])).catch(() => {});
+}
+
 function benchElapsedText() {
     if (!benchRunStartedAt) return '';
     const s = Math.floor((Date.now() - benchRunStartedAt) / 1000);
@@ -4073,11 +4108,13 @@ function startBenchProgress(expectedRows) {
     if (benchTickTimer) clearInterval(benchTickTimer);
     benchTickTimer = setInterval(updateBenchProgressText, 1000);
     updateBenchProgressText();
+    startBenchOmniPoll();
 }
 function stopBenchProgress() {
     if (benchTickTimer) clearInterval(benchTickTimer);
     benchTickTimer = null;
     benchRunStartedAt = 0;
+    stopBenchOmniPoll();
 }
 // (p-values + n-values) x depths = expected result rows for one run
 function expectedBenchRows(nPrompt, nGen, depths) {
@@ -4236,6 +4273,8 @@ document.getElementById('tab-bench').addEventListener('click', async () => {
         const status = await (await fetch('/api/bench/status')).json();
         setBenchOutput(status.output || []);
         setBenchRunningUI(!!status.running);
+        renderBenchOmni(status.samples || []);
+        if (status.running) startBenchOmniPoll();
     } catch (e) { /* leave as-is */ }
 });
 
