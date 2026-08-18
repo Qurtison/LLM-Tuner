@@ -689,6 +689,47 @@
                     </div>
                 </div>
             </div>
+            <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+                <div class="flex justify-between items-center">
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Launch A/B <span class="text-indigo-400 cursor-help font-normal normal-case" title="Benches the REAL llama-server including the speculative stack (llama-bench can't). Configure the launch sidebar as usual, Add snapshots it as a row; Run launches each config, sends the test prompt, harvests the stats, stops, and moves on.">?</span></h3>
+                    <span id="ab-status" class="text-[10px] text-gray-500"></span>
+                </div>
+                <div id="ab-rows" class="space-y-1"></div>
+                <div class="flex gap-2">
+                    <button id="ab-add-btn" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Snapshot the current launch-sidebar settings (including the raw command box) as an A/B row.">+ Add current launch config</button>
+                    <button id="ab-run-btn" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run A/B</button>
+                    <button id="ab-clear-btn" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded-md text-xs font-semibold transition-colors">Clear</button>
+                </div>
+                <div>
+                    <label class="block text-[10px] text-gray-400 mb-1">Test prompt <span class="text-indigo-400 cursor-help" title="Sent identically to every config. Use something representative of your real work -- ngram results especially depend on content (repetitive/code-heavy vs novel prose).">?</span></label>
+                    <textarea id="ab-prompt" rows="3" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono" placeholder="paste a representative task prompt here"></textarea>
+                </div>
+                <div class="grid grid-cols-4 gap-2">
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Gen tokens <span class="text-indigo-400 cursor-help" title="max_tokens per request -- fixed so every config generates comparable work.">?</span></label>
+                        <input type="text" id="ab-gen-tokens" value="512" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] text-gray-400 mb-1">Reps per config</label>
+                        <input type="text" id="ab-reps" value="2" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-xs font-mono">
+                    </div>
+                </div>
+                <div id="ab-results-card" class="hidden overflow-x-auto">
+                    <table class="w-full text-[11px]">
+                        <thead><tr class="text-gray-500 border-b border-gray-800">
+                            <th class="text-left font-medium px-2 py-1">Config</th>
+                            <th class="text-right font-medium px-2 py-1">Prompt tok</th>
+                            <th class="text-right font-medium px-2 py-1">Prompt t/s</th>
+                            <th class="text-right font-medium px-2 py-1">Gen tok</th>
+                            <th class="text-right font-medium px-2 py-1">Gen t/s</th>
+                            <th class="text-right font-medium px-2 py-1">Draft acc</th>
+                            <th class="text-right font-medium px-2 py-1">Wall (s)</th>
+                        </tr></thead>
+                        <tbody id="ab-results-body" class="text-gray-300"></tbody>
+                    </table>
+                </div>
+            </div>
+
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <div class="flex justify-between items-center mb-2">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Run Telemetry</h3>

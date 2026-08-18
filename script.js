@@ -449,6 +449,7 @@ let lastLaunchCommand = '';
 let lastKnownLaunchConfig = null;
 eventSource.onmessage = (e) => {
     const data = JSON.parse(e.data);
+    lastKnownServerState = data.state || lastKnownServerState;
     if (data.launchCommand) lastLaunchCommand = data.launchCommand;
     if (data.launchConfig) lastKnownLaunchConfig = data.launchConfig;
     if (data.launchConfig) populateLaunchConfig(data.launchConfig);
@@ -3766,6 +3767,7 @@ function stopSessionOmniRefresh() {
 // its backfilled array -- it re-backfills fresh from the CSV each time you
 // switch to it, so it doesn't need live event-driven upkeep.
 function handleMonitorCompletion(payload) {
+    if (abCaptureResolve) { const r = abCaptureResolve; abCaptureResolve = null; r(payload); }
     updateLiveRequestCard('idle', {});
     monitorDataPoints.push({ time: payload.timestamp || Date.now(), promptTps: payload.promptTps, genTps: payload.genTps });
     if (monitorDataPoints.length > SESSION_HISTORY_CAP) monitorDataPoints.shift();
@@ -4444,3 +4446,151 @@ try {
     const savedWidth = localStorage.getItem('cluster_sidebar_width');
     if (savedWidth) sidebar.style.width = savedWidth;
 } catch(e) {}
+
+
+// --- Launch A/B harness: snapshot the sidebar launch config into rows, then
+// run each row for real (launch llama-server, wait ready, fire the test
+// prompt, harvest the COMPLETION stats, stop, next). llama-bench can't
+// exercise speculative decoding; this can.
+let lastKnownServerState = 'stopped';
+let abCaptureResolve = null;
+let abRows = [];
+let abRunning = false;
+
+function abPersist() {
+    try {
+        localStorage.setItem('launch_ab', JSON.stringify({
+            rows: abRows,
+            prompt: document.getElementById('ab-prompt').value,
+            genTokens: document.getElementById('ab-gen-tokens').value,
+            reps: document.getElementById('ab-reps').value,
+        }));
+    } catch (e) {}
+}
+function abRestore() {
+    try {
+        const saved = JSON.parse(localStorage.getItem('launch_ab') || 'null');
+        if (!saved) return;
+        abRows = saved.rows || [];
+        if (saved.prompt) document.getElementById('ab-prompt').value = saved.prompt;
+        if (saved.genTokens) document.getElementById('ab-gen-tokens').value = saved.genTokens;
+        if (saved.reps) document.getElementById('ab-reps').value = saved.reps;
+        abRenderRows();
+        abRenderResults();
+    } catch (e) {}
+}
+function abLabelFor(config) {
+    const model = (config.modelPath || '').split('/').pop().replace(/\.gguf$/, '');
+    const parts = [model];
+    parts.push(config.specType ? `spec=${config.specType}` : 'no-spec');
+    if (config.specType) parts.push(`nmax=${config.specDraftNMax ?? '?'}`);
+    if (config.specNgramSizeM != null) parts.push(`M=${config.specNgramSizeM}`);
+    if (config.specNgramSizeN != null) parts.push(`N=${config.specNgramSizeN}`);
+    if (config.specNgramMinHits != null) parts.push(`hits=${config.specNgramMinHits}`);
+    if (config.tensorSplit != null) parts.push(`ts=${config.tensorSplit}`);
+    return parts.join(' ');
+}
+function abRenderRows() {
+    const el = document.getElementById('ab-rows');
+    if (abRows.length === 0) { el.innerHTML = '<span class="text-gray-600 text-[11px]">no configs queued -- set up the launch sidebar, then Add</span>'; return; }
+    el.innerHTML = abRows.map((r, i) => `
+        <div class="flex items-center gap-2 text-[11px] ${r.status === 'running' ? 'text-amber-300' : r.status === 'failed' ? 'text-orange-400' : r.status === 'done' ? 'text-green-400' : 'text-gray-300'}">
+            <span class="text-gray-600">${i + 1}.</span>
+            <span class="font-mono flex-1">${escapeHtml(r.label)}</span>
+            <span class="text-gray-600">${r.status || 'queued'}</span>
+            <button data-abdel="${i}" class="text-gray-600 hover:text-red-400 px-1" ${abRunning ? 'disabled' : ''}>✕</button>
+        </div>`).join('');
+    el.querySelectorAll('[data-abdel]').forEach(b => b.addEventListener('click', () => {
+        abRows.splice(parseInt(b.dataset.abdel), 1); abPersist(); abRenderRows();
+    }));
+}
+function abRenderResults() {
+    const tbody = document.getElementById('ab-results-body');
+    const results = abRows.flatMap(r => (r.results || []).map(res => ({ label: r.label, ...res })));
+    document.getElementById('ab-results-card').classList.toggle('hidden', results.length === 0);
+    tbody.innerHTML = results.map(r => `
+        <tr class="border-b border-gray-800/50">
+            <td class="px-2 py-1 font-mono text-[10px]">${escapeHtml(r.label)}</td>
+            <td class="px-2 py-1 text-right font-mono">${r.promptTokens ?? '--'}</td>
+            <td class="px-2 py-1 text-right font-mono text-blue-400">${r.promptTps != null ? Number(r.promptTps).toFixed(1) : '--'}</td>
+            <td class="px-2 py-1 text-right font-mono">${r.genTokens ?? '--'}</td>
+            <td class="px-2 py-1 text-right font-mono text-green-400">${r.genTps != null ? Number(r.genTps).toFixed(1) : '--'}</td>
+            <td class="px-2 py-1 text-right font-mono text-purple-400">${r.draftAcceptRate != null ? (r.draftAcceptRate * 100).toFixed(0) + '%' : '--'}</td>
+            <td class="px-2 py-1 text-right font-mono">${r.wallTime != null ? Number(r.wallTime).toFixed(1) : '--'}</td>
+        </tr>`).join('');
+}
+function abStatus(msg) { document.getElementById('ab-status').textContent = msg; }
+
+document.getElementById('ab-add-btn').addEventListener('click', () => {
+    const config = buildConfigFromUI();
+    config.rawCommand = document.getElementById('raw-launch-command').value.trim();
+    abRows.push({ label: abLabelFor(config), config, status: 'queued', results: [] });
+    abPersist(); abRenderRows();
+});
+
+async function abWaitForState(pred, timeoutMs, failPred) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        if (pred()) return true;
+        if (failPred && failPred(Date.now() - t0)) return false;
+        await new Promise(r => setTimeout(r, 2000));
+    }
+    return false;
+}
+
+document.getElementById('ab-run-btn').addEventListener('click', async () => {
+    if (abRunning) return;
+    const prompt = document.getElementById('ab-prompt').value.trim();
+    if (!prompt) { abStatus('write a test prompt first'); return; }
+    if (abRows.filter(r => r.status !== 'done').length === 0) { abStatus('nothing queued'); return; }
+    const maxTokens = parseInt(document.getElementById('ab-gen-tokens').value) || 512;
+    const reps = Math.max(1, parseInt(document.getElementById('ab-reps').value) || 1);
+    abRunning = true;
+    document.getElementById('ab-run-btn').disabled = true;
+    abPersist();
+    for (const row of abRows) {
+        if (row.status === 'done') continue;
+        row.status = 'running'; row.results = []; abRenderRows();
+        abStatus(`launching: ${row.label}`);
+        try {
+            await fetch('/api/stop', { method: 'POST' }).catch(() => {});
+            await new Promise(r => setTimeout(r, 3000));
+            const startRes = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row.config) });
+            if (!startRes.ok) throw new Error('start refused');
+            const ready = await abWaitForState(
+                () => lastKnownServerState === 'ready',
+                15 * 60 * 1000,
+                (elapsed) => elapsed > 20000 && lastKnownServerState === 'stopped');
+            if (!ready) throw new Error('model never became ready (launch failed?)');
+            for (let rep = 0; rep < reps; rep++) {
+                abStatus(`${row.label} -- request ${rep + 1}/${reps}`);
+                const completionArrived = new Promise(res => { abCaptureResolve = res; });
+                const resp = await fetch('http://localhost:8080/v1/chat/completions', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model: 'ab-test', messages: [{ role: 'user', content: prompt }], max_tokens: maxTokens, stream: false })
+                });
+                if (!resp.ok) throw new Error(`request failed (${resp.status})`);
+                await resp.json();
+                // stats arrive via the COMPLETION broadcast shortly after
+                const payload = await Promise.race([completionArrived, new Promise(r => setTimeout(() => r(null), 15000))]);
+                abCaptureResolve = null;
+                if (payload) { row.results.push(payload); abRenderResults(); abPersist(); }
+            }
+            row.status = 'done';
+        } catch (e) {
+            row.status = 'failed';
+            row.error = e.message;
+            abStatus(`${row.label}: ${e.message}`);
+        }
+        abRenderRows(); abPersist();
+    }
+    await fetch('/api/stop', { method: 'POST' }).catch(() => {});
+    abRunning = false;
+    document.getElementById('ab-run-btn').disabled = false;
+    abStatus('A/B complete -- server stopped');
+});
+document.getElementById('ab-clear-btn').addEventListener('click', () => {
+    if (abRunning) return;
+    abRows = []; abPersist(); abRenderRows(); abRenderResults();
+});
+abRestore();
