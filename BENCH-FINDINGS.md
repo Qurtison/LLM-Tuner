@@ -76,16 +76,26 @@ CUDA0/Vulkan2, Q6, f16 KV vs q8_0 KV:
 
 CUDA0/Vulkan2, Q6, q8_0 KV — pp8192 @ d0 / d32k / d98k:
 
-| ubatch | pp results | vs default |
+| config | pp8192 d0 / d32k / d98k | vs default |
 |---|---|---|
-| 512 (default) | 962 / 619 / 353 | — |
-| 1024 | 840 / 536 / 304 | **−13% everywhere** |
-| 2048 | 664 / 434 / 242 | **−31%** |
+| ub 512, b 2048 (defaults) | 962 / 619 / 353 | — |
+| ub 1024 | 840 / 536 / 304 | −13% everywhere |
+| ub 2048 | 664 / 434 / 242 | −31% |
+| **ub 256** | 993 / 638 / 372 | +3–5% |
+| **b 4096** (ub default) | **1052 / 675 / 381** | **+8–9%** |
+| ub 256 + b 4096 | 1026 / 666 / **389** | +7–10% |
+
+Generation is unchanged in every case (~18.6 / 17.0 / 14.1 t/s — batch knobs are
+prefill-only levers here).
 
 Single-GPU folklore ("raise ubatch for prefill") inverts on layer-split multi-GPU:
-llama.cpp pipelines ubatches across GPUs (GGML_SCHED_MAX_COPIES=4); bigger chunks mean
-coarser overlap and larger per-boundary transfers (XTX is on TB4).
-- PENDING: `-ub 256` (early results promising), `-b 4096` (deeper chunk pool per decode call).
+llama.cpp pipelines ubatches across GPUs (GGML_SCHED_MAX_COPIES=4). Bigger chunks =
+coarser overlap and larger per-boundary transfers (XTX is on TB4) → ub 1024/2048 lose
+badly. Going the other way helps: smaller chunks (ub 256) +3–5%, and a deeper chunk pool
+per decode call (**b 4096: +8–9%, the single best free win**) lets the scheduler keep the
+pipeline full. The stack (ub 256 + b 4096) only edges ahead at 98k depth (+2%, near
+noise). **Adopted for the daily driver: `-b 4096`, ubatch left at default.**
+- PENDING: `-b 4096` stacked with f16 KV (the two biggest prefill wins should compound).
 
 ## 6. Row split (`-sm row`) is unavailable on this rig — by construction
 
@@ -155,7 +165,8 @@ workload it's a wash; 40/60 also preserves VRAM headroom on the 16GB card. Split
 
 ## Open items
 
-- [ ] `-ub 256` (in flight), `-b 4096`, possible `-ub 256 -b 4096`
+- [x] `-ub 256` / `-b 4096` / stacked — measured; `-b 4096` adopted (§5)
+- [ ] `-b 4096` + f16 KV stacked
 - [ ] Mixed KV: `-ctk q8_0 -ctv f16` vs `-ctk f16 -ctv q8_0`
 - [ ] Spec stack: hits=2 + M=24 stacked; nmax=4; copy-heavy prompt sweep
 - [ ] Rebuild at current master; re-measure MTP prefill tax and CUDA q8_0-KV decode
