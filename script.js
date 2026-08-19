@@ -424,7 +424,22 @@ async function loadHistoricalStats() {
 loadHistoricalStats();
 
 // --- Server SSE State ---
-let eventSource = new EventSource('/api/status');
+let eventSource = null;
+let lastSseAt = Date.now();
+function connectSSE() {
+    if (eventSource) { try { eventSource.close(); } catch (e) {} }
+    eventSource = new EventSource('/api/status');
+    eventSource.onmessage = handleSseMessage;
+}
+// Watchdog: EventSource usually auto-reconnects, but a silently-dead stream
+// means Monitor stops adding rows with no visible symptom. The /api/status
+// handler pushes a state broadcast on connect, so a forced reconnect always
+// produces a message and resets the clock.
+setInterval(() => {
+    if (document.visibilityState === 'visible' && Date.now() - lastSseAt > 45000) {
+        connectSSE();
+    }
+}, 15000);
 window.addEventListener('beforeunload', () => eventSource.close());
 
 // --- GLOBAL TRACKERS (Must be outside the handler) ---
@@ -447,9 +462,11 @@ let lastLaunchCommand = '';
 // populateLaunchConfig), since it's what gets written to the CSV's
 // config_json column per completed prompt -- see the /api/log call site.
 let lastKnownLaunchConfig = null;
-eventSource.onmessage = (e) => {
+function handleSseMessage(e) {
     const data = JSON.parse(e.data);
+    lastSseAt = Date.now();
     lastKnownServerState = data.state || lastKnownServerState;
+    if (data.model) lastKnownModelName = data.model;
     if (data.launchCommand) lastLaunchCommand = data.launchCommand;
     if (data.launchConfig) lastKnownLaunchConfig = data.launchConfig;
     if (data.launchConfig) populateLaunchConfig(data.launchConfig);
@@ -701,7 +718,8 @@ eventSource.onmessage = (e) => {
             if (emptyStateEl) emptyStateEl.classList.remove('hidden');
         }, 600);
     }
-};
+}
+connectSSE();
 
 // --- Item #22: Persist last launch config to localStorage ---
 const LAST_LAUNCH_CONFIG_KEY = 'last_launch_config';
@@ -1478,6 +1496,8 @@ function handlePrefillProgress(progress, tps, nTokens) {
         livePrefillProgress = progress;
     }
     updateLiveRequestCard('prefill', { progress, tps, nTokens });
+    liveMonitorRow = { ...(liveMonitorRow || { startedAt: Date.now() }), live: true, model: lastKnownModelName, promptTokens: isNaN(nTokens) ? null : nTokens, promptTps: isNaN(tps) ? null : tps };
+    if (isMonitorModeActive) renderMonitorTable();
     const abLive = document.getElementById('ab-live');
     if (abLive) abLive.textContent = `prefill ${(progress * 100).toFixed(1)}% — ${isNaN(nTokens) ? '?' : nTokens.toLocaleString()} tok @ ${isNaN(tps) ? '?' : tps.toFixed(1)} t/s`;
     const pct = isNaN(progress) ? 0 : (progress * 100).toFixed(1);
@@ -1530,6 +1550,8 @@ function handleGenProgress(tps, nDecoded) {
     // status-indicator is owned by submitPrompt's tpsLoop -- see the matching
     // note in handlePrefillProgress above.
     updateLiveRequestCard('gen', { tps, nDecoded });
+    liveMonitorRow = { ...(liveMonitorRow || { startedAt: Date.now() }), live: true, model: lastKnownModelName, genTokens: isNaN(nDecoded) ? null : nDecoded, genTps: isNaN(tps) ? null : tps };
+    if (isMonitorModeActive) renderMonitorTable();
     const abLiveG = document.getElementById('ab-live');
     if (abLiveG) abLiveG.textContent = `generating ${isNaN(nDecoded) ? '?' : nDecoded.toLocaleString()} tok @ ${isNaN(tps) ? '?' : tps.toFixed(1)} t/s`;
 
@@ -3948,8 +3970,8 @@ function renderRequestTable(rows, tbodyId, emptyId, clickVarName) {
     // (clickVarName) so switching tabs can't clobber the other's row index.
     window[clickVarName] = displayRows;
     tbody.innerHTML = displayRows.map((r, i) => `
-        <tr class="border-b border-gray-800/50 hover:bg-gray-800/30 cursor-pointer" onclick="expandMonitorRequestChart(window.${clickVarName}[${i}].runId, window.${clickVarName}[${i}].metrics)" title="Click for this request's telemetry">
-            <td class="px-4 py-1.5 text-gray-500">${r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--'}${r.aborted ? ' <span class="text-orange-400 cursor-help" title="Request was canceled by the client before finishing (agent tool-call aborts, user interrupts). Counts are the last values observed live, not final totals.">⚠</span>' : ''}</td>
+        <tr class="border-b border-gray-800/50 ${r.live ? 'text-amber-300/90' : 'hover:bg-gray-800/30 cursor-pointer'}" ${r.live ? '' : `onclick="expandMonitorRequestChart(window.${clickVarName}[${i}].runId, window.${clickVarName}[${i}].metrics)" title="Click for this request's telemetry"`}>
+            <td class="px-4 py-1.5 text-gray-500">${r.live ? '<span class="inline-block h-2 w-2 rounded-full bg-amber-400 animate-pulse"></span> live' : (r.timestamp ? new Date(r.timestamp).toLocaleTimeString() : '--')}${r.aborted ? ' <span class="text-orange-400 cursor-help" title="Request was canceled by the client before finishing (agent tool-call aborts, user interrupts). Counts are the last values observed live, not final totals.">⚠</span>' : ''}</td>
             <td class="px-4 py-1.5 truncate max-w-[220px]" title="${escapeHtml(r.model || '')}">${escapeHtml(r.model || '--')}</td>
             <td class="px-4 py-1.5 text-right font-mono">${r.promptTokens ?? '--'}</td>
             <td class="px-4 py-1.5 text-right font-mono text-blue-400">${r.promptTps != null ? Number(r.promptTps).toFixed(1) : '--'}</td>
@@ -3961,7 +3983,11 @@ function renderRequestTable(rows, tbodyId, emptyId, clickVarName) {
     `).join('');
 }
 function renderMonitorTable() {
-    renderRequestTable(monitorRequestRows, 'monitor-requests-body', 'monitor-requests-empty', '__monitorRowsForClick');
+    let rows = monitorRequestRows;
+    if (liveMonitorRow) {
+        rows = [...monitorRequestRows, { ...liveMonitorRow, timestamp: liveMonitorRow.startedAt, wallTime: (Date.now() - liveMonitorRow.startedAt) / 1000 }];
+    }
+    renderRequestTable(rows, 'monitor-requests-body', 'monitor-requests-empty', '__monitorRowsForClick');
 }
 
 // --- Session-wide continuous omni graph (top of Monitor tab) ---
@@ -4088,7 +4114,10 @@ async function renderSessionOmniPreview() {
 // some OTHER client, e.g. opencode/curl).
 function startSessionOmniRefresh() {
     if (sessionOmniRefreshTimer) return;
-    sessionOmniRefreshTimer = setInterval(renderSessionOmniPreview, Math.max(500, currentTelemetryRateMs));
+    sessionOmniRefreshTimer = setInterval(() => {
+        renderSessionOmniPreview();
+        if (liveMonitorRow) renderMonitorTable(); // keeps the live row's wall clock ticking
+    }, Math.max(500, currentTelemetryRateMs));
 }
 function stopSessionOmniRefresh() {
     clearInterval(sessionOmniRefreshTimer);
@@ -4101,9 +4130,13 @@ function stopSessionOmniRefresh() {
 // render cost for a hidden tab). History is intentionally NOT updated here in
 // its backfilled array -- it re-backfills fresh from the CSV each time you
 // switch to it, so it doesn't need live event-driven upkeep.
+let lastKnownModelName = '';
+// In-flight request shown as a live, ticking row at the top of Monitor's table
+let liveMonitorRow = null;
 let pendingDraftStatsEl = null;
 let pendingDraftStatsExpiry = 0;
 function handleMonitorCompletion(payload) {
+    liveMonitorRow = null; // the real row replaces the live one
     if (abCaptureResolve) { const r = abCaptureResolve; abCaptureResolve = null; r(payload); }
     // Interactive-mode draft acceptance summary: attach to the bubble whose
     // stream just finished (guarded by a freshness window so a completion from
