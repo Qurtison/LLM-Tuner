@@ -4836,6 +4836,7 @@ function abLabelFor(config) {
     if (config.specNgramSizeN != null) parts.push(`N=${config.specNgramSizeN}`);
     if (config.specNgramMinHits != null) parts.push(`hits=${config.specNgramMinHits}`);
     if (config.tensorSplit != null) parts.push(`ts=${config.tensorSplit}`);
+    if (config.argString) parts.push(config.argString); // extra args are part of the identity
     return parts.join(' ');
 }
 function abRenderRows() {
