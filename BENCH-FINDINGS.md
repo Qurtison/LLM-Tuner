@@ -71,8 +71,9 @@ CUDA0/Vulkan2, Q6, f16 KV vs q8_0 KV:
 - **Mixed KV types are a kernel-fallback pit**: `-ctk q8_0 -ctv f16` prefilled at
   **71 t/s** (13× collapse vs 962; gen unaffected at 17.9) — the FA prefill path
   evidently requires uniform KV types and silently falls back otherwise. Mirror
-  (`-ctk f16 -ctv q8_0`) check: PENDING (quick d0 run). Unless the mirror surprises,
-  the KV choice is strictly binary: q8_0-both at 262k vs f16-both at ~190k.
+  (`-ctk f16 -ctv q8_0`): also a dud (209 t/s pp2048, ~4× below par). **The KV choice
+  is strictly binary: q8_0-both at 262k vs f16-both at ~190k max.** Production
+  confirmation of the f16 win: PENDING (srv-f16kv sweep row).
 - Related hard constraint: **quantized KV requires flash attention** — `-fa 0` with q8_0 KV
   fails at context creation. FA is effectively mandatory.
 
