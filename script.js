@@ -1850,6 +1850,10 @@ async function submitPrompt() {
                             const finalAnsTime = ((Date.now() - startTime) / 1000) - timeToFirstToken - timeToFirstContent;
                             answerMetrics = { time: finalAnsTime.toFixed(1), tokens: answerTokenCount, tps: (answerTokenCount/finalAnsTime).toFixed(1) };
                             timelineEls.aLbl.innerHTML = `Answer: <span class="val text-gray-200">${answerMetrics.time}s | ${answerMetrics.tokens}t | ${answerMetrics.tps} t/s</span>`;
+                            // The draft-acceptance summary arrives ~0.5s later on the
+                            // COMPLETION broadcast -- register this bubble to receive it.
+                            pendingDraftStatsEl = timelineEls.aLbl.parentElement;
+                            pendingDraftStatsExpiry = Date.now() + 8000;
                             
                             // Final static render of the sparkline: proportional widths by time, real tps curve for prefill
                             const totalTime = timeToFirstToken + timeToFirstContent + finalAnsTime;
@@ -3460,6 +3464,7 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
         { label: `VRAM ${A} (GB)`, data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
         { label: `VRAM ${B} (GB)`, data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
+        { label: 'Draft Accept (%)', data: toPoints(metrics, 'draftAccPct'), borderColor: 'rgba(192,132,252,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0, borderDash: [6,3], yAxisID: 'y2', spanGaps: false },
         { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
     ];
 }
@@ -3997,8 +4002,22 @@ function stopSessionOmniRefresh() {
 // render cost for a hidden tab). History is intentionally NOT updated here in
 // its backfilled array -- it re-backfills fresh from the CSV each time you
 // switch to it, so it doesn't need live event-driven upkeep.
+let pendingDraftStatsEl = null;
+let pendingDraftStatsExpiry = 0;
 function handleMonitorCompletion(payload) {
     if (abCaptureResolve) { const r = abCaptureResolve; abCaptureResolve = null; r(payload); }
+    // Interactive-mode draft acceptance summary: attach to the bubble whose
+    // stream just finished (guarded by a freshness window so a completion from
+    // some other client can't stamp a stale bubble).
+    if (pendingDraftStatsEl && Date.now() < pendingDraftStatsExpiry) {
+        if (payload.draftAcceptRate != null) {
+            const div = document.createElement('div');
+            div.className = 'text-purple-400/80 font-mono';
+            div.innerHTML = `Draft: <span class="val text-gray-200">${(payload.draftAcceptRate * 100).toFixed(0)}% accepted (${payload.draftAccepted ?? '?'}/${payload.draftGenerated ?? '?'}${payload.draftMeanLen != null ? `, mean run ${Number(payload.draftMeanLen).toFixed(2)}` : ''})</span>`;
+            pendingDraftStatsEl.appendChild(div);
+        }
+        pendingDraftStatsEl = null;
+    }
     const abLiveC = document.getElementById('ab-live');
     if (abLiveC && abLiveC.textContent) abLiveC.textContent = `last: ${payload.genTokens ?? '?'} tok gen @ ${payload.genTps != null ? Number(payload.genTps).toFixed(1) : '?'} t/s${payload.draftAcceptRate != null ? `, draft acc ${(payload.draftAcceptRate * 100).toFixed(0)}%` : ''}`;
     updateLiveRequestCard('idle', {});

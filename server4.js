@@ -1068,6 +1068,9 @@ async function logCompletedRequest(timing, samples, completedAt) {
                 } else {
                     s.prefillTps = null;
                     s.genTps = s.genTps ?? timing.genTps ?? null;
+                    // acceptance is only known at request end -- stamp it flat
+                    // across the gen phase so per-request charts can show it
+                    s.draftAccPct = timing.draftAcceptRate != null ? +(timing.draftAcceptRate * 100).toFixed(1) : null;
                 }
             }
         }
