@@ -105,8 +105,11 @@ noise).
   llama-bench's pp path and the server's prompt-processing path evidently schedule
   differently. Harmless to keep the flag, but it is not the free +9% in production that
   the bench suggested. Investigate someday.
-- PENDING: `-b 4096` stacked with f16 KV in llama-bench (and whether f16 KV's win
-  transfers to the server, given the -b lesson).
+- **f16 KV server transfer (final, new model revision)**: 565.8 prefill / 25.0 gen vs
+  q8_0's 526 / 25.1 on the same 22k prompt — **+7.5% prefill, gen unchanged** (about
+  half of what the bench promised at that depth; better transfer than -b's zero).
+  Priced against the 3.4:1 gen-dominated workload that's ~+2% net wall time, for the
+  cost of 262k → 150k context. **Decision: q8_0 KV at 262k stays. KV chapter closed.**
 
 ## 6. Row split (`-sm row`) is unavailable on this rig — by construction
 
@@ -205,11 +208,10 @@ workload it's a wash; 40/60 also preserves VRAM headroom on the 16GB card. Split
 ## Open items
 
 - [x] `-ub 256` / `-b 4096` / stacked — measured in llama-bench; server transfer FAILED (§5)
-- [ ] `-b 4096` + f16 KV stacked
 - [ ] Mixed KV: `-ctk q8_0 -ctv f16` vs `-ctk f16 -ctv q8_0`
 - [x] Spec knob sweep post-rebuild — defaults win everywhere (§7)
 - [x] DSpark head — dspark mode confirmed correct pipeline (33% acc) but still 3× slower
       than champion; dropped (§7)
 - [x] Rebuilt at `6d0549831` — MTP tax unchanged (§8); spec gen +13%, tuning deltas now noise (§7)
 - [ ] File upstream issue: MTP catch-up decode ~2× prefill cost on non-mem-shared archs
-- [ ] Real-workload confirmation of f16-KV-at-reduced-context vs q8_0-at-262k
+- [x] f16-KV server confirmation — +7.5% prefill only; q8_0@262k final (§4/§5)

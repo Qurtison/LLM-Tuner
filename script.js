@@ -3464,7 +3464,6 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
         { label: `VRAM ${A} (GB)`, data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
         { label: `VRAM ${B} (GB)`, data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
-        { label: 'Draft Accept (%)', data: toPoints(metrics, 'draftAccPct'), borderColor: 'rgba(192,132,252,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0, borderDash: [6,3], yAxisID: 'y2', spanGaps: false },
         { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
     ];
 }
