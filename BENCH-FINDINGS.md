@@ -147,7 +147,11 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
   collapsed to ~4 t/s (drafting + cross-device overhead with zero accepted tokens),
   prefill ~470. Near-zero acceptance means the head's outputs don't match this
   target (bad conversion, wrong revision, or dflash/dspark pipeline mismatch), not
-  an overhead problem. Champion stands: `draft-mtp,ngram-map-k4v`, defaults.
+  an overhead problem.
+- Retry with `--spec-type draft-dspark` (overriding the GGUF's dflash tag): runs, and
+  acceptance jumps 1–5% → 33% — confirming the pipeline mismatch — but 33% can't pay
+  for cross-device drafting overhead: 7.9 t/s. Head judged mediocre for this target;
+  dropped after two strikes. **Champion stands: `draft-mtp,ngram-map-k4v`, defaults.**
 
 ## 8. MTP's hidden prefill tax (~1.9×) — mechanism found
 
@@ -199,8 +203,8 @@ workload it's a wash; 40/60 also preserves VRAM headroom on the 16GB card. Split
 - [ ] `-b 4096` + f16 KV stacked
 - [ ] Mixed KV: `-ctk q8_0 -ctv f16` vs `-ctk f16 -ctv q8_0`
 - [x] Spec knob sweep post-rebuild — defaults win everywhere (§7)
-- [ ] DSpark head retry: `--spec-type draft-dspark` (vs auto-detected dflash), and/or the
-      alternate erlidev GGUF conversion; two strikes then drop it
+- [x] DSpark head — dspark mode confirmed correct pipeline (33% acc) but still 3× slower
+      than champion; dropped (§7)
 - [x] Rebuilt at `6d0549831` — MTP tax unchanged (§8); spec gen +13%, tuning deltas now noise (§7)
 - [ ] File upstream issue: MTP catch-up decode ~2× prefill cost on non-mem-shared archs
 - [ ] Real-workload confirmation of f16-KV-at-reduced-context vs q8_0-at-262k
