@@ -94,8 +94,14 @@ coarser overlap and larger per-boundary transfers (XTX is on TB4) → ub 1024/20
 badly. Going the other way helps: smaller chunks (ub 256) +3–5%, and a deeper chunk pool
 per decode call (**b 4096: +8–9%, the single best free win**) lets the scheduler keep the
 pipeline full. The stack (ub 256 + b 4096) only edges ahead at 98k depth (+2%, near
-noise). **Adopted for the daily driver: `-b 4096`, ubatch left at default.**
-- PENDING: `-b 4096` stacked with f16 KV (the two biggest prefill wins should compound).
+noise).
+- **Transfer caveat: the `-b 4096` gain did NOT reproduce in real llama-server prefill**
+  (22k cold prompt: 522 vs 532 t/s with the spec stack; 965 vs 973 without — no change).
+  llama-bench's pp path and the server's prompt-processing path evidently schedule
+  differently. Harmless to keep the flag, but it is not the free +9% in production that
+  the bench suggested. Investigate someday.
+- PENDING: `-b 4096` stacked with f16 KV in llama-bench (and whether f16 KV's win
+  transfers to the server, given the -b lesson).
 
 ## 6. Row split (`-sm row`) is unavailable on this rig — by construction
 
@@ -120,9 +126,14 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
 | mtp + k4v, **M=24** | **29.6** | 50% |
 
 - No-spec baseline ≈ 17–18 t/s → the tuned stack is **~+70% generation**.
-- **Constraining ngram beats amplifying it**: rejected draft tokens waste verify compute;
-  `min-hits=2` (propose only twice-seen n-grams) and `M=24` (shorter drafts) each ~+17%
-  over defaults. Untested: both stacked; nmax=4.
+- **Constraining ngram beats amplifying it** (old build): rejected draft tokens waste
+  verify compute; `min-hits=2` and `M=24` (shorter drafts) each ~+17% over defaults.
+- **Rebuild caveat (master `6d0549831`)**: re-running the same sweep, defaults improved to
+  28.3 t/s (+13% from the rebuild alone) and the tuning deltas compressed into
+  run-to-run noise (defaults 28.3, hits=2 25.9, M=24 27.1 — single reps at temp 1).
+  The upstream spec refactors appear to have absorbed much of what the constraint
+  tuning was buying. Defaults are fine on current master; re-tune only with multi-rep
+  runs if chasing the last few percent.
 - ngram alone ≈ no-spec on novel content; it shines on regurgitation (one compaction-style
   request hit **100% acceptance → 85.7 t/s**, ~4× the bandwidth ceiling, on a 27B).
 - Acceptance % is a diagnostic, not a target — tune on gen t/s.
@@ -138,9 +149,10 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
 - Net accounting on 4 days of real usage (139 requests): prefill 1.45h vs generation
   4.94h (**3.4:1 gen-dominated**). Dropping MTP would refund ~40min of prefill but cost
   48–96min of gen. **Keeping MTP wins decisively** despite the tax.
-- This looks upstream-fixable (async/fused catch-up, or mem-sharing support per-arch).
-  Our build is 242 commits behind master with active speculative refactors — re-measure
-  after rebuild. PENDING.
+- **Re-measured after rebuilding at master `6d0549831` (2026-08-18): the tax is
+  unchanged** — prefill 532/522 t/s with MTP vs 973/965 without (~1.85×). Upstream has
+  not addressed the catch-up-decode cost. Candidate for an upstream issue with these
+  numbers and the mechanism above.
 
 ## 9. Tensor split sensitivity: low
 
@@ -165,9 +177,10 @@ workload it's a wash; 40/60 also preserves VRAM headroom on the 16GB card. Split
 
 ## Open items
 
-- [x] `-ub 256` / `-b 4096` / stacked — measured; `-b 4096` adopted (§5)
+- [x] `-ub 256` / `-b 4096` / stacked — measured in llama-bench; server transfer FAILED (§5)
 - [ ] `-b 4096` + f16 KV stacked
 - [ ] Mixed KV: `-ctk q8_0 -ctv f16` vs `-ctk f16 -ctv q8_0`
 - [ ] Spec stack: hits=2 + M=24 stacked; nmax=4; copy-heavy prompt sweep
-- [ ] Rebuild at current master; re-measure MTP prefill tax and CUDA q8_0-KV decode
+- [x] Rebuilt at `6d0549831` — MTP tax unchanged (§8); spec gen +13%, tuning deltas now noise (§7)
+- [ ] File upstream issue: MTP catch-up decode ~2× prefill cost on non-mem-shared archs
 - [ ] Real-workload confirmation of f16-KV-at-reduced-context vs q8_0-at-262k
