@@ -4847,10 +4847,15 @@ function abRenderRows() {
             <span class="text-gray-600">${i + 1}.</span>
             <span class="font-mono flex-1">${escapeHtml(r.label)}</span>
             <span class="text-gray-600">${r.status || 'queued'}</span>
+            <button data-abrun="${i}" title="Run ONLY this row" class="text-gray-600 hover:text-green-400 px-1" ${abRunning ? 'disabled' : ''}>▶</button>
             <button data-abdel="${i}" class="text-gray-600 hover:text-red-400 px-1" ${abRunning ? 'disabled' : ''}>✕</button>
         </div>`).join('');
     el.querySelectorAll('[data-abdel]').forEach(b => b.addEventListener('click', () => {
         abRows.splice(parseInt(b.dataset.abdel), 1); abPersist(); abRenderRows();
+    }));
+    el.querySelectorAll('[data-abrun]').forEach(b => b.addEventListener('click', () => {
+        const row = abRows[parseInt(b.dataset.abrun)];
+        if (row) runSweep(row);
     }));
 }
 function abRenderResults() {
@@ -4938,21 +4943,21 @@ async function abWaitForState(pred, timeoutMs, failPred) {
     return false;
 }
 
-document.getElementById('ab-run-btn').addEventListener('click', async () => {
+async function runSweep(onlyRow) {
     if (abRunning) return;
     const prompt = document.getElementById('ab-prompt').value.trim();
     if (!prompt) { abStatus('write a test prompt first'); return; }
     if (abRows.length === 0) { abStatus('nothing queued'); return; }
+    const targets = onlyRow ? [onlyRow] : abRows;
     const maxTokens = parseInt(document.getElementById('ab-gen-tokens').value) || 512;
     const reps = Math.max(1, parseInt(document.getElementById('ab-reps').value) || 1);
     abRunning = true;
     document.getElementById('ab-run-btn').disabled = true;
-    // Run Sweep always re-runs the whole queue fresh -- previous 'done'
-    // statuses and results are reset up front (they used to pin forever and
-    // make a second Run Sweep silently no-op on an all-done queue).
-    for (const r of abRows) { r.status = 'queued'; r.results = []; }
+    // Only the rows being run get reset; a single-row run leaves the others'
+    // statuses and results alone.
+    for (const r of targets) { r.status = 'queued'; r.results = []; }
     abRenderRows(); abRenderResults(); abPersist();
-    for (const row of abRows) {
+    for (const row of targets) {
         row.status = 'running'; abRenderRows();
         abStatus(`launching: ${row.label}`);
         try {
@@ -5008,8 +5013,9 @@ document.getElementById('ab-run-btn').addEventListener('click', async () => {
     await fetch('/api/stop', { method: 'POST' }).catch(() => {});
     abRunning = false;
     document.getElementById('ab-run-btn').disabled = false;
-    abStatus('A/B complete -- server stopped');
-});
+    abStatus(onlyRow ? `done: ${onlyRow.label}` : 'sweep complete -- server stopped');
+}
+document.getElementById('ab-run-btn').addEventListener('click', () => runSweep(null));
 document.getElementById('ab-clear-btn').addEventListener('click', () => {
     if (abRunning) return;
     abRows = []; abPersist(); abRenderRows(); abRenderResults();
