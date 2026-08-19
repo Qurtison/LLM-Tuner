@@ -44,6 +44,11 @@ let benchCurrentLabel = ''; // label of the run in flight (for reconnecting clie
 function launchBenchProcess(cfg) {
     const benchBin = getLlamaServerBinary(cfg.build).replace(/llama-server$/, 'llama-bench');
     const args = ['-m', cfg.modelPath];
+    if (cfg.rawArgs) {
+        // manual run line: everything after the resolved -m, verbatim
+        args.push(...String(cfg.rawArgs).split(/\s+/).filter(Boolean));
+        return spawnBench(benchBin, args);
+    }
     if (cfg.fa != null) args.push('-fa', cfg.fa ? '1' : '0');
     if (cfg.cacheK) args.push('-ctk', cfg.cacheK);
     if (cfg.cacheV) args.push('-ctv', cfg.cacheV);
@@ -55,7 +60,9 @@ function launchBenchProcess(cfg) {
     if (cfg.splitMode) args.push('-sm', String(cfg.splitMode));
     if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
     if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
-
+    return spawnBench(benchBin, args);
+}
+function spawnBench(benchBin, args) {
     benchRunning = true;
     benchLastCommand = `${benchBin} ${args.join(' ')}`;
     benchLog(`--- ${new Date().toLocaleString()} ---`);

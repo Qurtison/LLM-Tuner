@@ -685,6 +685,11 @@
                 </div>
 
                 <div id="bench-custom-list" class="space-y-1"></div>
+                <div>
+                    <label class="block text-[10px] text-gray-400 mb-1">Manual run lines <span class="text-indigo-400 cursor-help" title="One llama-bench run per line: 'label :: -m <model-name-substring> <args...>'. The -m value is matched against your model list and replaced with the full path; everything else passes to llama-bench verbatim. Queue lines adds them to the custom rows above.">?</span></label>
+                    <textarea id="bench-manual-lines" rows="3" placeholder="iso-a :: -m Qwen3.8-27B-UD -fa 1 -ctk q8_0 -ctv q8_0 -p 8192 -n 128 -d 0,32768 -dev CUDA0/Vulkan2 -ts 40/60" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
+                    <button id="bench-queue-lines" class="mt-1 px-3 py-1 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors">Queue lines</button>
+                </div>
                 <button id="bench-run-queued" class="hidden px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors" title="Runs the queued rows above, in order, server-side (each with its OWN saved settings -- the form above is not consulted).">Run queued rows</button>
 
                 <!-- Auto matrix: generated checklist of build+device combos -->
@@ -709,6 +714,11 @@
                 </div>
                 <div id="ab-rows" class="space-y-1"></div>
                 <div id="ab-live" class="text-[11px] font-mono text-amber-300/90"></div>
+                <div>
+                    <label class="block text-[10px] text-gray-400 mb-1">Manual run lines <span class="text-indigo-400 cursor-help" title="One llama-server launch per line: 'label :: -m <model-name-substring> <server args...>'. The -m value is matched against your model list; the rest is the exact launch command (binary prepended from the CUDA+Vulkan build). Queue lines adds sweep rows.">?</span></label>
+                    <textarea id="ab-manual-lines" rows="3" placeholder="iso-mtp :: -m Qwen3.6-35B -c 32768 -ngl 999 --port 8080 -fa on --spec-type draft-mtp -np 1 -dev Vulkan2 --jinja" class="w-full bg-gray-950 border border-gray-700 rounded-md px-2 py-1 text-[11px] font-mono"></textarea>
+                    <button id="ab-queue-lines" class="mt-1 px-3 py-1 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors">Queue lines</button>
+                </div>
                 <div class="flex gap-2">
                     <button id="ab-add-btn" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-indigo-300 rounded-md text-xs font-semibold transition-colors" title="Snapshot the current launch-sidebar settings (including the raw command box) as an A/B row.">+ Add current launch config</button>
                     <button id="ab-run-btn" class="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-md text-xs font-semibold transition-colors">Run Sweep</button>

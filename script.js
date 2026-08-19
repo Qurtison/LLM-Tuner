@@ -4870,6 +4870,57 @@ function abRenderResults() {
 }
 function abStatus(msg) { document.getElementById('ab-status').textContent = msg; }
 
+
+// --- Manual run lines: 'label :: -m <model-substring> <args...>' ---
+// Resolves the -m token against the model list; label optional (defaults to
+// the args). Returns {label, modelPath, rest, error}.
+function parseManualLine(line, models) {
+    let label = null, args = line.trim();
+    const sep = args.indexOf('::');
+    if (sep !== -1) { label = args.slice(0, sep).trim(); args = args.slice(sep + 2).trim(); }
+    const m = args.match(/(^|\s)-m\s+(\S+)/);
+    if (!m) return { error: 'line needs -m <model-substring>' };
+    const needle = m[2].toLowerCase();
+    const hit = models.find(mod => mod.name.toLowerCase().includes(needle) || mod.path.toLowerCase().includes(needle));
+    if (!hit) return { error: `no model matches "${m[2]}"` };
+    const rest = (args.slice(0, m.index) + ' ' + args.slice(m.index + m[0].length)).replace(/\s+/g, ' ').trim();
+    return { label: label || args, modelPath: hit.path, rest };
+}
+
+document.getElementById('bench-queue-lines').addEventListener('click', () => {
+    const lines = document.getElementById('bench-manual-lines').value.split('\n').map(l => l.trim()).filter(Boolean);
+    const errs = [];
+    for (const line of lines) {
+        const p = parseManualLine(line, benchModelsCache);
+        if (p.error) { errs.push(`${p.error}: ${line.slice(0, 40)}`); continue; }
+        benchCustomRows.push({ label: p.label, body: { build: document.getElementById('bench-build').value, modelPath: p.modelPath, rawArgs: p.rest, label: p.label } });
+    }
+    persistBenchCustomRows();
+    renderBenchCustomRows();
+    document.getElementById('bench-status').textContent = errs.length ? errs.join(' | ') : `${lines.length - errs.length} line(s) queued`;
+    if (!errs.length) document.getElementById('bench-manual-lines').value = '';
+});
+
+document.getElementById('ab-queue-lines').addEventListener('click', () => {
+    const lines = document.getElementById('ab-manual-lines').value.split('\n').map(l => l.trim()).filter(Boolean);
+    const models = benchModelsCache.length ? benchModelsCache : [];
+    const errs = [];
+    const binary = (benchBuildsCache.find(b => /cuda/i.test(b.id) || /cuda/i.test(b.label)) || benchBuildsCache[0])?.path;
+    if (!binary) { abStatus('open the llama-bench tab once so builds/models load, then retry'); return; }
+    for (const line of lines) {
+        const p = parseManualLine(line, models);
+        if (p.error) { errs.push(`${p.error}: ${line.slice(0, 40)}`); continue; }
+        const rawCommand = `${binary} -m ${p.modelPath} ${p.rest}`;
+        abRows.push({ label: p.label, config: { rawCommand, modelPath: p.modelPath, model: p.modelPath.split('/').pop(),
+            // deviceB drives the server's GPU-B telemetry request during the run
+            deviceB: /vulkan2/i.test(p.rest) && /cuda0|vulkan1/i.test(p.rest) ? 'Vulkan2' : null }, status: 'queued', results: [] });
+    }
+    abPersist();
+    abRenderRows();
+    abStatus(errs.length ? errs.join(' | ') : `${lines.length - errs.length} line(s) queued`);
+    if (!errs.length) document.getElementById('ab-manual-lines').value = '';
+});
+
 document.getElementById('ab-add-btn').addEventListener('click', () => {
     const config = buildConfigFromUI();
     config.rawCommand = document.getElementById('raw-launch-command').value.trim();
