@@ -1764,9 +1764,21 @@ async function submitPrompt() {
     }, 1000);
 
     try {
+        // Per-request chat template kwargs (thinking on/off + free-form JSON)
+        const chatBody = { model: sessionData.model, messages: apiMessages, stream: true, stream_options: { include_usage: true } };
+        const thinkSel = document.getElementById('chat-thinking')?.value;
+        let templateKwargs = {};
+        if (thinkSel === 'on') templateKwargs.enable_thinking = true;
+        else if (thinkSel === 'off') templateKwargs.enable_thinking = false;
+        const kwRaw = document.getElementById('chat-kwargs')?.value.trim();
+        if (kwRaw) {
+            try { Object.assign(templateKwargs, JSON.parse(kwRaw)); }
+            catch (e) { displayErrorInUI('extra kwargs is not valid JSON -- ignored for this request'); }
+        }
+        if (Object.keys(templateKwargs).length > 0) chatBody.chat_template_kwargs = templateKwargs;
         const response = await fetch('http://localhost:8080/v1/chat/completions', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: sessionData.model, messages: apiMessages, stream: true, stream_options: { include_usage: true } }),
+            body: JSON.stringify(chatBody),
             signal: abortController.signal
         });
 
@@ -3387,8 +3399,29 @@ function formatOmniTimeLabel(t) {
 // line visibly rescaled/wobbled each refresh even though nothing about the
 // underlying data was unstable. Linear x keeps each point pinned to its
 // actual timestamp, so the shape only changes where the data actually did.
+let omniSmoothing = false;
+try { omniSmoothing = localStorage.getItem('omni_smoothing') === '1'; } catch (e) {}
+function setOmniSmoothing(on) {
+    omniSmoothing = on;
+    try { localStorage.setItem('omni_smoothing', on ? '1' : ''); } catch (e) {}
+    document.querySelectorAll('.omni-smooth-cb').forEach(cb => { cb.checked = on; });
+    // re-render whatever charts are alive; the rest pick it up on their next tick
+    try { renderSessionOmniPreview(); } catch (e) {}
+    try { if (benchOmniChartInst?.$lastSamples) renderBenchOmni(benchOmniChartInst.$lastSamples); } catch (e) {}
+    try { refreshExpandedChartLive(); } catch (e) {}
+}
 function toPoints(metrics, key) {
-    return metrics.map(s => ({ x: s.t, y: s[key] ?? null }));
+    const pts = metrics.map(s => ({ x: s.t, y: s[key] ?? null }));
+    if (!omniSmoothing) return pts;
+    // exponential weighted moving average; nulls are gaps that reset the
+    // average so phases don't bleed into each other
+    const alpha = 0.3;
+    let ema = null;
+    return pts.map(p => {
+        if (p.y == null || isNaN(p.y)) { ema = null; return p; }
+        ema = ema == null ? p.y : alpha * p.y + (1 - alpha) * ema;
+        return { x: p.x, y: +ema.toFixed(2) };
+    });
 }
 
 function buildOmniDatasets(metrics, tpsLineColor) {
@@ -5064,6 +5097,11 @@ document.getElementById('ab-clear-btn').addEventListener('click', () => {
     abRows = []; abPersist(); abRenderRows(); abRenderResults();
 });
 abRestore();
+document.querySelectorAll('.omni-smooth-cb').forEach(cb => {
+    cb.checked = omniSmoothing;
+    cb.addEventListener('change', (e) => { e.stopPropagation(); setOmniSmoothing(cb.checked); });
+    cb.parentElement.addEventListener('click', (e) => e.stopPropagation());
+});
 
 
 // --- Bench sub-tabs: hardware (llama-bench) vs spec sweep (llama-server) ---

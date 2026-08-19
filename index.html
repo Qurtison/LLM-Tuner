@@ -531,7 +531,7 @@
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4 cursor-pointer hover:border-gray-700 transition-colors" id="session-omni-card" title="Click to expand and see all session activity since page load">
                 <div class="flex justify-between items-center mb-2">
-                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Session Activity <span class="text-gray-600 normal-case font-normal">(last 2 min -- click to expand full session · <button id="session-omni-reset" class="underline hover:text-gray-400">reset lines</button>)</span></h3>
+                    <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Session Activity <span class="text-gray-600 normal-case font-normal">(last 2 min -- click to expand full session · <button id="session-omni-reset" class="underline hover:text-gray-400">reset lines</button> · <label class="cursor-pointer"><input type="checkbox" class="omni-smooth-cb accent-indigo-500"> smooth</label>)</span></h3>
                 </div>
                 <div class="h-48"><canvas id="sessionOmniChart"></canvas></div>
             </div>
@@ -758,7 +758,7 @@
             <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
                 <div class="flex justify-between items-center mb-2">
                     <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Run Telemetry</h3>
-                    <span class="text-[10px] text-gray-600">GPU/VRAM sampled during the run · Prefill/Gen token lines appear only for llama-server runs (llama-bench prints results, not live rates) · <button id="bench-omni-reset" class="underline hover:text-gray-400">reset lines</button></span>
+                    <span class="text-[10px] text-gray-600">GPU/VRAM sampled during the run · Prefill/Gen token lines appear only for llama-server runs · <button id="bench-omni-reset" class="underline hover:text-gray-400">reset lines</button> · <label class="cursor-pointer"><input type="checkbox" class="omni-smooth-cb accent-indigo-500"> smooth</label></span>
                 </div>
                 <div class="h-48"><canvas id="benchOmniChart"></canvas></div>
             </div>
@@ -826,6 +826,13 @@
                 <div class="flex justify-between items-center px-1">
                     <span class="text-xs text-gray-500">System Prompt:</span>
                     <input type="text" id="system-prompt" class="flex-1 ml-2 bg-transparent border-b border-gray-700 focus:border-indigo-500 text-xs text-gray-300 px-1 py-0.5 focus:outline-none">
+                    <span class="text-xs text-gray-500 ml-3">Thinking:</span>
+                    <select id="chat-thinking" title="Sent per-request as chat_template_kwargs.enable_thinking (needs --jinja; template must support it)" class="ml-1 bg-gray-800 border border-gray-700 rounded text-xs text-gray-300 px-1 py-0.5">
+                        <option value="">template default</option>
+                        <option value="on">on</option>
+                        <option value="off">off</option>
+                    </select>
+                    <input type="text" id="chat-kwargs" placeholder='extra kwargs JSON, e.g. {"thinking_level":"high"}' title="Merged into chat_template_kwargs per request. Model/template specific." class="w-56 ml-2 bg-transparent border-b border-gray-700 focus:border-indigo-500 text-[11px] font-mono text-gray-300 px-1 py-0.5 focus:outline-none">
                 </div>
                 <textarea id="user-prompt" rows="3" disabled class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm text-gray-100 disabled:opacity-50 resize-none shadow-sm placeholder-gray-500" placeholder="Waiting for server..."></textarea>
                 <div class="flex justify-between items-center">
@@ -1052,6 +1059,7 @@
     <div id="expand-modal" class="fixed inset-0 bg-black/95 hidden flex-col z-50 p-6">
         <div class="flex justify-between items-center mb-4">
             <h2 id="expand-modal-title" class="text-lg font-bold text-white">Expanded Chart</h2>
+            <label class="text-xs text-gray-400 cursor-pointer flex items-center gap-1"><input type="checkbox" class="omni-smooth-cb accent-indigo-500"> smooth (EMA)</label>
             <button onclick="closeExpandModal()" class="text-gray-400 hover:text-white">✕ Close</button>
         </div>
         <!-- Height capped at a third of width (aspect-ratio 3/1) -- wide and
