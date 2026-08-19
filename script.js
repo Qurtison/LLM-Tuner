@@ -4890,15 +4890,18 @@ document.getElementById('ab-run-btn').addEventListener('click', async () => {
     if (abRunning) return;
     const prompt = document.getElementById('ab-prompt').value.trim();
     if (!prompt) { abStatus('write a test prompt first'); return; }
-    if (abRows.filter(r => r.status !== 'done').length === 0) { abStatus('nothing queued'); return; }
+    if (abRows.length === 0) { abStatus('nothing queued'); return; }
     const maxTokens = parseInt(document.getElementById('ab-gen-tokens').value) || 512;
     const reps = Math.max(1, parseInt(document.getElementById('ab-reps').value) || 1);
     abRunning = true;
     document.getElementById('ab-run-btn').disabled = true;
-    abPersist();
+    // Run Sweep always re-runs the whole queue fresh -- previous 'done'
+    // statuses and results are reset up front (they used to pin forever and
+    // make a second Run Sweep silently no-op on an all-done queue).
+    for (const r of abRows) { r.status = 'queued'; r.results = []; }
+    abRenderRows(); abRenderResults(); abPersist();
     for (const row of abRows) {
-        if (row.status === 'done') continue;
-        row.status = 'running'; row.results = []; abRenderRows();
+        row.status = 'running'; abRenderRows();
         abStatus(`launching: ${row.label}`);
         try {
             await fetch('/api/stop', { method: 'POST' }).catch(() => {});
