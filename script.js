@@ -1179,6 +1179,52 @@ function loadLaunchProfile(name) {
     document.getElementById('load-profile-select').value = name;
 }
 
+// Parse a llama-server arg string into the structured config fields that
+// applyConfigToUI understands, so line-pasted profiles populate the GUI
+// (model dropdown, ctx, spec checkboxes, samplers...) and not just the raw
+// command box. Flags buildLlamaArgs re-adds automatically are dropped;
+// unrecognized flags land in argString (the extra-args box).
+function parseServerArgsToConfig(rest) {
+    const t = rest.split(/\s+/).filter(Boolean);
+    const cfg = {};
+    const extras = [];
+    const AUTO_SKIP_VAL = new Set(['--host', '--port', '-np', '--split-mode']);
+    const AUTO_SKIP = new Set(['--metrics', '--jinja']);
+    for (let i = 0; i < t.length; i++) {
+        const f = t[i];
+        const v = t[i + 1];
+        const take = () => { i++; return v; };
+        if (f === '-c') cfg.ctx = parseInt(take());
+        else if (f === '-ngl') cfg.ngl = parseInt(take());
+        else if (f === '-fa') { const x = take(); cfg.fa = (x === 'on' || x === '1'); }
+        else if (f === '-ctk' || f === '--cache-type-k') cfg.cacheK = take();
+        else if (f === '-ctv' || f === '--cache-type-v') cfg.cacheV = take();
+        else if (f === '--spec-type') cfg.specType = take();
+        else if (f === '--spec-draft-n-max') cfg.specDraftNMax = parseInt(take());
+        else if (f === '--spec-draft-n-min') cfg.specDraftNMin = parseInt(take());
+        else if (f === '--spec-draft-model') cfg.specDraftModel = take();
+        else if (/^--spec-ngram-.*-size-n$/.test(f)) cfg.specNgramSizeN = parseInt(take());
+        else if (/^--spec-ngram-.*-size-m$/.test(f)) cfg.specNgramSizeM = parseInt(take());
+        else if (/^--spec-ngram-.*-min-hits$/.test(f)) cfg.specNgramMinHits = parseInt(take());
+        else if (f === '-dev' || f === '--device') { const d = take().split(/[,/]/); cfg.deviceA = d[0] || null; cfg.deviceB = d[1] || null; }
+        else if (f === '-ts' || f === '--tensor-split') { const d = take().split(/[,/]/); cfg.tensorSplit = parseInt(d[0]); }
+        else if (f === '--temp') cfg.temp = parseFloat(take());
+        else if (f === '--top-k') cfg.topK = parseInt(take());
+        else if (f === '--top-p') cfg.topP = parseFloat(take());
+        else if (f === '--min-p') cfg.minP = parseFloat(take());
+        else if (f === '--presence-penalty') cfg.presencePenalty = parseFloat(take());
+        else if (f === '--repeat-penalty') cfg.repeatPenalty = parseFloat(take());
+        else if (f === '--n-cpu-moe') cfg.nCpuMoe = parseInt(take());
+        else if (f === '-lv') cfg.verbosity = parseInt(take());
+        else if (f === '--reasoning-preserve') cfg.reasoningPreserve = true;
+        else if (AUTO_SKIP_VAL.has(f)) { take(); }
+        else if (AUTO_SKIP.has(f)) { /* re-added automatically */ }
+        else extras.push(f); // e.g. -fitt 256 (value token follows and also lands here)
+    }
+    if (extras.length) cfg.argString = extras.join(' ');
+    return cfg;
+}
+
 // Paste-a-profile: 'name :: -m <model-substring> <server args>' becomes a
 // saved profile whose rawCommand (the launch source of truth) is the given
 // args with the CUDA+Vulkan binary and resolved model path prepended.
@@ -1197,10 +1243,10 @@ document.getElementById('btn-paste-profile').addEventListener('click', async () 
     if (!binary) { alert('could not resolve a build binary'); return; }
     const name = line.includes('::') ? line.slice(0, line.indexOf('::')).trim() : parsed.label.slice(0, 40);
     const config = {
+        ...parseServerArgsToConfig(parsed.rest),
         rawCommand: `${binary} -m ${parsed.modelPath} ${parsed.rest}`,
         modelPath: parsed.modelPath,
         model: parsed.modelPath.split('/').pop(),
-        deviceB: /vulkan2/i.test(parsed.rest) && /cuda0|vulkan1/i.test(parsed.rest) ? 'Vulkan2' : null,
     };
     const profiles = getLaunchProfiles();
     const existingIdx = profiles.findIndex(pr => pr.name === name);
