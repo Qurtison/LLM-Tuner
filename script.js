@@ -1178,6 +1178,39 @@ function loadLaunchProfile(name) {
     document.getElementById('load-profile-select').value = name;
 }
 
+// Paste-a-profile: 'name :: -m <model-substring> <server args>' becomes a
+// saved profile whose rawCommand (the launch source of truth) is the given
+// args with the CUDA+Vulkan binary and resolved model path prepended.
+document.getElementById('btn-paste-profile').addEventListener('click', async () => {
+    const line = prompt('Profile line:  name :: -m <model-substring> <server args>');
+    if (!line || !line.trim()) return;
+    const models = [...document.getElementById('model-select').options]
+        .filter(o => o.value).map(o => ({ name: o.textContent, path: o.value }));
+    const parsed = parseManualLine(line, models);
+    if (parsed.error) { alert(parsed.error); return; }
+    let binary = '';
+    try {
+        const { builds } = await (await fetch('/api/builds')).json();
+        binary = (builds.find(b => /cuda/i.test(b.id) || /cuda/i.test(b.label)) || builds[0])?.path || '';
+    } catch (e) {}
+    if (!binary) { alert('could not resolve a build binary'); return; }
+    const name = line.includes('::') ? line.slice(0, line.indexOf('::')).trim() : parsed.label.slice(0, 40);
+    const config = {
+        rawCommand: `${binary} -m ${parsed.modelPath} ${parsed.rest}`,
+        modelPath: parsed.modelPath,
+        model: parsed.modelPath.split('/').pop(),
+        deviceB: /vulkan2/i.test(parsed.rest) && /cuda0|vulkan1/i.test(parsed.rest) ? 'Vulkan2' : null,
+    };
+    const profiles = getLaunchProfiles();
+    const existingIdx = profiles.findIndex(pr => pr.name === name);
+    const entry = { name, config, savedAt: Date.now() };
+    if (existingIdx >= 0) profiles[existingIdx] = entry; else profiles.push(entry);
+    saveLaunchProfiles(profiles);
+    renderSavedConfigs();
+    document.getElementById('load-profile-select').value = name;
+    sessionActiveProfileName = name;
+});
+
 function deleteLaunchProfile(name) {
     saveLaunchProfiles(getLaunchProfiles().filter(p => p.name !== name));
     if (sessionActiveProfileName === name) sessionActiveProfileName = null;
