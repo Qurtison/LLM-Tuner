@@ -68,7 +68,11 @@ CUDA0/Vulkan2, Q6, f16 KV vs q8_0 KV:
 | tg128 @ d98k | 14.26 | 15.48 | **+8.6%** |
 
 - Cost: f16 KV ≈ 66KB/token vs q8_0's ≈ 34KB (this arch) → 262k context becomes ~180–200k max.
-- PENDING: mixed `-ctk q8_0 -ctv f16` and the mirror, to localize which side carries the penalty.
+- **Mixed KV types are a kernel-fallback pit**: `-ctk q8_0 -ctv f16` prefilled at
+  **71 t/s** (13× collapse vs 962; gen unaffected at 17.9) — the FA prefill path
+  evidently requires uniform KV types and silently falls back otherwise. Mirror
+  (`-ctk f16 -ctv q8_0`) check: PENDING (quick d0 run). Unless the mirror surprises,
+  the KV choice is strictly binary: q8_0-both at 262k vs f16-both at ~190k.
 - Related hard constraint: **quantized KV requires flash attention** — `-fa 0` with q8_0 KV
   fails at context creation. FA is effectively mandatory.
 
