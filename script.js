@@ -4898,6 +4898,10 @@ document.getElementById('bench-queue-lines').addEventListener('click', () => {
     for (const line of lines) {
         const p = parseManualLine(line, benchModelsCache);
         if (p.error) { errs.push(`${p.error}: ${line.slice(0, 40)}`); continue; }
+        if (/--port|--spec-type|(^|\s)-c\s+\d{4,}/.test(p.rest)) {
+            errs.push(`looks like a llama-server line (has --port/--spec-type/-c) -- paste it in the llama-server tab: ${line.slice(0, 50)}`);
+            continue;
+        }
         benchCustomRows.push({ label: p.label, body: { build: document.getElementById('bench-build').value, modelPath: p.modelPath, rawArgs: p.rest, label: p.label } });
     }
     persistBenchCustomRows();
@@ -4915,6 +4919,12 @@ document.getElementById('ab-queue-lines').addEventListener('click', () => {
     for (const line of lines) {
         const p = parseManualLine(line, models);
         if (p.error) { errs.push(`${p.error}: ${line.slice(0, 40)}`); continue; }
+        // llama-bench lines pasted here launch a broken llama-server -- catch
+        // the telltale flags and redirect.
+        if (/(^|\s)-p\s+\d|(^|\s)-d\s+\d|(^|\s)-r\s+\d/.test(p.rest) && !/--port/.test(p.rest)) {
+            errs.push(`looks like a llama-bench line (has -p/-d/-r, no --port) -- paste it in the llama-bench tab: ${line.slice(0, 50)}`);
+            continue;
+        }
         const rawCommand = `${binary} -m ${p.modelPath} ${p.rest}`;
         abRows.push({ label: p.label, config: { rawCommand, modelPath: p.modelPath, model: p.modelPath.split('/').pop(),
             // deviceB drives the server's GPU-B telemetry request during the run
