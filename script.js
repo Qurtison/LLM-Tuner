@@ -1765,8 +1765,16 @@ async function submitPrompt() {
         } catch (e) {}
     }, 250);
 
+    let lastTpsTickAt = Date.now();
     let tpsLoop = setInterval(() => {
-        const tps = tokenCount; tokenCount = 0; // Reset every sec for current TPS
+        // Average over ACTUAL elapsed time -- when the event loop stalls (heavy
+        // downloads/disk IO), the tick fires late with accumulated tokens; the
+        // old fixed-1s assumption plotted that as a fake burst (observed: a
+        // "1252 t/s" spike during a model download).
+        const nowTick = Date.now();
+        const dtSec = Math.max(0.25, (nowTick - lastTpsTickAt) / 1000);
+        lastTpsTickAt = nowTick;
+        const tps = tokenCount / dtSec; tokenCount = 0;
         document.getElementById('current-tps').innerText = tps.toFixed(1);
         document.getElementById('metric-gen').innerText = `${tps.toFixed(1)} t/s`;
         
@@ -2835,7 +2843,8 @@ async function pollTelemetry() {
                 hwChartInst = new Chart(hwChartCanvas.getContext('2d'), {
                     type: 'line',
                     data: { datasets: buildOmniDatasets(responseMetrics, tpsLineColor) },
-                    options: compactOptions
+                    options: compactOptions,
+                    plugins: [omniPointLabelsPlugin, omniGapBandsPlugin]
                 });
             }
         }
@@ -3467,6 +3476,11 @@ function setOmniSmoothing(on) {
     try { renderSessionOmniPreview(); } catch (e) {}
     try { if (benchOmniChartInst?.$lastSamples) renderBenchOmni(benchOmniChartInst.$lastSamples); } catch (e) {}
     try { refreshExpandedChartLive(); } catch (e) {}
+    try {
+        if (expandedChartInst?.$lastMetrics) {
+            setOmniDatasets(expandedChartInst, buildOmniDatasets(expandedChartInst.$lastMetrics, expandedChartInst.$lastColor));
+        }
+    } catch (e) {}
 }
 function toPoints(metrics, key) {
     const pts = metrics.map(s => ({ x: s.t, y: s[key] ?? null }));
@@ -3489,7 +3503,45 @@ function shortGpuName(full, fallback) {
     const m = full.match(/4090|5090|4080|3090|7900\s?XTX|XTX|7800|Iris/i);
     return m ? m[0].toUpperCase().replace(/\s/g, '') : full.split(' ').slice(-2).join(' ');
 }
+// A telemetry gap (sampler stalled, model loading, nothing recorded) must not
+// be drawn as a line bridging minutes of missing data. Gaps get a null
+// breaker sample (lines blank out) and a gray band (omniGapBandsPlugin).
+function omniGapThreshold() { return Math.max(4000, (currentTelemetryRateMs || 1000) * 4); }
+function injectGapBreaks(metrics) {
+    if (!metrics || metrics.length < 2) return metrics;
+    const th = omniGapThreshold();
+    const out = [];
+    for (let i = 0; i < metrics.length; i++) {
+        if (i > 0 && metrics[i].t - metrics[i - 1].t > th) out.push({ t: metrics[i - 1].t + 1 }); // all-null breaker
+        out.push(metrics[i]);
+    }
+    return out;
+}
+const omniGapBandsPlugin = {
+    id: 'omniGapBands',
+    beforeDatasetsDraw(chart) {
+        const xs = chart.scales.x;
+        if (!xs || !chart.chartArea) return;
+        let times = [];
+        for (const ds of chart.data.datasets) {
+            if ((ds.data || []).length > times.length) times = ds.data.map(pt => pt.x);
+        }
+        const th = omniGapThreshold();
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.fillStyle = 'rgba(148,163,184,0.09)';
+        for (let i = 1; i < times.length; i++) {
+            if (times[i] - times[i - 1] > th) {
+                const x1 = xs.getPixelForValue(times[i - 1]);
+                const x2 = xs.getPixelForValue(times[i]);
+                ctx.fillRect(x1, chart.chartArea.top, x2 - x1, chart.chartArea.bottom - chart.chartArea.top);
+            }
+        }
+        ctx.restore();
+    }
+};
 function buildOmniDatasets(metrics, tpsLineColor) {
+    metrics = injectGapBreaks(metrics);
     const A = omniGpuA, B = omniGpuB;
     return [
         { label: `${A} Power (W)`, data: toPoints(metrics, 'masterPwr'), borderColor: 'rgba(250,204,21,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
@@ -3757,8 +3809,10 @@ function renderOmniChartCore(metrics, titleText, tpsLineColor) {
         type: 'line',
         data: { datasets: buildOmniDatasets(metrics, tpsLineColor) },
         options: buildOmniOptions(),
-        plugins: [omniPointLabelsPlugin]
+        plugins: [omniPointLabelsPlugin, omniGapBandsPlugin]
     });
+    expandedChartInst.$lastMetrics = metrics;
+    expandedChartInst.$lastColor = tpsLineColor;
 }
 
 window.expandHwChart = function(containerEl) {
@@ -4387,7 +4441,7 @@ function renderBenchOmni(samples) {
             type: 'line',
             data: { datasets: buildOmniDatasets([], 'rgba(74,222,128,1)') },
             options: opts,
-            plugins: [omniPointLabelsPlugin]
+            plugins: [omniPointLabelsPlugin, omniGapBandsPlugin]
         });
         canvas.style.cursor = 'pointer';
         canvas.title = 'Click to expand';
