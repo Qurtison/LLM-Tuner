@@ -1374,6 +1374,7 @@ let activeTimelineEls = null; // { svg, prefillLine, thinkLine, answerLine } for
 // by submitPrompt's 1s tpsLoop so prefill actually lands in the live Tokens/sec
 // chart (the loop used to null out the whole Prefill dataset every tick).
 let livePrefillTps = null;
+let livePrefillProgress = null;
 
 // Monitor tab's Live Request card -- driven by the same broadcasts as the
 // sidebar so it reflects requests from any client, not just this chat.
@@ -1427,6 +1428,7 @@ function handlePrefillProgress(progress, tps, nTokens) {
     if (!isNaN(progress) && !isNaN(tps)) {
         activePrefillSamples.push({ progress, tps });
         livePrefillTps = tps;
+        livePrefillProgress = progress;
     }
     updateLiveRequestCard('prefill', { progress, tps, nTokens });
     const abLive = document.getElementById('ab-live');
@@ -1756,10 +1758,8 @@ async function submitPrompt() {
         // Live Generation Average calculation
         if (timeToFirstToken > 0) {
             const genTime = ((Date.now() - startTime) / 1000) - timeToFirstToken;
-            if (genTime > 0.1) {
-                const liveAvg = (totalTokensGenerated / genTime).toFixed(1);
-                document.getElementById('metric-gen-avg').innerText = `${liveAvg} t/s`;
-            }
+            // (metric-gen-avg is the session-weighted box -- not written here;
+            // see the matching note in the prefill path.)
         }
     }, 1000);
 
@@ -1808,8 +1808,11 @@ async function submitPrompt() {
                 timelineEls.pLbl.innerHTML = `Prefill: <span class="val text-gray-200">${prefillMetrics.time}s | ${prefillMetrics.tokens}t | ${prefillMetrics.tps} t/s</span>`;
                 timelineEls.container.classList.remove('hidden');
 
-                // Live update prefill sidebar metrics
-                document.getElementById('metric-prefill-avg').innerText = `${livePrefillAvg} t/s`;
+                // NOTE: deliberately NOT writing metric-prefill-avg here -- that
+                // box is the SESSION-weighted average (fed by COMPLETION events
+                // via saveMetricsToAverages); a per-prompt estimate was
+                // clobbering it (a 4-token cache-hit prompt once painted it
+                // "2.1 t/s"). Per-prompt numbers live in the bubble timeline.
                 document.getElementById('metric-prefill').innerText = `${livePrefillAvg} t/s`;
                 document.getElementById('metric-prefill-tokens').innerText = `${promptTokensEst} tokens`;
             }
@@ -2451,6 +2454,8 @@ async function pollTelemetry() {
         // distant timestamps jump straight from one cluster of points to the
         // next instead of a continuous idle line.
         lastPolledTelemetry = { t: Date.now(), stats };
+        if (stats.master?.gpu_name) omniGpuA = shortGpuName(stats.master.gpu_name, 'GPU A');
+        if (stats.worker?.gpu_name) omniGpuB = shortGpuName(stats.worker.gpu_name, 'GPU B');
         
         let masterPwr = 0, masterTemp = 0, workerPwr = 0, workerTemp = 0;
 
@@ -2748,6 +2753,9 @@ async function pollTelemetry() {
                 workerTemp: workerReporting ? stats.worker.gpu_temp : 0,
                 workerGpuUtil: workerReporting ? stats.worker.gpu_util : 0,
                 netMbps: parseFloat(sessionData.netThroughput) || 0,
+                masterVram: stats.master?.vram_used != null ? +(stats.master.vram_used / 1024).toFixed(2) : null,
+                workerVram: workerReporting && stats.worker?.vram_used != null ? +(stats.worker.vram_used / 1024).toFixed(2) : null,
+                prefillProgress: isPrefillPhase ? livePrefillProgress : null,
                 prefillTps: isPrefillPhase ? prefillTpsVal : null,
                 genTps: isPrefillPhase ? null : genTpsVal
             };
@@ -2759,8 +2767,7 @@ async function pollTelemetry() {
             const tpsLineColor = phaseColors[currentResponsePhase] || '#22c55e';
 
             if (hwChartInst) {
-                hwChartInst.data.datasets = buildOmniDatasets(responseMetrics, tpsLineColor);
-                hwChartInst.update('none');
+                setOmniDatasets(hwChartInst, buildOmniDatasets(responseMetrics, tpsLineColor));
             } else if (responseMetrics.length >= 2 && hwChartContainer) {
                 hwChartContainer.classList.remove('hidden');
                 // Compact options for this small inline preview -- no axis
@@ -3424,14 +3431,22 @@ function toPoints(metrics, key) {
     });
 }
 
+// Shortened real GPU names for chart labels (set from telemetry once known).
+let omniGpuA = 'GPU A', omniGpuB = 'GPU B';
+function shortGpuName(full, fallback) {
+    if (!full) return fallback;
+    const m = full.match(/4090|5090|4080|3090|7900\s?XTX|XTX|7800|Iris/i);
+    return m ? m[0].toUpperCase().replace(/\s/g, '') : full.split(' ').slice(-2).join(' ');
+}
 function buildOmniDatasets(metrics, tpsLineColor) {
+    const A = omniGpuA, B = omniGpuB;
     return [
-        { label: 'GPU A Power (W)', data: toPoints(metrics, 'masterPwr'), borderColor: 'rgba(250,204,21,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
-        { label: 'GPU B Power (W)', data: toPoints(metrics, 'workerPwr'), borderColor: 'rgba(248,113,113,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
-        { label: 'GPU A Temp (°C)', data: toPoints(metrics, 'masterTemp'), borderColor: 'rgba(251,146,60,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-        { label: 'GPU B Temp (°C)', data: toPoints(metrics, 'workerTemp'), borderColor: 'rgba(244,63,94,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-        { label: 'GPU A Util (%)', data: toPoints(metrics, 'masterGpuUtil'), borderColor: 'rgba(167,139,250,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
-        { label: 'GPU B Util (%)', data: toPoints(metrics, 'workerGpuUtil'), borderColor: 'rgba(217,70,239,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
+        { label: `${A} Power (W)`, data: toPoints(metrics, 'masterPwr'), borderColor: 'rgba(250,204,21,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
+        { label: `${B} Power (W)`, data: toPoints(metrics, 'workerPwr'), borderColor: 'rgba(248,113,113,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
+        { label: `${A} Temp (°C)`, data: toPoints(metrics, 'masterTemp'), borderColor: 'rgba(251,146,60,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+        { label: `${B} Temp (°C)`, data: toPoints(metrics, 'workerTemp'), borderColor: 'rgba(244,63,94,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
+        { label: `${A} Util (%)`, data: toPoints(metrics, 'masterGpuUtil'), borderColor: 'rgba(167,139,250,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
+        { label: `${B} Util (%)`, data: toPoints(metrics, 'workerGpuUtil'), borderColor: 'rgba(217,70,239,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
         { label: 'Net MB/s', data: toPoints(metrics, 'netMbps'), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
         // Prefill and gen tps are mutually exclusive per-sample (each sample is
         // only ever in one phase), so these render as two distinct
@@ -3442,8 +3457,8 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
-        { label: 'VRAM A (GB)', data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
-        { label: 'VRAM B (GB)', data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
+        { label: `VRAM ${A} (GB)`, data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
+        { label: `VRAM ${B} (GB)`, data: toPoints(metrics, 'workerVram'), borderColor: 'rgba(100,116,139,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
         { label: 'CPU %', data: toPoints(metrics, 'masterCpuUtil'), borderColor: 'rgba(248,113,113,0.5)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' }
     ];
 }
