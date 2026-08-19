@@ -66,6 +66,18 @@ Compare `prompt eval time ... tokens per second` in the per-request timings.
 MTP consistently costs ~1.85× on prompt processing. Generation-side MTP behavior is
 fine (that's the point of it); this issue is only about the prefill cost.
 
+**Single-GPU isolation** (Qwen3.6-35B-A3B, `qwen35moe`, nextn=1, solo on the 7900 XTX,
+same 22k cold prompt):
+
+| config | prompt t/s |
+|---|---|
+| `--spec-type draft-mtp` | 1307 |
+| `--spec-type ngram-map-k4v` (no MTP) | 1593 |
+
+i.e. **~1.22× single-GPU vs ~1.85× on the two-GPU layer split**. The raw catch-up
+decode accounts for ~20%; the larger multi-GPU cost appears to be the synchronous
+per-ubatch draft decode **stalling the layer-split ubatch pipeline**.
+
 ## Where the cost seems to come from
 
 In `common/speculative.cpp`, the MTP implementation's `process(batch_in)` hook (called
@@ -83,7 +95,7 @@ whose MTP context is not mem-shared (as here), that means the entire prompt is d
 second time. A single extra nextn layer should cost a few percent, not ~90% — I suspect
 the synchronous per-ubatch draft decode also stalls the multi-GPU ubatch pipeline
 (GGML_SCHED_MAX_COPIES overlap), which would explain the size of the hit on split
-setups. I have not yet isolated single-GPU numbers to separate those two components.
+setups. The single-GPU isolation above separates the two components: ~1.22× from the extra decode itself, the rest from the pipeline stall.
 
 There is also the related requirement that the target emit embeddings/logits for every
 prompt position (`llama_set_embeddings_nextn`, and the `begin()` warning about
