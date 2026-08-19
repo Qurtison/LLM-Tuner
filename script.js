@@ -460,6 +460,7 @@ eventSource.onmessage = (e) => {
 
     // 0. ERRORS & LOGS (run first; never throws, so state handling below always runs)
     if (data.error) {
+        lastKnownServerError = data.error; // consumed by the sweep runner's failure messages
         displayErrorInUI(data.error);
     } else if (data.log) {
         appendLogToUI(data.log);
@@ -4882,6 +4883,7 @@ try {
 // prompt, harvest the COMPLETION stats, stop, next). llama-bench can't
 // exercise speculative decoding; this can.
 let lastKnownServerState = 'stopped';
+let lastKnownServerError = '';
 let abCaptureResolve = null;
 let abRows = [];
 let abRunning = false;
@@ -5054,13 +5056,26 @@ async function runSweep(onlyRow) {
         try {
             await fetch('/api/stop', { method: 'POST' }).catch(() => {});
             await new Promise(r => setTimeout(r, 3000));
+            lastKnownServerError = '';
             const startRes = await fetch('/api/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(row.config) });
             if (!startRes.ok) throw new Error('start refused');
             const ready = await abWaitForState(
                 () => lastKnownServerState === 'ready',
                 15 * 60 * 1000,
                 (elapsed) => elapsed > 20000 && lastKnownServerState === 'stopped');
-            if (!ready) throw new Error('model never became ready (launch failed?)');
+            if (!ready) {
+                // pull the real reason: the broadcast error if one arrived, else
+                // the last error-level lines from the server's log buffer
+                let detail = lastKnownServerError;
+                if (!detail) {
+                    try {
+                        const ml = await (await fetch('/api/master/logs')).json();
+                        const errLines = (ml.logs || '').split('\n').filter(l => /\sE\s|error|failed/i.test(l)).slice(-2);
+                        detail = errLines.join(' | ').slice(0, 300);
+                    } catch (e) {}
+                }
+                throw new Error(`model never became ready${detail ? ' — ' + detail : ' (no error captured; see Master Logs)'}`);
+            }
             for (let rep = 0; rep < reps; rep++) {
                 abStatus(`${row.label} -- request ${rep + 1}/${reps}`);
                 const completionArrived = new Promise(res => { abCaptureResolve = res; });
