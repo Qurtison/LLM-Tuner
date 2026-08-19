@@ -150,9 +150,16 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
   4.94h (**3.4:1 gen-dominated**). Dropping MTP would refund ~40min of prefill but cost
   48–96min of gen. **Keeping MTP wins decisively** despite the tax.
 - **Re-measured after rebuilding at master `6d0549831` (2026-08-18): the tax is
-  unchanged** — prefill 532/522 t/s with MTP vs 973/965 without (~1.85×). Upstream has
-  not addressed the catch-up-decode cost. Candidate for an upstream issue with these
-  numbers and the mechanism above.
+  unchanged** — prefill 532/522 t/s with MTP vs 973/965 without (~1.85×).
+- **Single-GPU isolation (2026-08-19)**: Qwen3.6-35B-A3B (same arch family,
+  nextn=1) solo on the XTX, 22k cold prompt: 1307 t/s with MTP vs 1593 without =
+  **1.22×**. So the raw catch-up decode costs ~20%; the remaining ~50 points of the
+  multi-GPU tax come from the synchronous per-ubatch draft decode **stalling the
+  layer-split ubatch pipeline**. The dominant cost is the sync, not the compute —
+  which makes async/overlapped catch-up the high-payoff upstream fix.
+- Isolation bonus: on the A3B, MTP is +61% generation (83.9 vs 52.1 t/s, 66%
+  acceptance) — the 35B-A3B solo on the XTX is a legitimately fast light-duty
+  config (~84 t/s gen, ~1300-1600 t/s prefill).
 
 ## 9. Tensor split sensitivity: low
 
