@@ -87,10 +87,17 @@ Send any large cold prompt to both and compare `prompt eval time` in the timings
 
 ## Related
 
-Possibly connected to #26750 (draft-mtp acceptance collapse on CUDA vs Vulkan) — I can
-reproduce that one too on this hardware btw (41% acceptance CUDA solo vs 64% Vulkan
-solo, same Q3 file), though it's a different symptom (decode quality vs prefill speed).
-Also #27306 crashes in the same draft-mtp prompt path on RADV.
+#27306 looks like the same root cause at a different severity — that reporter
+independently isolated the per-ubatch draft decode in common_speculative_process, and
+on their hardware (RADV, ub 1024) it exceeds the Vulkan submit budget and device-losts
+instead of just slowing down. Their diagnostic patch (skip the catch-up during the
+prompt phase) would presumably also recover my 2x, though at the cost of stale MTP
+state for the first drafts after prefill — so overlapping/batching the catch-up still
+seems like the real fix.
+
+Also possibly related: #26750 (draft-mtp acceptance collapse on CUDA vs Vulkan) — I
+can reproduce that on this hardware too (41% acceptance CUDA solo vs 64% Vulkan solo,
+same Q3 file), though it's a different symptom (decode quality, not prefill speed).
 
 Tried `--spec-draft-device CUDA0` on the split as a workaround — helps a little
 (532 -> 573) but doesn't recover the loss, so it doesn't look like it's about where
