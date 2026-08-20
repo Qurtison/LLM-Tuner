@@ -543,7 +543,10 @@
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
                 <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider p-4 pb-2">Requests This Session</h3>
-                <div class="overflow-x-auto">
+                <!-- max-height + vertical scroll: without it, once a session
+                     logged more rows than fit on screen the table grew past
+                     the card and the bottom rows were unreachable. -->
+                <div class="overflow-x-auto overflow-y-auto max-h-80">
                     <table class="w-full text-xs">
                         <thead>
                             <tr class="text-gray-500 border-b border-gray-800">
@@ -577,7 +580,8 @@
             </div>
             <div class="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
                 <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider p-4 pb-2">Recent Requests</h3>
-                <div class="overflow-x-auto">
+                <!-- max-height + vertical scroll (see Monitor tab's table). -->
+                <div class="overflow-x-auto overflow-y-auto max-h-80">
                     <table class="w-full text-xs">
                         <thead>
                             <tr class="text-gray-500 border-b border-gray-800">

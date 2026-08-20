@@ -690,14 +690,38 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 }
             }
             else if (line.includes('print_timing:')) {
-                const nDecodedMatch = line.match(/n_decoded\s*=\s*(\d+)/);
-                const tpsMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
-                if (nDecodedMatch && tpsMatch) {
+                // Live per-slot gen progress (print_timings_tg() in
+                // tools/server/server-context.cpp -- at most one line per 3s,
+                // and only once n_gen >= 100). The SLT_INF macro truncates
+                // __func__ to 12 chars, so this line, the prefill-progress
+                // line, and the final summary ALL share the "slot print_timing:
+                // id N | task N | " prefix. The live line's actual format:
+                //   n_gen =  100, tg = 27.00 t/s, tg_3s = 26.50 t/s
+                //
+                // It used to match "n_decoded =" -- a field that only exists in
+                // the /slots HTTP JSON, never in stdout -- so this half of the
+                // branch never fired. Consequences: no GEN_PROGRESS broadcasts
+                // (sidebar's Gen card pegged on the last request's final value
+                // for as long as no NEW dashboard request reset it), no genTps
+                // in recorded samples (no gen line in the Monitor/History omni
+                // graphs), and -- most damaging -- no markRequestActivity()
+                // during generation, so the 3s activity-timeout sampler stopped
+                // recording ~3s after prefill ended. That's why omni graphs
+                // spanned only the prefill plus a tail (25s) while the CSV row
+                // honestly said the request took 100+s.
+                const nGenMatch = line.match(/n_gen\s*=\s*(\d+)/) || line.match(/n_decoded\s*=\s*(\d+)/);
+                const tg3sMatch = line.match(/tg_3s\s*=\s*(\d+\.?\d*)\s*t\/s/);
+                const tgMatch = line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
+                if (nGenMatch && (tg3sMatch || tgMatch)) {
+                    // tg_3s is the last-3-second window -- the actual current
+                    // speed. tg is the average since generation started, which
+                    // barely moves and reads as "pegged" on a live graph.
+                    const liveTpsMatch = tg3sMatch || tgMatch;
                     // Generation phase -- clear any prefill-phase state so
                     // telemetry samples taken from here on carry the gen rate,
                     // not a stale prefill stamp.
-                    liveProgress = { genTps: parseFloat(tpsMatch[1]) || null, genTokens: parseInt(nDecodedMatch[1], 10) || null };
-                    broadcastState(`GEN_PROGRESS:${tpsMatch[1]}:${nDecodedMatch[1]}:${nDecodedMatch[1]}`);
+                    liveProgress = { genTps: parseFloat(liveTpsMatch[1]) || null, genTokens: parseInt(nGenMatch[1], 10) || null };
+                    broadcastState(`GEN_PROGRESS:${liveTpsMatch[1]}:${nGenMatch[1]}:${nGenMatch[1]}`);
                     markRequestActivity();
                 }
 

@@ -600,7 +600,10 @@ function handleSseMessage(e) {
         if (data.error) {
             const chatBox = document.getElementById('chat-container');
             if (document.getElementById('empty-state')) document.getElementById('empty-state').classList.add('hidden');
-            chatBox.innerHTML += `<div class="msg-wrapper p-4 rounded-xl border border-red-900/50 bg-red-900/10 max-w-4xl mx-auto shadow-sm w-full mb-4 text-red-400 text-sm font-semibold">${escapeHtml(data.error)}</div>`;
+            // insertAdjacentHTML, not innerHTML += (see submitPrompt's note) --
+            // an error bubble must not re-parse the chat box and destroy
+            // existing messages' omni-chart canvases.
+            chatBox.insertAdjacentHTML('beforeend', `<div class="msg-wrapper p-4 rounded-xl border border-red-900/50 bg-red-900/10 max-w-4xl mx-auto shadow-sm w-full mb-4 text-red-400 text-sm font-semibold">${escapeHtml(data.error)}</div>`);
             chatBox.scrollTop = chatBox.scrollHeight;
             // Item 8c: Highlight log panels red on crash
             const mlc = document.getElementById('master-logs-container');
@@ -1610,6 +1613,14 @@ let hwChartContainer = null;
 let hwChartCanvas = null;
 // Track current phase for dynamic t/s line color: 'prefill' | 'think' | 'answer'
 let currentResponsePhase = 'prefill';
+// Per-second token rates for the LAST tpsLoop tick, split by phase. Written by
+// submitPrompt's tpsLoop (which counts SSE deltas -- the ONLY observer that
+// knows which tokens are reasoning vs content; llama-server's stdout timing
+// lines count all decoded tokens together), read by pollTelemetry when it
+// builds omni samples. The split lets the omni charts draw Thinking Tok/s and
+// Answer Tok/s as separate lines (see buildOmniDatasets).
+let lastThinkTps = 0;
+let lastAnswerTps = 0;
 
 async function submitPrompt() {
     const inputEl = document.getElementById('user-prompt');
@@ -1633,8 +1644,15 @@ async function submitPrompt() {
     document.getElementById('status-indicator').innerText = 'Loading context...';
 
     // Build UI Bubbles
+    // insertAdjacentHTML, NOT `innerHTML +=` -- the latter re-serializes and
+    // re-parses the ENTIRE chat box, replacing every existing node. That
+    // destroys earlier messages' <canvas> elements along with their Chart.js
+    // omni graphs (and the __hwMetrics attached to their wrappers), which is
+    // why a finished message's graph vanished the instant the next prompt was
+    // sent. Appending parsed fragments leaves existing nodes -- and their
+    // chart instances -- untouched.
     const chatBox = document.getElementById('chat-container');
-    chatBox.innerHTML += `
+    chatBox.insertAdjacentHTML('beforeend', `
         <div class="msg-wrapper p-4 rounded-xl border border-gray-700 bg-gray-800 max-w-4xl mx-auto shadow-sm w-full mb-4">
             <div class="flex justify-between items-center mb-2">
                 <div class="text-xs text-gray-300 uppercase">User</div>
@@ -1689,7 +1707,7 @@ async function submitPrompt() {
             </div>
             <div class="msg-content prose prose-invert max-w-none text-sm overflow-x-auto break-words"></div>
         </div>
-    `;
+    `);
     chatBox.scrollTop = chatBox.scrollHeight;
     // The user bubble's content is static from the moment it's inserted, so
     // it can be collapse-checked immediately (unlike the assistant bubble
@@ -1755,6 +1773,7 @@ async function submitPrompt() {
     tpsChart.data.datasets[1].data = []; // Gen Speed
     tpsChart.update('none');
     livePrefillTps = null; // stale prefill from the previous request must not plot into this one
+    lastThinkTps = 0; lastAnswerTps = 0; // stale per-phase rates from the previous request must not plot into this one
 
     // Reset live numbers
     document.getElementById('metric-prefill').innerText = '0.0 t/s';
@@ -1768,6 +1787,8 @@ async function submitPrompt() {
     updateContextUI(estimatedPromptTokens, currentContextLimit);
 
     let totalTokensGenerated = 0;
+    let thinkTokenCount = 0;   // reasoning deltas since last tpsLoop tick
+    let contentTokenCount = 0; // content deltas since last tpsLoop tick
     window.lastSlotProgress = '';
 
     let slotsLoop = setInterval(async () => {
@@ -1799,6 +1820,9 @@ async function submitPrompt() {
         const dtSec = Math.max(0.25, (nowTick - lastTpsTickAt) / 1000);
         lastTpsTickAt = nowTick;
         const tps = tokenCount / dtSec; tokenCount = 0;
+        const thinkTps = thinkTokenCount / dtSec; thinkTokenCount = 0;
+        const answerTps = contentTokenCount / dtSec; contentTokenCount = 0;
+        lastThinkTps = thinkTps; lastAnswerTps = answerTps;
         document.getElementById('current-tps').innerText = tps.toFixed(1);
         document.getElementById('metric-gen').innerText = `${tps.toFixed(1)} t/s`;
         
@@ -1976,6 +2000,7 @@ async function submitPrompt() {
                                     timelineEls.tLbl.classList.remove('hidden');
                                 }
                                 reasoningTokenCount++;
+                                thinkTokenCount++;
                                 
                                 const currThinkTime = ((Date.now() - startTime) / 1000) - timeToFirstToken;
                                 if (currThinkTime > 0.1) {
@@ -2001,6 +2026,7 @@ async function submitPrompt() {
                                     }
                                 }
                                 answerTokenCount++;
+                                contentTokenCount++;
                                 
                                 const currAnsTime = ((Date.now() - startTime) / 1000) - timeToFirstToken - timeToFirstContent;
                                 if (currAnsTime > 0.1) {
@@ -2061,7 +2087,7 @@ async function submitPrompt() {
             await fetch('/api/log', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(logPayload) });
         } catch(e) {}
         
-    } catch (err) { if(err.name!=='AbortError') contentBody.innerHTML += `<br>Error: ${escapeHtml(err.message)}`; }
+    } catch (err) { if(err.name!=='AbortError') contentBody.insertAdjacentHTML('beforeend', `<br>Error: ${escapeHtml(err.message)}`); }
     finally {
         clearInterval(tpsLoop); clearInterval(slotsLoop); abortController = null;
         inputEl.disabled = false; inputEl.focus(); document.getElementById('submit-btn').disabled = false;
@@ -2825,7 +2851,11 @@ async function pollTelemetry() {
             // it was taken, so they render as two distinct non-overlapping lines.
             const isPrefillPhase = currentResponsePhase === 'prefill';
             const prefillTpsVal = parseFloat(document.getElementById('metric-prefill').innerText) || 0;
-            const genTpsVal = parseFloat(document.getElementById('metric-gen').innerText) || 0;
+            // Gen rate split into thinking vs answer (see lastThinkTps/
+            // lastAnswerTps) -- each is 0 in whichever phase isn't running, so
+            // the two lines never overlap. Server-recorded samples (Monitor/
+            // History) can't make this split and carry a single combined
+            // genTps instead.
             const snap = {
                 t: Date.now(),
                 masterPwr: stats.master ? stats.master.gpu_pwr : 0,
@@ -2840,7 +2870,8 @@ async function pollTelemetry() {
                 workerVram: workerReporting && stats.worker?.vram_used != null ? +(stats.worker.vram_used / 1024).toFixed(2) : null,
                 prefillProgress: isPrefillPhase ? livePrefillProgress : null,
                 prefillTps: isPrefillPhase ? prefillTpsVal : null,
-                genTps: isPrefillPhase ? null : genTpsVal
+                thinkTps: lastThinkTps > 0 ? +lastThinkTps.toFixed(1) : null,
+                answerTps: lastAnswerTps > 0 ? +lastAnswerTps.toFixed(1) : null
             };
             responseMetrics.push(snap);
             refreshExpandedHwChartLive();
@@ -2969,10 +3000,15 @@ function renderChatSession(messages, scrollToIndex = -1) {
         return;
     }
 
+    // insertAdjacentHTML per message (not innerHTML +=) -- this path starts
+    // from an empty box and hydrates the charts once at the end, so behavior
+    // is identical, but += would re-serialize the whole growing box on every
+    // message (O(n^2) on long sessions) and is the same canvas-destroying
+    // footgun as in submitPrompt.
     messages.forEach((msg, idx) => {
         const ts = msg.timestamp || '';
         if (msg.role === 'user') {
-            chatBox.innerHTML += `
+            chatBox.insertAdjacentHTML('beforeend', `
                 <div id="msg-${idx}" class="msg-wrapper p-4 rounded-xl border border-gray-700 bg-gray-800 max-w-4xl mx-auto shadow-sm w-full mb-4">
                     <div class="flex justify-between items-center mb-2">
                         <div class="text-xs text-gray-300 uppercase">User</div>
@@ -2983,9 +3019,9 @@ function renderChatSession(messages, scrollToIndex = -1) {
                     </div>
                     <div class="msg-content text-sm text-gray-100 whitespace-pre-wrap overflow-x-auto break-words">${escapeHtml(msg.content)}</div>
                 </div>
-            `;
+            `);
         } else if (msg.role === 'assistant') {
-            chatBox.innerHTML += `
+            chatBox.insertAdjacentHTML('beforeend', `
                 <div id="msg-${idx}" class="msg-wrapper p-5 rounded-xl border border-indigo-900/30 bg-gray-900 max-w-4xl mx-auto shadow-sm w-full mb-4">
                     <div class="flex justify-between items-center mb-2">
                         <div class="text-xs text-indigo-400 uppercase tracking-wider">Assistant</div>
@@ -3016,7 +3052,7 @@ function renderChatSession(messages, scrollToIndex = -1) {
                     ` : ''}
                     <div class="msg-content prose prose-invert max-w-none text-sm overflow-x-auto break-words">${marked.parse(msg.content)}</div>
                 </div>
-            `;
+            `);
         }
     });
     
@@ -3039,28 +3075,21 @@ function renderChatSession(messages, scrollToIndex = -1) {
                 // expand handler wired up at all.
                 const wrapper = canvas.closest('.hw-history-chart-wrapper');
                 if (wrapper) wrapper.__hwMetrics = metrics;
+                // Same shared builder + compact options as the LIVE inline
+                // chart (see pollTelemetry) -- this used to be an ad-hoc 5-line
+                // version (no prefill/think/answer tps, no VRAM, no CPU, no
+                // gap bands), so restored bubbles drew a different set of lines
+                // than the live ones they were captured from.
+                const compactOptions = buildOmniOptions();
+                compactOptions.scales.x.display = false;
+                compactOptions.scales.x.title.display = false;
+                compactOptions.scales.y.title.display = false;
+                compactOptions.scales.y2.title.display = false;
                 new Chart(canvas.getContext('2d'), {
                     type: 'line',
-                    data: {
-                        labels: metrics.map((_, i) => i),
-                        datasets: [
-                            { label: 'M-GPU W', data: metrics.map(s => s.masterPwr), borderColor: 'rgba(250,204,21,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                            { label: 'W-GPU W', data: metrics.map(s => s.workerPwr), borderColor: 'rgba(248,113,113,0.9)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' },
-                            { label: 'M-Temp °C', data: metrics.map(s => s.masterTemp), borderColor: 'rgba(251,146,60,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                            { label: 'GPU Util %', data: metrics.map(s => s.masterGpuUtil), borderColor: 'rgba(167,139,250,0.7)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [3,3], yAxisID: 'y2' },
-                            { label: 'Net MB/s', data: metrics.map(s => s.netMbps), borderColor: 'rgba(52,211,153,0.8)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: 'y' }
-                        ]
-                    },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: { duration: 0 },
-                        interaction: { intersect: false, mode: 'index' },
-                        plugins: { legend: { display: true, labels: { color: '#6b7280', font: { size: 9 }, boxWidth: 10, padding: 6 } } },
-                        scales: {
-                            x: { display: false },
-                            y: { position: 'left', grid: { color: 'rgba(55,65,81,0.4)' }, ticks: { color: '#6b7280', font: { size: 9 } } },
-                            y2: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#6b7280', font: { size: 9 } }, min: 0, max: 100 }
-                        }
-                    }
+                    data: { datasets: buildOmniDatasets(metrics, 'rgba(74,222,128,1)') },
+                    options: compactOptions,
+                    plugins: [omniPointLabelsPlugin, omniGapBandsPlugin]
                 });
             } catch(e) {}
         });
@@ -3575,13 +3604,25 @@ function buildOmniDatasets(metrics, tpsLineColor) {
         { label: `${A} Util (%)`, data: toPoints(metrics, 'masterGpuUtil'), borderColor: 'rgba(167,139,250,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
         { label: `${B} Util (%)`, data: toPoints(metrics, 'workerGpuUtil'), borderColor: 'rgba(217,70,239,1)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [2,2], yAxisID: 'y2' },
         { label: 'Net MB/s', data: toPoints(metrics, 'netMbps'), borderColor: 'rgba(96,165,250,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y' },
-        // Prefill and gen tps are mutually exclusive per-sample (each sample is
-        // only ever in one phase), so these render as two distinct
+        // Prefill, thinking, and answer tps are mutually exclusive per-sample
+        // (each sample is only ever in one phase), so these render as distinct
         // non-overlapping segments rather than one line switching color.
         // On their own auto-scaled axis (y3) -- they used to sit on y2, whose
         // 0-100 clamp silently CLIPPED every prefill point above 100 t/s off
         // the chart (i.e. nearly all of them on this hardware).
+        //
+        // Gen is split into Thinking vs Answer where the data source can tell
+        // them apart: the dashboard's own chat samples (the browser consumes
+        // the SSE deltas and knows which are reasoning_content). Server-
+        // recorded samples (Monitor/History/session graphs, bench) can't --
+        // llama-server's stdout timing lines count all decoded tokens together
+        // -- so they carry a single combined 'Gen Tok/s' line instead. All
+        // three datasets always exist (fixed order keeps per-dataset
+        // visibility state stable across setOmniDatasets updates); a dataset
+        // with no non-null points simply draws nothing.
         { label: 'Prefill Tok/s', data: toPoints(metrics, 'prefillTps'), borderColor: 'rgba(234,179,8,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
+        { label: 'Thinking Tok/s', data: toPoints(metrics, 'thinkTps'), borderColor: 'rgba(59,130,246,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
+        { label: 'Answer Tok/s', data: toPoints(metrics, 'answerTps'), borderColor: 'rgba(74,222,128,1)', backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Gen Tok/s', data: toPoints(metrics, 'genTps'), borderColor: tpsLineColor, backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, yAxisID: 'y3', spanGaps: false },
         { label: 'Prefill Progress (%)', data: metrics.map(s => ({ x: s.t, y: s.prefillProgress != null ? +(s.prefillProgress * 100).toFixed(1) : null })), borderColor: 'rgba(45,212,191,0.9)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.1, borderDash: [5,3], yAxisID: 'y2', spanGaps: false },
         { label: `VRAM ${A} (GB)`, data: toPoints(metrics, 'masterVram'), borderColor: 'rgba(148,163,184,0.8)', backgroundColor: 'transparent', borderWidth: 1, pointRadius: 0, pointHoverRadius: 3, tension: 0.3, borderDash: [1,2], yAxisID: 'y2' },
