@@ -2,86 +2,77 @@
 
 ---
 
-**Title:** `speculative : draft-mtp roughly halves prompt processing speed (catch-up decode re-processes the whole prompt when MTP context is not mem-shared)`
-
-**Labels suggestion:** performance, speculative
+**Title:** `Eval bug: draft-mtp costs ~1.8x prompt processing on CUDA (vs ~1.15x on Vulkan) — per-ubatch catch-up decode halves graph reuse`
 
 ---
 
 ## Summary
 
-Enabling `--spec-type draft-mtp` on a model whose MTP context does not share KV memory
-with the target cuts **prompt processing throughput roughly in half** (~1.85× slower in
-my measurements). The cost appears to come from the MTP `process()` hook running a
-synchronous catch-up decode in the draft context for **every prefill ubatch**, so the
-prompt is effectively processed twice — and on multi-GPU layer split, the per-ubatch
-synchronization also defeats ubatch pipelining.
+Enabling `--spec-type draft-mtp` on a model whose MTP context is not mem-shared makes
+prompt processing **~1.8× slower on the CUDA backend**, but only **~1.15× slower on
+Vulkan** — same model file, same flags, same machine. The MTP `process()` hook runs a
+synchronous catch-up decode in the draft context for every prefill ubatch; the
+`graphs reused` counter shows this interleaving **halves graph reuse on both
+backends**, but only CUDA pays a large time cost for the lost reuse (re-capture /
+rebuild being far more expensive there than Vulkan's dispatch path).
 
-For long-context workloads (agents, large-document ingestion, cache-cold re-prefills
-after restarts) this tax is large enough to eat a substantial fraction of MTP's decode
-benefit: on my usage profile, MTP's ~+45% generation gain arrives alongside a ~2×
-slowdown of every cold prefill.
+For long-context workloads (agents, large-document ingestion, cache-cold re-prefills)
+this roughly doubles every cold prefill on CUDA and CUDA-containing multi-GPU splits.
 
 ## Environment
 
-- llama.cpp `6d0549831` (also reproduced identically on `6c8dcaa7a`, 2026-08-03 — so
-  this is not a recent regression; both builds behave the same)
+- llama.cpp `6d0549831` (identical behavior on `6c8dcaa7a`, 2026-08-03 — not a recent
+  regression)
 - Linux, CUDA 12.0 + Vulkan build
-- Devices: RTX 4090 Laptop (CUDA0) + RX 7900 XTX (Vulkan/RADV), `--split-mode layer`,
-  `-ts 40/60`
-- Model: Qwen3.8-27B (arch `qwen35`, hybrid SSM + attention, `nextn_predict_layers = 1`),
-  UD-Q6_K_XL quant
+- GPUs: RTX 4090 Laptop (internal PCIe; CUDA0 / Vulkan1), RX 7900 XTX (RADV; Vulkan2)
+- Models: Qwen3.8-27B (`qwen35`, hybrid SSM+attention, `nextn_predict_layers=1`) at
+  UD-Q6_K_XL and UD-Q3_K_XL; Qwen3.6-35B-A3B (`qwen35moe`, nextn=1) Q4_K_M
 - `-fa on`, `-ctk q8_0 -ctv q8_0`
 
 ## Reproduction
 
-Launch llama-server twice, identical except for `--spec-type`, and send the same
-~22k-token prompt (cache-cold) to each:
+Launch llama-server twice, identical except `--spec-type draft-mtp` vs
+`--spec-type ngram-map-k4v` (ngram leaves prefill untouched — it matches the no-spec
+prefill rate), send the same ~22k-token cold prompt, compare
+`prompt eval time ... tokens per second`:
 
 ```
-# A: MTP enabled
-llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf -c 262144 -ngl 999 -fa on \
-  -ctk q8_0 -ctv q8_0 --spec-type draft-mtp --spec-draft-n-max 3 \
-  -dev CUDA0,Vulkan2 -ts 40/60 --jinja
-
-# B: no MTP (ngram-only or no spec — both give the same prefill numbers)
-llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf -c 262144 -ngl 999 -fa on \
-  -ctk q8_0 -ctv q8_0 --spec-type ngram-map-k4v \
-  -dev CUDA0,Vulkan2 -ts 40/60 --jinja
+llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 -ngl 999 -fa on \
+  -ctk q8_0 -ctv q8_0 --spec-type draft-mtp --spec-draft-n-max 3 -dev CUDA0 --jinja
+# vs --spec-type ngram-map-k4v
 ```
 
-Compare `prompt eval time ... tokens per second` in the per-request timings.
+## Measurements — isolation matrix
 
-## Measurements
+22k-token cold prompt, prompt-eval t/s, no-MTP vs MTP (same file per row):
 
-22,284-token cold prompt, prompt-eval t/s from server timings, several runs each:
+| config | backend | no MTP | with MTP | tax |
+|---|---|---|---|---|
+| 27B UD-Q3_K_XL, 4090 solo | **CUDA** | 1007 | 555 | **1.82×** |
+| 27B UD-Q3_K_XL, 7900 XTX solo | Vulkan | 572 | 505 | **1.13×** |
+| 35B-A3B Q4_K_M, 7900 XTX solo | Vulkan | 1593 | 1307 | 1.22× |
+| 27B UD-Q6_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 973 | 532 | 1.83× |
 
-| config | prompt t/s |
+Same model, same flags, two backends: **1.82× on CUDA vs 1.13× on Vulkan** — the cost
+is backend-specific, not (as I first assumed) a multi-GPU pipeline effect; the split
+setup inherits CUDA's tax.
+
+**`graphs reused` (print_timings) for the Q3 pairs — MTP halves reuse on both
+backends:**
+
+| run | graphs reused (rep1 / rep2) |
 |---|---|
-| `--spec-type draft-mtp,ngram-map-k4v` | 532 / 522 |
-| `--spec-type draft-mtp` | 527 |
-| `--spec-type ngram-map-k4v` (no MTP) | 973 / 965 |
-| no spec at all (llama-bench pp, same split) | ~962 |
+| CUDA solo, ngram | 960 / 1847 |
+| CUDA solo, draft-mtp | 425 / 837 |
+| Vulkan solo, ngram | 897 / 1841 |
+| Vulkan solo, draft-mtp | 346 / 773 |
 
-MTP consistently costs ~1.85× on prompt processing. Generation-side MTP behavior is
-fine (that's the point of it); this issue is only about the prefill cost.
-
-**Single-GPU isolation** (Qwen3.6-35B-A3B, `qwen35moe`, nextn=1, solo on the 7900 XTX,
-same 22k cold prompt):
-
-| config | prompt t/s |
-|---|---|
-| `--spec-type draft-mtp` | 1307 |
-| `--spec-type ngram-map-k4v` (no MTP) | 1593 |
-
-i.e. **~1.22× single-GPU vs ~1.85× on the two-GPU layer split**. The raw catch-up
-decode accounts for ~20%; the larger multi-GPU cost appears to be the synchronous
-per-ubatch draft decode **stalling the layer-split ubatch pipeline**.
+Generation-side MTP behavior is good (+40–60% gen in these runs); this issue is only
+about the prompt-processing cost.
 
 ## Where the cost seems to come from
 
-In `common/speculative.cpp`, the MTP implementation's `process(batch_in)` hook (called
-per prefill ubatch) does:
+`common/speculative.cpp`, MTP `process(batch_in)` hook, runs per prefill ubatch:
 
 ```cpp
 // if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode
@@ -90,25 +81,20 @@ if (!is_mem_shared) {
     ...
 ```
 
-i.e. for every prompt ubatch, a catch-up decode runs in the draft context. For a model
-whose MTP context is not mem-shared (as here), that means the entire prompt is decoded a
-second time. A single extra nextn layer should cost a few percent, not ~90% — I suspect
-the synchronous per-ubatch draft decode also stalls the multi-GPU ubatch pipeline
-(GGML_SCHED_MAX_COPIES overlap), which would explain the size of the hit on split
-setups. The single-GPU isolation above separates the two components: ~1.22× from the extra decode itself, the rest from the pipeline stall.
+Alternating target-ctx and draft-ctx decodes every ubatch defeats graph reuse (see
+table above). Vulkan tolerates the rebuilds; CUDA's graph re-capture cost appears to
+account for most of the 1.8×. The target also emits embeddings for every prompt
+position (`llama_set_embeddings_nextn`), which presumably adds some memory traffic on
+top.
 
-There is also the related requirement that the target emit embeddings/logits for every
-prompt position (`llama_set_embeddings_nextn`, and the `begin()` warning about
-"process() hook may not have run on every prefill ubatch"), which presumably adds
-memory traffic of its own.
+## Possible directions (outsider's read)
 
-## Possible directions (from an outsider's read)
+- Keep separate cached graphs per context so target/draft interleaving doesn't
+  invalidate reuse (the counter suggests reuse mechanically halves, i.e. the two
+  contexts are contending rather than each reusing its own).
+- Batch/defer the catch-up decodes (e.g. run the draft catch-up once per N ubatches or
+  asynchronously) instead of strictly interleaving.
+- Extend the `is_mem_shared` fast path to more architectures where layout allows.
 
-- Run the catch-up decode asynchronously / overlapped with the next target ubatch
-  instead of synchronously between ubatches.
-- Fuse the nextn-layer prompt pass into the target graph when the contexts live on the
-  same devices (it already shares hidden states via the embd copy).
-- Extend the `is_mem_shared` fast path to more architectures where the layout allows.
-
-Happy to run patches or provide more measurements — the setup above is reproducible on
-demand, including a second quant (Q8_0) and a dense-attention 7B for contrast.
+Happy to run patches or provide more measurements — every row above is reproducible on
+demand (models are public on HF).

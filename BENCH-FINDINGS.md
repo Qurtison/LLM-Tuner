@@ -174,12 +174,13 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
   48–96min of gen. **Keeping MTP wins decisively** despite the tax.
 - **Re-measured after rebuilding at master `6d0549831` (2026-08-18): the tax is
   unchanged** — prefill 532/522 t/s with MTP vs 973/965 without (~1.85×).
-- **Single-GPU isolation (2026-08-19)**: Qwen3.6-35B-A3B (same arch family,
-  nextn=1) solo on the XTX, 22k cold prompt: 1307 t/s with MTP vs 1593 without =
-  **1.22×**. So the raw catch-up decode costs ~20%; the remaining ~50 points of the
-  multi-GPU tax come from the synchronous per-ubatch draft decode **stalling the
-  layer-split ubatch pipeline**. The dominant cost is the sync, not the compute —
-  which makes async/overlapped catch-up the high-payoff upstream fix.
+- **Isolation matrix (2026-08-19) — the tax is CUDA-specific, not multi-GPU**:
+  same Q3 27B file solo on each card: **1.82× on CUDA** (1007→555) vs **1.13× on
+  Vulkan** (572→505); 35B-A3B on Vulkan 1.22×; the CUDA+Vulkan split's 1.85× is
+  inherited from the CUDA side. Smoking gun: `graphs reused` **halves under MTP on
+  both backends** (960→425 CUDA, 897→346 Vulkan) — the per-ubatch target/draft
+  interleaving defeats graph reuse, and CUDA's graph re-capture is what's expensive.
+  eGPU/TB4 and the pipeline-stall theory both exonerated by measurement.
 - Isolation bonus: on the A3B, MTP is +61% generation (83.9 vs 52.1 t/s, 66%
   acceptance) — the 35B-A3B solo on the XTX is a legitimately fast light-duty
   config (~84 t/s gen, ~1300-1600 t/s prefill).
