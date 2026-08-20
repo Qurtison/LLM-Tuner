@@ -46,7 +46,8 @@ function launchBenchProcess(cfg) {
     const args = ['-m', cfg.modelPath];
     if (cfg.rawArgs) {
         // manual run line: everything after the resolved -m, verbatim
-        args.push(...String(cfg.rawArgs).split(/\s+/).filter(Boolean));
+        // (tokenizeCommand so quoted spans stay single arguments)
+        args.push(...tokenizeCommand(String(cfg.rawArgs).trim()));
         return spawnBench(benchBin, args);
     }
     if (cfg.fa != null) args.push('-fa', cfg.fa ? '1' : '0');
@@ -59,7 +60,7 @@ function launchBenchProcess(cfg) {
     if (cfg.devices) args.push('-dev', String(cfg.devices));
     if (cfg.splitMode) args.push('-sm', String(cfg.splitMode));
     if (cfg.tensorSplit) args.push('-ts', String(cfg.tensorSplit));
-    if (cfg.extraArgs) args.push(...String(cfg.extraArgs).split(/\s+/).filter(Boolean));
+    if (cfg.extraArgs) args.push(...tokenizeCommand(String(cfg.extraArgs).trim()));
     return spawnBench(benchBin, args);
 }
 function spawnBench(benchBin, args) {
@@ -83,7 +84,13 @@ function spawnBench(benchBin, args) {
     };
     benchProcess.stdout.on('data', onBenchData);
     benchProcess.stderr.on('data', onBenchData);
+    // One-shot: on a failed spawn BOTH 'error' and 'exit' fire, and running
+    // this twice would overwrite benchLastSamples with an empty buffer and
+    // advance the matrix queue by TWO runs.
+    let runFinished = false;
     const finishRun = (logLine, doneTag) => {
+        if (runFinished) return;
+        runFinished = true;
         benchRunning = false;
         benchProcess = null;
         benchLastSamples = takeRequestSamples();
@@ -99,18 +106,27 @@ function spawnBench(benchBin, args) {
     return null;
 }
 function maybeStartNextQueued() {
-    if (benchQueue.length === 0) { benchQueueTotal = 0; return; }
-    if (llamaProcess) {
-        benchLog('[matrix] a model was launched mid-matrix -- aborting remaining runs');
+    try {
+        if (benchQueue.length === 0) { benchQueueTotal = 0; return; }
+        if (llamaProcess) {
+            benchLog('[matrix] a model was launched mid-matrix -- aborting remaining runs');
+            benchQueue = []; benchQueueTotal = 0;
+            return;
+        }
+        const next = benchQueue.shift();
+        const k = benchQueueTotal - benchQueue.length;
+        benchCurrentLabel = next.label || next.devices || 'run';
+        benchLog(`===== llama-bench ${k}/${benchQueueTotal}: ${benchCurrentLabel} =====`);
+        const err = launchBenchProcess(next);
+        if (err) maybeStartNextQueued();
+    } catch (err) {
+        // A malformed queued config (e.g. a build id that no longer exists in
+        // dashboard.config.json) throws inside launchBenchProcess -- and this
+        // fires from a process 'exit' handler, so an uncaught throw would take
+        // the whole dashboard down mid-matrix.
         benchQueue = []; benchQueueTotal = 0;
-        return;
+        benchLog(`[matrix] aborted: ${err.message}`);
     }
-    const next = benchQueue.shift();
-    const k = benchQueueTotal - benchQueue.length;
-    benchCurrentLabel = next.label || next.devices || 'run';
-    benchLog(`===== llama-bench ${k}/${benchQueueTotal}: ${benchCurrentLabel} =====`);
-    const err = launchBenchProcess(next);
-    if (err) maybeStartNextQueued();
 }
 
 let benchProcess = null;
@@ -154,16 +170,27 @@ const DEFAULT_LLAMA_SERVER_BUILDS = [
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, 'dashboard.config.json');
 let dashboardConfig = { llamaServerBuilds: DEFAULT_LLAMA_SERVER_BUILDS };
 
+// A build entry is usable only if it carries a non-empty binary path --
+// dashboard.config.json is user-editable, and a half-deleted entry must not
+// corrupt the build list (see getLlamaServerBinary below).
+function isValidBuild(b) {
+    return b && typeof b.path === 'string' && b.path.trim().length > 0;
+}
+
 async function loadDashboardConfig() {
     try {
         const parsed = JSON.parse(await fs.readFile(DASHBOARD_CONFIG_FILE, 'utf-8'));
-        if (Array.isArray(parsed.llamaServerBuilds) && parsed.llamaServerBuilds.length > 0) {
-            dashboardConfig.llamaServerBuilds = parsed.llamaServerBuilds;
-        } else if (parsed.llamaServerBinary) {
+        let builds = null;
+        if (Array.isArray(parsed.llamaServerBuilds)) {
+            builds = parsed.llamaServerBuilds.filter(isValidBuild);
+        } else if (typeof parsed.llamaServerBinary === 'string' && parsed.llamaServerBinary.trim() !== '') {
             // Old single-path config format, from before builds existed --
             // wrap it as a one-item build list rather than requiring every
             // existing dashboard.config.json to be hand-migrated.
-            dashboardConfig.llamaServerBuilds = [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary }];
+            builds = [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary.trim() }];
+        }
+        if (builds && builds.length > 0) {
+            dashboardConfig.llamaServerBuilds = builds;
         }
     } catch {
         // missing/invalid config file -- keep the default
@@ -181,6 +208,9 @@ function getLlamaServerBuilds() {
 // remove a build.
 function getLlamaServerBinary(buildId) {
     const builds = getLlamaServerBuilds();
+    if (!builds || builds.length === 0) {
+        throw new Error('No valid llama-server builds configured');
+    }
     const found = buildId ? builds.find(b => b.id === buildId) : null;
     return (found || builds[0]).path;
 }
@@ -337,70 +367,131 @@ function parseHelpFlags(helpText) {
     return entries;
 }
 
+// Coerce a UI/API value to a finite number, or undefined when it's missing,
+// empty, or not numeric. Number.isNaN() alone is NOT sufficient: it doesn't
+// coerce, so '' and 'abc' sail through it, and an empty string would emit a
+// flag with no value (e.g. `--top-k` "").
+function toFiniteNumber(v) {
+    if (v === null || v === undefined) return undefined;
+    if (typeof v === 'boolean') return undefined;
+    if (typeof v === 'string' && v.trim() === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+}
+
+// Coerce to a non-empty trimmed string, or undefined. Preserves "0" (unlike
+// `v || undefined`, which would drop a legitimate zero).
+function toNonEmptyString(v) {
+    if (v === null || v === undefined) return undefined;
+    const s = String(v).trim();
+    return s.length > 0 ? s : undefined;
+}
+
 function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
-    const args = ['-m', mapModelPath(config.modelPath),
-        '-c', config.ctx.toString(), '-ngl', config.ngl.toString(),
-        '--host', '0.0.0.0', '--port', '8080', '--metrics'];
+    // Validate the required knobs up front so a malformed config fails with a
+    // clear message instead of spawning `llama-server -m undefined -c NaN`
+    // (a blank ctx/ngl field reaches us as NaN -> JSON null).
+    const modelPath = toNonEmptyString(config.modelPath);
+    if (!modelPath) throw new Error('modelPath is required');
+
+    const ctx = toFiniteNumber(config.ctx);
+    const ngl = toFiniteNumber(config.ngl);
+    if (ctx === undefined || ngl === undefined) {
+        throw new Error('ctx and ngl must be numbers');
+    }
+
+    // Port: the UI has no port field today, but a raw command (or a future UI)
+    // may set one -- and the /slots poll + CSV rows depend on this being real.
+    const port = toFiniteNumber(toNonEmptyString(config.port) || '8080');
+    if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('port must be an integer between 1 and 65535');
+    }
+
+    const args = ['-m', mapModelPath(modelPath),
+        '-c', String(ctx), '-ngl', String(ngl),
+        '--host', '0.0.0.0', '--port', String(port), '--metrics'];
 
     if (config.fa) args.push('-fa', 'on');
-    if (config.cacheK) args.push('--cache-type-k', config.cacheK);
-    if (config.cacheV) args.push('--cache-type-v', config.cacheV);
+    const cacheK = toNonEmptyString(config.cacheK);
+    if (cacheK) args.push('--cache-type-k', cacheK);
+    const cacheV = toNonEmptyString(config.cacheV);
+    if (cacheV) args.push('--cache-type-v', cacheV);
     // specType is a comma-separated list of strategies (llama-server accepts
     // e.g. `--spec-type draft-mtp,ngram-simple`); older configs stored a
     // single value, which is just a one-item list.
-    if (config.specType) {
-        args.push('--spec-type', config.specType);
-        args.push('--spec-draft-n-max', (config.specDraftNMax || 2).toString());
-        if (config.specDraftNMin != null && !Number.isNaN(config.specDraftNMin)) {
-            args.push('--spec-draft-n-min', config.specDraftNMin.toString());
+    const specType = toNonEmptyString(config.specType);
+    if (specType) {
+        args.push('--spec-type', specType);
+        const specDraftNMax = toFiniteNumber(config.specDraftNMax);
+        args.push('--spec-draft-n-max', String(specDraftNMax !== undefined ? specDraftNMax : 2));
+        const specDraftNMin = toFiniteNumber(config.specDraftNMin);
+        if (specDraftNMin !== undefined) {
+            args.push('--spec-draft-n-min', String(specDraftNMin));
         }
-        if (config.specDraftModel) args.push('--spec-draft-model', config.specDraftModel);
+        const specDraftModel = toNonEmptyString(config.specDraftModel);
+        if (specDraftModel) args.push('--spec-draft-model', specDraftModel);
         // Shared ngram knobs: llama-server namespaces them per strategy
         // (--spec-ngram-map-k4v-size-n etc.), so emit the same value for each
         // checked strategy that takes them. Blank fields omit the flags
         // (llama defaults: size-n 12, size-m 48, min-hits 1).
         const ngramFlagStems = { 'ngram-simple': 'ngram-simple', 'ngram-map-k': 'ngram-map-k', 'ngram-map-k4v': 'ngram-map-k4v' };
-        for (const type of config.specType.split(',').map(s => s.trim())) {
+        for (const type of specType.split(',').map(s => s.trim())) {
             const stem = ngramFlagStems[type];
             if (!stem) continue;
-            if (config.specNgramSizeN != null && !Number.isNaN(config.specNgramSizeN)) {
-                args.push(`--spec-${stem}-size-n`, config.specNgramSizeN.toString());
-            }
-            if (config.specNgramSizeM != null && !Number.isNaN(config.specNgramSizeM)) {
-                args.push(`--spec-${stem}-size-m`, config.specNgramSizeM.toString());
-            }
-            if (config.specNgramMinHits != null && !Number.isNaN(config.specNgramMinHits)) {
-                args.push(`--spec-${stem}-min-hits`, config.specNgramMinHits.toString());
-            }
+            const sizeN = toFiniteNumber(config.specNgramSizeN);
+            if (sizeN !== undefined) args.push(`--spec-${stem}-size-n`, String(sizeN));
+            const sizeM = toFiniteNumber(config.specNgramSizeM);
+            if (sizeM !== undefined) args.push(`--spec-${stem}-size-m`, String(sizeM));
+            const minHits = toFiniteNumber(config.specNgramMinHits);
+            if (minHits !== undefined) args.push(`--spec-${stem}-min-hits`, String(minHits));
         }
         args.push('-np', '1');
     }
-    if (config.specDraftNgl) args.push('--spec-draft-ngl', config.specDraftNgl.toString());
-    if (config.preserveThinking) {
+    const specDraftNgl = toFiniteNumber(config.specDraftNgl);
+    if (specDraftNgl !== undefined) args.push('--spec-draft-ngl', String(specDraftNgl));
+    // preserveThinking is a legacy field (older saved profiles) that implies
+    // reasoningPreserve -- dedupe so the flag is only emitted once.
+    const preserveThinking = !!config.preserveThinking;
+    const reasoningPreserve = !!config.reasoningPreserve;
+    if (preserveThinking) {
         args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
+    }
+    if (preserveThinking || reasoningPreserve) {
         args.push('--reasoning-preserve');
     }
     args.push(...deviceArgs);
-    if (config.reasoningPreserve) {
-        args.push('--reasoning-preserve');
-    }
-    if (config.temp != null && !Number.isNaN(config.temp)) args.push('--temp', config.temp.toString());
-    if (config.topK != null && !Number.isNaN(config.topK)) args.push('--top-k', config.topK.toString());
-    if (config.topP != null && !Number.isNaN(config.topP)) args.push('--top-p', config.topP.toString());
-    if (config.minP != null && !Number.isNaN(config.minP)) args.push('--min-p', config.minP.toString());
-    if (config.presencePenalty != null && !Number.isNaN(config.presencePenalty)) args.push('--presence-penalty', config.presencePenalty.toString());
-    if (config.repeatPenalty != null && !Number.isNaN(config.repeatPenalty)) args.push('--repeat-penalty', config.repeatPenalty.toString());
-    if (config.nCpuMoe != null && !Number.isNaN(config.nCpuMoe)) args.push('--n-cpu-moe', config.nCpuMoe.toString());
+    const temp = toFiniteNumber(config.temp);
+    if (temp !== undefined) args.push('--temp', String(temp));
+    const topK = toFiniteNumber(config.topK);
+    if (topK !== undefined) args.push('--top-k', String(topK));
+    const topP = toFiniteNumber(config.topP);
+    if (topP !== undefined) args.push('--top-p', String(topP));
+    const minP = toFiniteNumber(config.minP);
+    if (minP !== undefined) args.push('--min-p', String(minP));
+    const presencePenalty = toFiniteNumber(config.presencePenalty);
+    if (presencePenalty !== undefined) args.push('--presence-penalty', String(presencePenalty));
+    const repeatPenalty = toFiniteNumber(config.repeatPenalty);
+    if (repeatPenalty !== undefined) args.push('--repeat-penalty', String(repeatPenalty));
+    const nCpuMoe = toFiniteNumber(config.nCpuMoe);
+    if (nCpuMoe !== undefined) args.push('--n-cpu-moe', String(nCpuMoe));
     // --jinja must precede --chat-template-file -- llama.cpp only accepts a
     // custom (non-built-in) template file when --jinja was already set by the
     // time it processes this flag (see arg.cpp's --chat-template-file help text).
-    if (config.jinja) args.push('--jinja');
-    if (config.chatTemplateFile) args.push('--chat-template-file', config.chatTemplateFile);
-    if (config.loadMode) args.push('-lm', config.loadMode);
-    if (config.verbosity != null && !Number.isNaN(config.verbosity)) args.push('-lv', config.verbosity.toString());
-    // Item 6: pass-through raw arg string (takes priority when provided)
-    if (config.argString && config.argString.trim().length > 0) {
-        const rawTokens = config.argString.trim().split(/\s+/);
+    // So a custom template file forces --jinja even if the checkbox is off.
+    const chatTemplateFile = toNonEmptyString(config.chatTemplateFile);
+    if (config.jinja || chatTemplateFile) args.push('--jinja');
+    if (chatTemplateFile) args.push('--chat-template-file', chatTemplateFile);
+    const loadMode = toNonEmptyString(config.loadMode);
+    if (loadMode) args.push('-lm', loadMode);
+    const verbosity = toFiniteNumber(config.verbosity);
+    if (verbosity !== undefined) args.push('-lv', String(verbosity));
+    // Item 6: pass-through raw arg string (takes priority when provided).
+    // tokenizeCommand (not a plain whitespace split) so quoted spans like
+    // `--chat-template-kwargs '{"preserve_thinking": true}'` survive as ONE
+    // argument instead of quote-laden fragments.
+    const argString = toNonEmptyString(config.argString);
+    if (argString) {
+        const rawTokens = tokenizeCommand(argString.trim());
         for (let i = 0; i < rawTokens.length; i++) {
             const t = rawTokens[i];
             if (t === '-m' && i + 1 < rawTokens.length) {
@@ -438,12 +529,16 @@ function resolveLaunchCommand(config) {
     // match defensively too rather than passing llama-server a redundant
     // `-dev X,X --split-mode layer` for a single physical GPU.
     const localSplit = !!(config.deviceA && config.deviceB && config.deviceA !== config.deviceB);
-    if (localSplit || config.rpcTarget) {
+    const rpcTarget = toNonEmptyString(config.rpcTarget);
+    if (localSplit || rpcTarget) {
         deviceArgs.push('--split-mode', 'layer');
         if (localSplit) deviceArgs.push('-dev', `${config.deviceA},${config.deviceB}`);
-        if (config.rpcTarget) deviceArgs.push('--rpc', `${config.rpcTarget.split('@').pop()}:50052`);
-        if (config.tensorSplit && config.tensorSplit < 100) {
-            deviceArgs.push('-ts', `${config.tensorSplit},${100 - config.tensorSplit}`);
+        if (rpcTarget) deviceArgs.push('--rpc', `${hostFromRpcTarget(rpcTarget)}:50052`);
+        // A tensor split of 0..99 is a 2-way ratio; negative/NaN values would
+        // emit a nonsensical `-ts` pair, so validate before emitting.
+        const tensorSplit = toFiniteNumber(config.tensorSplit);
+        if (tensorSplit !== undefined && tensorSplit >= 0 && tensorSplit < 100) {
+            deviceArgs.push('-ts', `${tensorSplit},${100 - tensorSplit}`);
         }
     }
 
@@ -451,10 +546,40 @@ function resolveLaunchCommand(config) {
     return { command, args };
 }
 
-// Shell-quote args containing whitespace so the displayed/broadcast command is
-// copy-pasteable and unambiguous about argument boundaries.
+// Extract the bare hostname from an RPC/SSH target like "user@host:22" --
+// the RPC port (50052) is appended separately, so a user-supplied :port must
+// not survive ("host:22:50052" is not a valid RPC endpoint).
+function hostFromRpcTarget(target) {
+    const s = String(target || '').trim();
+    const withoutUser = s.split('@').pop() || s;
+    return withoutUser.split(':')[0];
+}
+
+// Shell-safe quoting for the displayed/copied launch command. JSON.stringify
+// is not shell-safe: inside its double quotes, $, backtick, and ! can still
+// expand in an interactive shell. Single quotes are inert (except for the
+// '\'' escape), so anything not plain-safe gets wrapped in those.
+function shellQuoteArg(arg) {
+    const s = String(arg);
+    if (s.length === 0) return "''";
+    // No quoting needed for simple values -- keeps the command readable.
+    if (/^[A-Za-z0-9._\/:-]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+
+// The displayed/broadcast command stays copy-pasteable and unambiguous about
+// argument boundaries (see shellQuoteArg).
 function formatCommand(command, args) {
-    return command + ' ' + args.map(a => /\s/.test(a) ? JSON.stringify(a) : a).join(' ');
+    return [shellQuoteArg(command), ...args.map(shellQuoteArg)].join(' ');
+}
+
+// Last occurrence of `flag`'s value (the FOLLOWING token) in a token array --
+// later flags override earlier ones, same as the shell / llama-server do.
+function extractLastFlagValue(tokens, flag) {
+    for (let i = tokens.length - 1; i >= 0; i--) {
+        if (tokens[i] === flag && i + 1 < tokens.length) return tokens[i + 1];
+    }
+    return undefined;
 }
 
 // Minimal shell-lite tokenizer for the raw-command box: splits on whitespace,
@@ -483,6 +608,12 @@ function tokenizeCommand(str) {
 }
 
 // --- SHARED PROCESS SPAWN + LIFECYCLE ---
+// Lines that mean the process is actually dying or unusable. Deliberately NOT
+// "any line containing 'error:' or 'abort'" -- llama-server logs non-fatal
+// client aborts and per-request errors all the time, and the old substring
+// check would have SIGTERM'd a healthy model server over any of them. A
+// process that exits on its own is handled by the 'close' handler below.
+const FATAL_LINE_RE = /failed to fit params to free device memory|llama_server: fatal error|segfault|out of memory/i;
 // The master is always a directly-spawned llama-server binary now (no Docker
 // invocation). `onErrorCleanup`, if given, is called (in addition to
 // `proc.kill()`) when handleLogs detects an abort/OOM/error line -- currently
@@ -499,30 +630,27 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
         const text = d.toString();
         process.stdout.write(text);
 
-        // Append to in-memory ring buffer for /api/master/logs (item 5).
-        // Split on \r too -- carriage-return-updated progress output (download
-        // bars, in-place status lines) would otherwise never produce a "line".
-        const rawLines = text.split(/\r\n|\r|\n/);
-        for (const l of rawLines) {
-            if (l.length > 0) {
-                masterLogBuffer.push(l);
-                if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
-                    masterLogBuffer.shift();
-                }
-            }
-        }
-
         // Buffer partial lines to handle chunk boundaries (item 7). \r counts
-        // as a line terminator here for the same reason as above -- otherwise a
-        // \r-only output phase grows this buffer (and re-splits all of it per
-        // chunk) for as long as the phase lasts. The cap is a last-resort bound
-        // for a process that emits unbounded output with no line breaks at all.
+        // as a line terminator -- otherwise a \r-only output phase grows this
+        // buffer (and re-splits all of it per chunk) for as long as the phase
+        // lasts. The cap is a last-resort bound for a process that emits
+        // unbounded output with no line breaks at all.
         logLineBuffer += text;
         const bufferedLines = logLineBuffer.split(/\r\n|\r|\n/);
         logLineBuffer = bufferedLines.pop() || '';
         if (logLineBuffer.length > 1_000_000) logLineBuffer = logLineBuffer.slice(-4096);
 
         for (const line of bufferedLines) {
+            // Ring buffer for /api/master/logs (item 5) gets the SAME
+            // reconstructed whole lines as the parser below -- pushing raw
+            // chunk fragments used to split one physical line across two
+            // entries whenever a chunk boundary landed mid-line.
+            if (line.length > 0) {
+                masterLogBuffer.push(line);
+                if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
+                    masterLogBuffer.shift();
+                }
+            }
             if (line.includes('load_model: loading model')) {
                 serverState = 'loading';
                 broadcastState();
@@ -601,21 +729,30 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                         const timing = taskTimingsByTaskId.get(taskId) || {};
                         taskTimingsByTaskId.delete(taskId);
                         if (m) {
-                            // Capture samples and the completion timestamp NOW --
-                            // the sample buffer is shared, so waiting out the
-                            // flush delay would let the next request's samples
-                            // bleed into this one's series, and the prefill/gen
-                            // split in logCompletedRequest counts genMs back
-                            // from this moment, not from whenever we flush.
+                            // Capture samples, the completion timestamp, AND
+                            // the launch config/command NOW -- the sample
+                            // buffer is shared, so waiting out the flush delay
+                            // would let the next request's samples bleed into
+                            // this one's series, and the prefill/gen split in
+                            // logCompletedRequest counts genMs back from this
+                            // moment, not from whenever we flush. The config is
+                            // captured here too because a server stop within
+                            // the flush window nulls currentLaunchConfig, which
+                            // would leave the CSV row without a model/config.
                             const pending = {
                                 timing: { ...timing, wallTimeS: (parseFloat(m[1]) / 1000).toFixed(2) },
                                 samples: takeRequestSamples(),
                                 completedAt: Date.now(),
+                                config: currentLaunchConfig,
+                                launchCommand: currentLaunchCommand,
                                 timer: null,
                             };
                             pending.timer = setTimeout(() => {
                                 pendingCompletionsByTaskId.delete(taskId);
-                                logCompletedRequest(pending.timing, pending.samples, pending.completedAt).catch(() => { });
+                                logCompletedRequest(pending.timing, pending.samples, pending.completedAt, {
+                                    config: pending.config,
+                                    launchCommand: pending.launchCommand,
+                                }).catch(() => { });
                             }, COMPLETION_FLUSH_DELAY_MS);
                             pendingCompletionsByTaskId.set(taskId, pending);
                             rememberCompletedTaskId(taskId);
@@ -634,7 +771,10 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                                 draftGenerated: parseInt(dm[3], 10),
                                 draftMeanLen: dm[4] != null ? parseFloat(dm[4]) : null,
                             });
-                            logCompletedRequest(pending.timing, pending.samples, pending.completedAt).catch(() => { });
+                            logCompletedRequest(pending.timing, pending.samples, pending.completedAt, {
+                                config: pending.config,
+                                launchCommand: pending.launchCommand,
+                            }).catch(() => { });
                         }
                     }
                 }
@@ -651,6 +791,10 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                 if (relTaskMatch) {
                     const taskId = relTaskMatch[1];
                     const live = { ...liveProgress };
+                    // Same config-capture rationale as the "total time" branch:
+                    // the 400ms delay below can outlive a server stop.
+                    const launchConfig = currentLaunchConfig;
+                    const launchCommand = currentLaunchCommand;
                     setTimeout(() => {
                         if (pendingCompletionsByTaskId.has(taskId) || recentlyCompletedTaskIds.has(taskId)) return;
                         if (!live.genTokens && !live.prefillTokens) return; // nothing observed -- not worth a row
@@ -662,11 +806,14 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
                             genTps: live.genTps ?? null,
                             aborted: true,
                         };
-                        logCompletedRequest(timing, takeRequestSamples(), Date.now()).catch(() => { });
+                        logCompletedRequest(timing, takeRequestSamples(), Date.now(), {
+                            config: launchConfig,
+                            launchCommand,
+                        }).catch(() => { });
                     }, 400);
                 }
             }
-            else if ((line.includes('abort') && !line.includes('stop processing')) || line.toLowerCase().includes('error:') || line.includes('failed to fit params to free device memory')) {
+            else if (FATAL_LINE_RE.test(line)) {
                 serverState = 'stopped';
                 proc.kill();
                 if (onErrorCleanup) onErrorCleanup().catch(() => { });
@@ -684,6 +831,25 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
     // Single source of truth for tearing down shared state: fires exactly once
     // per spawned process, after it has actually closed.
     proc.on('close', (code, signal) => {
+        // Flush any final partial line (output without a trailing newline)
+        // into the ring buffer before tearing down the listeners.
+        if (logLineBuffer.length > 0) {
+            masterLogBuffer.push(logLineBuffer);
+            if (masterLogBuffer.length > MASTER_LOG_BUFFER_SIZE) {
+                masterLogBuffer.shift();
+            }
+            logLineBuffer = '';
+        }
+        // FATAL_LINE_RE (correctly) no longer matches every 'error:' line, so
+        // failures where llama-server exits ON ITS OWN before becoming ready
+        // (failed to load model/draft, context creation, Vulkan OOM) would
+        // otherwise die silently -- surface their last error lines.
+        if (llamaProcess === proc && serverState !== 'ready' && serverState !== 'stopped') {
+            const errLines = masterLogBuffer.filter(l => /\sE\s|error|failed/i.test(l)).slice(-2);
+            if (errLines.length > 0) {
+                broadcastState('', 'Launch failed: ' + errLines.join(' | ').slice(0, 300));
+            }
+        }
         proc.stdout.removeAllListeners('data');
         proc.stderr.removeAllListeners('data');
         if (llamaProcess === proc) {
@@ -727,6 +893,26 @@ function generateRunId() {
     const ts = Date.now().toString(36);
     const rand = Math.random().toString(16).slice(2, 6);
     return `${ts}_${rand}`;
+}
+
+// Convert any CSV cell to a safe single-line string. Newlines inside a quoted
+// field would break the line-based readers in /api/logs/recent and
+// /api/logs/summary -- argString in particular comes from a UI textarea, so
+// it can carry them. NaN/Infinity become '' (they can't be parsed back).
+function csvValue(v) {
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'number' && !Number.isFinite(v)) return '';
+    return String(v).replace(/\r\n|\r|\n/g, ' ');
+}
+
+// Parse a CSV cell to a number or null -- unlike `parseFloat(x) || null`, a
+// genuine 0 reading survives instead of collapsing to null.
+function parseNumOrNull(s) {
+    if (s === null || s === undefined) return null;
+    const t = String(s).trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : null;
 }
 
 // Safely quote a CSV field — wraps in double-quotes, escaping internal quotes
@@ -779,50 +965,51 @@ async function appendBenchmarkRow(data) {
     const runId = generateRunId();
     const modelPath = data.model || '';
     const modelName = modelPath.split('/').pop();
-    // Nullish coalescing (??), not ||, for every numeric field below -- `||`
-    // treats a genuine 0 (idle GPU util, 0% CPU, a card with no throttle,
-    // etc.) as falsy and silently substitutes '', making a real "zero"
-    // reading indistinguishable from "field never populated" in the CSV.
+    // csvValue (not `x || ''`) for every field -- `||` treats a genuine 0
+    // (idle GPU util, 0% CPU, a card with no throttle, etc.) as falsy and
+    // silently substitutes '', making a real "zero" reading indistinguishable
+    // from "field never populated" in the CSV. It also strips newlines so a
+    // row always occupies exactly one physical line (see csvValue's comment).
     const fields = [
         timestamp,
         runId,
-        csvQuote(modelName),
-        csvQuote(modelPath),
-        data.ctx ?? '',
-        data.ngl ?? '',
-        data.rpc || '',
-        csvQuote(data.transport || ''),
-        csvQuote(data.argString || ''),
-        csvQuote(data.launchCommand || ''),
-        data.promptTps ?? '',
-        data.genTps ?? '',
-        data.promptLatency ?? '',
-        data.promptTokens ?? '',
-        data.gpuUtil ?? '',
-        data.gpuPwr ?? '',
-        data.masterGpuTemp ?? '',
-        data.cpuUtil ?? '',
-        data.masterCpuTemp ?? '',
-        data.gpuMem ?? '',
-        data.ramUsage ?? '',
-        data.workerGpuUtil ?? '',
-        data.workerGpuPwr ?? '',
-        data.workerGpuTemp ?? '',
-        data.workerCpuTemp ?? '',
-        data.workerVram ?? '',
-        data.workerRam ?? '',
-        data.netThroughput ?? '',
-        data.genTokens ?? '',
-        data.reasonTokens ?? '',
-        data.wallTime ?? '',
-        data.loadTime ?? '',
-        csvQuote(data.configJson || ''),
+        csvQuote(csvValue(modelName)),
+        csvQuote(csvValue(modelPath)),
+        csvValue(data.ctx),
+        csvValue(data.ngl),
+        csvValue(data.rpc),
+        csvQuote(csvValue(data.transport)),
+        csvQuote(csvValue(data.argString)),
+        csvQuote(csvValue(data.launchCommand)),
+        csvValue(data.promptTps),
+        csvValue(data.genTps),
+        csvValue(data.promptLatency),
+        csvValue(data.promptTokens),
+        csvValue(data.gpuUtil),
+        csvValue(data.gpuPwr),
+        csvValue(data.masterGpuTemp),
+        csvValue(data.cpuUtil),
+        csvValue(data.masterCpuTemp),
+        csvValue(data.gpuMem),
+        csvValue(data.ramUsage),
+        csvValue(data.workerGpuUtil),
+        csvValue(data.workerGpuPwr),
+        csvValue(data.workerGpuTemp),
+        csvValue(data.workerCpuTemp),
+        csvValue(data.workerVram),
+        csvValue(data.workerRam),
+        csvValue(data.netThroughput),
+        csvValue(data.genTokens),
+        csvValue(data.reasonTokens),
+        csvValue(data.wallTime),
+        csvValue(data.loadTime),
+        csvQuote(csvValue(data.configJson)),
         // Speculative-decoding stats (blank when the run had no draft line).
         // Strictly appended after config_json -- consumers index it as col 32.
-        data.draftAcceptRate ?? '',
-        data.draftAccepted ?? '',
-        data.draftGenerated ?? '',
-        data.draftMeanLen ?? '',
+        csvValue(data.draftAcceptRate),
+        csvValue(data.draftAccepted),
+        csvValue(data.draftGenerated),
+        csvValue(data.draftMeanLen),
         data.aborted ? '1' : ''
     ];
     await fs.appendFile(CSV_FILE, fields.join(',') + '\n');
@@ -903,7 +1090,10 @@ async function takeOneTelemetrySample(statsArg) {
         // client-agnostic source of real context usage (n_prompt_tokens tracks
         // the slot's absolute context position, growing during generation).
         try {
-            const port = currentLaunchConfig?.port || 8080;
+            // Validated: config.port only ever comes from the launch config or
+            // a raw command's --port (see /api/start's sync) -- anything else
+            // falls back to the default 8080.
+            const port = toFiniteNumber(currentLaunchConfig?.port) ?? 8080;
             const slotsRes = await fetch(`http://localhost:${port}/slots`, { signal: AbortSignal.timeout(1500) });
             const slots = await slotsRes.json();
             const slot = Array.isArray(slots) ? slots[0] : null;
@@ -1039,15 +1229,19 @@ async function fetchCurrentTelemetry() {
 // CSV row and broadcasts a COMPLETION SSE event so any connected client
 // (Monitor Mode) can update live -- independent of whether this dashboard's
 // own chat UI happened to be the one that sent the request.
-async function logCompletedRequest(timing, samples, completedAt) {
+async function logCompletedRequest(timing, samples, completedAt, { config: cfgParam, launchCommand: launchCmdParam } = {}) {
     try {
-        // `samples` and `completedAt` were captured on the "total time" log
-        // line (see the pendingCompletionsByTaskId machinery in handleLogs) --
-        // the actual write/broadcast may run up to COMPLETION_FLUSH_DELAY_MS
-        // later, waiting for a possible draft-acceptance line, so neither can
-        // be read "now".
+        // `samples`, `completedAt`, and (when provided) the launch
+        // config/command were all captured on the completion log line (see the
+        // pendingCompletionsByTaskId machinery in handleLogs) -- the actual
+        // write/broadcast may run up to COMPLETION_FLUSH_DELAY_MS later,
+        // waiting for a possible draft-acceptance line, and a server stop in
+        // that window would null the globals out from under us.
         samples = samples || [];
         completedAt = completedAt || Date.now();
+        const cfgSource = cfgParam || currentLaunchConfig;
+        const cfg = cfgSource || {};
+        const launchCmd = launchCmdParam !== undefined ? launchCmdParam : currentLaunchCommand;
         // Split the sample series into a prefill-phase line and a gen-phase
         // line using the real, completion-time-computed durations (not a live
         // per-sample estimate, which we have no way to get server-side --
@@ -1074,7 +1268,6 @@ async function logCompletedRequest(timing, samples, completedAt) {
         const stats = await fetchCurrentTelemetry();
         const master = stats?.master || {};
         const worker = stats?.worker || {};
-        const cfg = currentLaunchConfig || {};
         const runId = await appendBenchmarkRow({
             model: cfg.modelPath || '',
             ctx: cfg.ctx || '',
@@ -1082,7 +1275,7 @@ async function logCompletedRequest(timing, samples, completedAt) {
             rpc: cfg.rpcTarget ? 'yes' : 'no',
             transport: cfg.rpcTarget ? (cfg.transport || '') : 'Local',
             argString: cfg.argString || '',
-            launchCommand: currentLaunchCommand,
+            launchCommand: launchCmd,
             promptTps: timing.promptTps ?? '',
             genTps: timing.genTps ?? '',
             promptLatency: timing.promptMs != null ? (timing.promptMs / 1000).toFixed(2) : '',
@@ -1095,7 +1288,7 @@ async function logCompletedRequest(timing, samples, completedAt) {
             genTokens: timing.genTokens ?? '',
             wallTime: timing.wallTimeS ?? '',
             loadTime: finalLoadTime || '',
-            configJson: currentLaunchConfig ? JSON.stringify(currentLaunchConfig) : '',
+            configJson: cfgSource ? JSON.stringify(cfgSource) : '',
             // netThroughput/reasonTokens are frontend-only concepts (a client-side
             // delta calc, and reasoning-token counting from rendered content) --
             // left blank here, same as any other row missing optional fields.
@@ -1306,18 +1499,20 @@ const server = http.createServer(async (req, res) => {
                         runId: cols[1],
                         model: cols[2],
                         transport: cols[7],
-                        promptTps: parseFloat(cols[10]) || null,
-                        genTps: parseFloat(cols[11]) || null,
-                        promptTokens: parseInt(cols[13], 10) || null,
-                        genTokens: parseInt(cols[28], 10) || null,
-                        wallTime: parseFloat(cols[30]) || null,
+                        // parseNumOrNull (not `parseFloat() || null`) so a
+                        // genuine 0 reading is reported as 0, not null.
+                        promptTps: parseNumOrNull(cols[10]),
+                        genTps: parseNumOrNull(cols[11]),
+                        promptTokens: parseNumOrNull(cols[13]),
+                        genTokens: parseNumOrNull(cols[28]),
+                        wallTime: parseNumOrNull(cols[30]),
                         // Draft stats (cols 33+) only exist on rows logged since
                         // speculative-decoding capture was added; null elsewhere.
-                        draftAcceptRate: cols.length > 33 && cols[33] !== '' ? parseFloat(cols[33]) : null,
-                        draftAccepted: cols.length > 34 && cols[34] !== '' ? parseInt(cols[34], 10) : null,
-                        draftGenerated: cols.length > 35 && cols[35] !== '' ? parseInt(cols[35], 10) : null,
-                        draftMeanLen: cols.length > 36 && cols[36] !== '' ? parseFloat(cols[36]) : null,
-                        aborted: cols.length > 37 && cols[37] === '1',
+                        draftAcceptRate: cols.length > 33 ? parseNumOrNull(cols[33]) : null,
+                        draftAccepted: cols.length > 34 ? parseNumOrNull(cols[34]) : null,
+                        draftGenerated: cols.length > 35 ? parseNumOrNull(cols[35]) : null,
+                        draftMeanLen: cols.length > 36 ? parseNumOrNull(cols[36]) : null,
+                        aborted: cols.length > 37 ? cols[37] === '1' : false,
                     });
                 }
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1346,8 +1541,9 @@ const server = http.createServer(async (req, res) => {
 
                 const csv = await fs.readFile(CSV_FILE, 'utf-8');
                 const lines = csv.trim().split('\n').slice(1); // skip header
-                if (lines.length <= 1) {
-                    // empty or header-only
+                if (lines.length === 0) {
+                    // header-only (or empty) -- a CSV with exactly ONE data row
+                    // is valid and must be aggregated, not discarded.
                     return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ count: 0 }));
                 }
                 // Schema v3 columns (0-indexed, 32 cols with launch_command):
@@ -1380,7 +1576,10 @@ const server = http.createServer(async (req, res) => {
                         if (filterTransport && rowTransport !== filterTransport) continue;
                         lastModel = rowModel;
                         lastTimestamp = cols[0];
-                        // config_json (col 32) only exists from schema v4 onward (33 cols)
+                        // config_json (col 32) only exists from schema v4 onward
+                        // (33 cols). Reset per row: a newer row without
+                        // config_json must not inherit the previous row's config.
+                        lastConfig = null;
                         if (cols.length >= 33 && cols[32]) {
                             try { lastConfig = JSON.parse(cols[32]); } catch { /* older/malformed row -- skip */ }
                         }
@@ -1411,11 +1610,17 @@ const server = http.createServer(async (req, res) => {
                         wTime = parseFloat(cols[28]);
                         lTime = parseFloat(cols[29]);
                     }
-                    if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; lastPromptTps = pTps; }
-                    if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; lastGenTps = gTps; }
+                    // "last*" tracks the most recent row's OWN values -- set
+                    // unconditionally so a row missing a field reports null
+                    // instead of silently falling back to an older row's number.
+                    lastPromptTps = Number.isFinite(pTps) ? pTps : null;
+                    lastGenTps = Number.isFinite(gTps) ? gTps : null;
+                    lastLoadTime = Number.isFinite(lTime) ? lTime : null;
+                    if (Number.isFinite(pTps))  { sumPromptTps += pTps;  if (pTps > bestPromptTps)  bestPromptTps = pTps; }
+                    if (Number.isFinite(gTps))  { sumGenTps += gTps;   if (gTps > bestGenTps)     bestGenTps = gTps; }
                     if (Number.isFinite(pLat))  { sumPromptLat += pLat; if (pLat < bestPromptLat)   bestPromptLat = pLat; }
                     if (Number.isFinite(wTime)) { sumWallTime += wTime; if (wTime < bestWallTime)   bestWallTime = wTime; }
-                    if (Number.isFinite(lTime)) { sumLoadTime += lTime; if (lTime < bestLoadTime)   bestLoadTime = lTime; lastLoadTime = lTime; }
+                    if (Number.isFinite(lTime)) { sumLoadTime += lTime; if (lTime < bestLoadTime)   bestLoadTime = lTime; }
                     n++;
                 }
                 // Round to 1 decimal -- raw division produces long floats like
@@ -1586,7 +1791,13 @@ const server = http.createServer(async (req, res) => {
         // --- LIST VULKAN/CUDA DEVICES (local-multi-gpu mode) ---
         else if (req.url.startsWith('/api/devices') && req.method === 'GET') {
             const queryParams = new URLSearchParams(req.url.includes('?') ? req.url.slice(req.url.indexOf('?') + 1) : '');
-            const binary = getLlamaServerBinary(queryParams.get('build') || '');
+            let binary;
+            try {
+                binary = getLlamaServerBinary(queryParams.get('build') || '');
+            } catch (err) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                return res.end(JSON.stringify({ devices: [], error: err.message }));
+            }
             try {
                 // Hard timeout: device enumeration talks to the Vulkan/CUDA loader, which
                 // can hang (e.g. a TB4 eGPU in a bad power/link state) -- never let this
@@ -1635,8 +1846,45 @@ const server = http.createServer(async (req, res) => {
 
             if (llamaProcess) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Running' })); }
 
-            const config = body;
-            currentModel = config.model;
+            let config = body;
+            let command, args;
+
+            // The raw command box is the actual source of truth for what runs --
+            // structured `config` fields are used for display/CSV/Item-22-restore
+            // purposes and to seed the box's initial content (via /api/preview-command
+            // above), but everything actually executed comes from tokenizing
+            // whatever text the user left in that box. Only fall back to
+            // reconstructing from structured fields if it's empty (e.g. a client
+            // that hasn't loaded the new UI, or the box genuinely wasn't touched).
+            // A failure here (bad build config, missing model/ctx/ngl, empty
+            // box) must return a clean 400 -- NOT an unhandled rejection that
+            // leaves the dashboard stuck in 'starting' with stale launch state.
+            try {
+                if (config.rawCommand && config.rawCommand.trim().length > 0) {
+                    const tokens = tokenizeCommand(config.rawCommand.trim());
+                    command = tokens[0];
+                    args = tokens.slice(1);
+                    if (!command) throw new Error('Invalid raw command');
+
+                    // The raw command is what actually runs, so sync the
+                    // structured config from it -- otherwise the CSV row, the
+                    // /slots poll, and worker telemetry would all use stale UI
+                    // values for model/port/rpc.
+                    const modelVal = extractLastFlagValue(args, '-m') ?? extractLastFlagValue(args, '--model');
+                    // model = display name (basename), modelPath = the real path
+                    if (modelVal) config = { ...config, model: String(modelVal).split('/').pop(), modelPath: modelVal };
+                    const portVal = toFiniteNumber(extractLastFlagValue(args, '--port'));
+                    if (portVal !== undefined) config = { ...config, port: portVal };
+                    const rpcVal = extractLastFlagValue(args, '--rpc');
+                    if (rpcVal && !config.rpcTarget) config = { ...config, rpcTarget: rpcVal };
+                } else {
+                    ({ command, args } = resolveLaunchCommand(config));
+                }
+            } catch (err) {
+                return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+            }
+
+            currentModel = config.model || config.modelPath || '';
             isRpc = !!config.rpcTarget;
             currentLaunchConfig = config;
             serverState = 'starting';
@@ -1646,27 +1894,24 @@ const server = http.createServer(async (req, res) => {
             masterLogBuffer = [];
             broadcastState();
 
-            // The raw command box is the actual source of truth for what runs --
-            // structured `config` fields are used for display/CSV/Item-22-restore
-            // purposes and to seed the box's initial content (via /api/preview-command
-            // above), but everything actually executed comes from tokenizing
-            // whatever text the user left in that box. Only fall back to
-            // reconstructing from structured fields if it's empty (e.g. a client
-            // that hasn't loaded the new UI, or the box genuinely wasn't touched).
-            let command, args;
-            if (config.rawCommand && config.rawCommand.trim().length > 0) {
-                const tokens = tokenizeCommand(config.rawCommand.trim());
-                command = tokens[0];
-                args = tokens.slice(1);
-            } else {
-                ({ command, args } = resolveLaunchCommand(config));
-            }
-
             currentLaunchCommand = formatCommand(command, args);
             console.log('LAUNCHING:', currentLaunchCommand);
             broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
 
-            llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR });
+            try {
+                llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR });
+            } catch (err) {
+                // Synchronous spawn failure (e.g. non-string command) -- reset
+                // the state just set above so the dashboard doesn't sit in
+                // 'starting' forever with a dead launch config.
+                llamaProcess = null;
+                serverState = 'stopped';
+                currentModel = '';
+                isRpc = false;
+                currentLaunchConfig = null;
+                broadcastState('', 'Failed to start process: ' + err.message);
+                return res.writeHead(500, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: err.message }));
+            }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             return res.end(JSON.stringify({ status: 'launching' }));
@@ -1684,7 +1929,16 @@ const server = http.createServer(async (req, res) => {
             // first was the other half of the race that used to crash the whole process
             // (see dashboard-bugs1-analysis.md item 13).
             if (llamaProcess) {
-                llamaProcess.kill();
+                const proc = llamaProcess;
+                try {
+                    proc.kill('SIGTERM');
+                } catch { /* process may already be gone */ }
+                // Escalate to SIGKILL if it ignores SIGTERM (e.g. stuck in a
+                // long syscall) -- the 'close' handler is the only place that
+                // clears state, so a kill that lands after close is a no-op.
+                setTimeout(() => {
+                    try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+                }, 3000).unref();
             }
             serverState = 'stopped';
             currentModel = '';
@@ -1789,7 +2043,11 @@ const server = http.createServer(async (req, res) => {
 async function initServer() {
     await loadDashboardConfig();
     await initLogsDir();
-    await cleanupPort(8081); // Restored safe orphan-process protection
+    // Clean BOTH the model-server port and the monitor port -- an orphaned
+    // llama-server from a previous dashboard crash would otherwise keep 8080
+    // and make the next launch fail with EADDRINUSE.
+    await cleanupPort(8080);
+    await cleanupPort(8081);
 
     // Reload the tail of the bench transcript so a dashboard restart doesn't
     // present an empty Bench tab (the full history lives in the file).
@@ -1809,19 +2067,39 @@ async function initServer() {
     // monitor.py printed 64KB (e.g. a stream of warnings) it would block on
     // write and its /stats endpoint would silently stall.
     pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname, stdio: 'ignore' });
+    // An unhandled 'error' event (python3 missing, spawn failure, ...) would
+    // become an uncaughtException and take the whole dashboard down over a
+    // missing monitor -- telemetry is best-effort, so log and move on.
+    pythonProcess.on('error', (err) => {
+        console.error('monitor.py spawn error:', err.message);
+        pythonProcess = null;
+    });
+    pythonProcess.on('exit', () => {
+        pythonProcess = null;
+    });
     startTelemetryLoop();
 
     const shutdownHandler = async () => {
-        // Directly-spawned process -- must be killed explicitly or it's
+        // Directly-spawned processes -- must be killed explicitly or they're
         // orphaned on shutdown (no compose container to bring down instead).
+        // Timers first, so nothing fires while the processes die.
+        try { if (telemetryLoopTimer) clearInterval(telemetryLoopTimer); } catch { }
+        if (benchProcess) {
+            try { benchProcess.kill(); } catch { }
+        }
         if (llamaProcess) {
             try { llamaProcess.kill(); } catch { }
         }
-        if (pythonProcess) pythonProcess.kill();
+        if (pythonProcess) {
+            try { pythonProcess.kill(); } catch { }
+        }
         process.exit(0);
     };
 
-process.on('exit', () => { if (pythonProcess) pythonProcess.kill(); });
+process.on('exit', () => {
+    if (benchProcess) { try { benchProcess.kill(); } catch { } }
+    if (pythonProcess) { try { pythonProcess.kill(); } catch { } }
+});
 process.on('SIGINT', shutdownHandler);
 process.on('SIGTERM', shutdownHandler);
 
