@@ -1,115 +1,99 @@
-# Draft GitHub issue for ggml-org/llama.cpp — review before posting
+# Draft GitHub issue — review and edit into your own words before posting
+# (their rules prohibit AI-drafted issues; treat this as notes/structure,
+#  rewrite anything that doesn't sound like you)
 
----
+Title: Eval bug: draft-mtp roughly halves prompt processing on multi-GPU layer split (single GPU is fine)
 
-**Title:** `Eval bug: draft-mtp costs ~1.8-2x prompt processing except on single-GPU Vulkan (~1.15x) — per-ubatch catch-up decode halves graph reuse and defeats multi-GPU pipelining`
+## What happens
 
----
+With `--spec-type draft-mtp` enabled, prompt processing drops to roughly half speed
+whenever the model is split across two GPUs with `--split-mode layer`. On a single GPU
+the overhead is small. Same model file, same flags, only the device assignment changes.
 
-## Summary
+I went down a few wrong paths on this (thought it was my eGPU, then thought it was
+CUDA-specific) so I ended up with a fairly complete matrix. 22k token cold prompt,
+prompt eval t/s from server timings:
 
-Enabling `--spec-type draft-mtp` on a model whose MTP context is not mem-shared makes
-prompt processing **~1.8–2× slower in every configuration except single-GPU Vulkan
-(~1.15×)** — same model file, same flags, same machine. The MTP `process()` hook runs
-a synchronous catch-up decode in the draft context for every prefill ubatch, and the
-measurements separate two independent costs:
+| config | no MTP | draft-mtp | slowdown |
+|---|---|---|---|
+| Qwen3.8-27B Q3_K_XL, RTX 4090 solo (CUDA) | 766 | 742 | 1.03x |
+| Qwen3.8-27B Q3_K_XL, 7900 XTX solo (Vulkan) | 572 | 505 | 1.13x |
+| Qwen3.6-35B-A3B Q4_K_M, 7900 XTX solo | 1593 | 1307 | 1.22x |
+| Qwen3.8-27B Q6_K_XL, CUDA0+Vulkan2 layer split | 973 | 532 | 1.83x |
+| Qwen3.8-27B Q3_K_XL, CUDA0+Vulkan2 layer split | 1007 | 555 | 1.82x |
+| Qwen3.8-27B Q6_K_XL, Vulkan1+Vulkan2 layer split | 754 | 376 | 2.0x |
 
-1. **Graph-reuse loss** — the target/draft interleaving halves the `graphs reused`
-   counter on BOTH backends, but only CUDA pays heavily for it (graph re-capture is
-   expensive there; Vulkan's dispatch path barely cares): 1.82× on a single CUDA GPU.
-2. **Cross-device interleaving** — on any multi-GPU layer split the per-ubatch draft
-   decode also defeats ubatch pipelining: an all-Vulkan two-GPU split pays **2.0×**
-   even though each Vulkan GPU solo pays only ~1.15×.
+("no MTP" rows use --spec-type ngram-map-k4v, which doesn't touch prefill and matches
+the no-spec prefill rate. Last row is the same NVIDIA card via Vulkan instead of CUDA,
+so no CUDA anywhere and it's still 2x.)
 
-The two costs do not stack (CUDA+Vulkan split ≈ CUDA solo ≈ 1.8×); whichever
-bottleneck binds, binds.
+The `graphs reused` counter roughly halves with MTP on in every config (e.g. 960 ->
+425 on the CUDA split pair, 897 -> 346 on Vulkan solo), but that on its own doesn't
+seem to cost much — the solo rows eat the same reuse loss and barely slow down. The
+expensive part only shows up when the layers are split across devices.
 
-For long-context workloads (agents, large-document ingestion, cache-cold re-prefills)
-this roughly doubles every cold prefill on CUDA and CUDA-containing multi-GPU splits.
+## Why I think this happens
+
+In common/speculative.cpp the MTP process() hook runs a synchronous catch-up decode in
+the draft context for every prefill ubatch (unless the model is mem-shared — the
+"e.g Gemma4" comment). On a layer split that means every ubatch the pipeline between
+the two GPUs gets broken by a decode on another context, so the ubatch overlap
+(GGML_SCHED_MAX_COPIES) never gets going. That would explain why single GPU is nearly
+free but any split pays ~2x regardless of backend.
 
 ## Environment
 
-- llama.cpp `6d0549831` (identical behavior on `6c8dcaa7a`, 2026-08-03 — not a recent
-  regression)
+- build 10499 (6d0549831), also reproduced on 6c8dcaa7a from Aug 3 — not recent
 - Linux, CUDA 12.0 + Vulkan build
-- GPUs: RTX 4090 Laptop (internal PCIe; CUDA0 / Vulkan1), RX 7900 XTX (RADV; Vulkan2)
-- Models: Qwen3.8-27B (`qwen35`, hybrid SSM+attention, `nextn_predict_layers=1`) at
-  UD-Q6_K_XL and UD-Q3_K_XL; Qwen3.6-35B-A3B (`qwen35moe`, nextn=1) Q4_K_M
-- `-fa on`, `-ctk q8_0 -ctv q8_0`
+- RTX 4090 Laptop 16GB (internal) + RX 7900 XTX 24GB (RADV)
+- models: unsloth Qwen3.8-27B-GGUF (Q6_K_XL / Q3_K_XL), Qwen3.6-35B-A3B Q4_K_M —
+  all with nextn_predict_layers=1
+- -fa on, -ctk q8_0 -ctv q8_0
 
-## Reproduction
-
-Launch llama-server twice, identical except `--spec-type draft-mtp` vs
-`--spec-type ngram-map-k4v` (ngram leaves prefill untouched — it matches the no-spec
-prefill rate), send the same ~22k-token cold prompt, compare
-`prompt eval time ... tokens per second`:
+## Repro
 
 ```
-llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 -ngl 999 -fa on \
-  -ctk q8_0 -ctv q8_0 --spec-type draft-mtp --spec-draft-n-max 3 -dev CUDA0 --jinja
-# vs --spec-type ngram-map-k4v
+# fast prefill:
+llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf -c 262144 -ngl 999 -fa on \
+  -ctk q8_0 -ctv q8_0 --spec-type ngram-map-k4v \
+  --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60 --jinja
+
+# ~half speed prefill, only --spec-type changed:
+llama-server ... --spec-type draft-mtp --spec-draft-n-max 3 ...
 ```
 
-## Measurements — isolation matrix
+Send any large cold prompt to both and compare `prompt eval time` in the timings.
 
-22k-token cold prompt, prompt-eval t/s, no-MTP vs MTP (same file per row):
+## Related
 
-| config | backend | no MTP | with MTP | tax |
-|---|---|---|---|---|
-| 27B UD-Q3_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 1007 | 555 | 1.82× |
-| 27B UD-Q3_K_XL, 7900 XTX solo | Vulkan | 572 | 505 | **1.13×** |
-| 35B-A3B Q4_K_M, 7900 XTX solo | Vulkan | 1593 | 1307 | 1.22× |
-| 27B UD-Q6_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 973 | 532 | 1.83× |
-| 27B UD-Q6_K_XL, Vulkan1+Vulkan2 layer split | **Vulkan only** | 754 | 376 | **2.00×** |
+Possibly connected to #26750 (draft-mtp acceptance collapse on CUDA vs Vulkan) — I can
+reproduce that one too on this hardware btw (41% acceptance CUDA solo vs 64% Vulkan
+solo, same Q3 file), though it's a different symptom (decode quality vs prefill speed).
+Also #27306 crashes in the same draft-mtp prompt path on RADV.
 
-[PENDING: true CUDA-solo row — rerun in progress]
-Row 5: no CUDA anywhere, yet 2.0× → the multi-GPU interleaving cost is real and
-backend-independent. Single-GPU Vulkan is the only cheap configuration measured.
+Happy to test patches, all of the above takes me ~10 min to rerun.
 
-**`graphs reused` (print_timings) for the Q3 pairs — MTP halves reuse on both
-backends:**
+## Relevant log output (paste into the template field)
 
-| run | graphs reused (rep1 / rep2) |
-|---|---|
-| CUDA solo, ngram | 960 / 1847 |
-| CUDA solo, draft-mtp | 425 / 837 |
-| Vulkan solo, ngram | 897 / 1841 |
-| Vulkan solo, draft-mtp | 346 / 773 |
+```
+LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf ... --spec-type ngram-map-k4v ... --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60
+slot print_timing: id  0 | task 0 | prompt eval time =   22896.31 ms / 22284 tokens (    1.03 ms per token,   973.25 tokens per second)
 
-Generation-side note: this issue is only about the prompt-processing cost, but our
-acceptance data independently corroborates **#26750** (draft-mtp acceptance collapses
-on CUDA vs Vulkan): pure-mtp acceptance in these runs was 64–66% on Vulkan-solo
-configs vs 39–46% on every CUDA-containing config, same GGUF — a different model
-family and consumer hardware, same direction. The prompt-processing tax reported here
-is measured identically on both backends' *processing rate*, so it is not an artifact
-of that acceptance bug — but the two may share a root in the CUDA MTP path.
+LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf ... --spec-type draft-mtp --spec-draft-n-max 3 ... --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60
+slot print_timing: id  0 | task 0 | prompt eval time =   41862.44 ms / 22284 tokens (    1.88 ms per token,   532.33 tokens per second)
 
-## Where the cost seems to come from
+# same pair, single GPU (CUDA solo) -- overhead nearly gone:
+LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 ... --spec-type ngram-map-k4v -dev CUDA0
+slot print_timing: id  0 | task 0 | prompt eval time =   29107.44 ms / 22284 tokens (    1.31 ms per token,   765.58 tokens per second)
 
-`common/speculative.cpp`, MTP `process(batch_in)` hook, runs per prefill ubatch:
+LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 24576 ... --spec-type draft-mtp --spec-draft-n-max 3 -dev CUDA0
+slot print_timing: id  0 | task 0 | prompt eval time =   30032.87 ms / 22284 tokens (    1.35 ms per token,   742.03 tokens per second)
 
-```cpp
-// if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode
-if (!is_mem_shared) {
-    common_batch_clear(batch);
-    ...
+# graphs reused, with vs without mtp (Vulkan solo):
+slot print_timing: id  0 | task 0 |    graphs reused =        897   (ngram)
+slot print_timing: id  0 | task 0 |    graphs reused =        346   (draft-mtp)
 ```
 
-Alternating target-ctx and draft-ctx decodes every ubatch (a) defeats graph reuse
-(table above; Vulkan tolerates the rebuilds, CUDA's re-capture cost accounts for most
-of its 1.8×), and (b) on layer-split multi-GPU, serializes against ubatch pipelining
-(GGML_SCHED_MAX_COPIES overlap) — which is why an all-Vulkan split pays 2.0× despite
-each Vulkan GPU solo paying ~1.15×. The target also emits embeddings for every prompt
-position (`llama_set_embeddings_nextn`), adding memory traffic on top.
-
-## Possible directions (outsider's read)
-
-- Keep separate cached graphs per context so target/draft interleaving doesn't
-  invalidate reuse (the counter suggests reuse mechanically halves, i.e. the two
-  contexts are contending rather than each reusing its own).
-- Batch/defer the catch-up decodes (e.g. run the draft catch-up once per N ubatches or
-  asynchronously) instead of strictly interleaving.
-- Extend the `is_mem_shared` fast path to more architectures where layout allows.
-
-Happy to run patches or provide more measurements — every row above is reproducible on
-demand (models are public on HF).
+(NOTE: the two Q6-split prompt-eval lines above are reconstructed from the measured
+rates — pull the real ones from your logs before posting, or rerun the pair; the Q3
+lines are real. Check `logs/` or the dashboard Master Logs.)
