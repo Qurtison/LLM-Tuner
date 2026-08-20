@@ -2,19 +2,27 @@
 
 ---
 
-**Title:** `Eval bug: draft-mtp costs ~1.8x prompt processing on CUDA (vs ~1.15x on Vulkan) — per-ubatch catch-up decode halves graph reuse`
+**Title:** `Eval bug: draft-mtp costs ~1.8-2x prompt processing except on single-GPU Vulkan (~1.15x) — per-ubatch catch-up decode halves graph reuse and defeats multi-GPU pipelining`
 
 ---
 
 ## Summary
 
 Enabling `--spec-type draft-mtp` on a model whose MTP context is not mem-shared makes
-prompt processing **~1.8× slower on the CUDA backend**, but only **~1.15× slower on
-Vulkan** — same model file, same flags, same machine. The MTP `process()` hook runs a
-synchronous catch-up decode in the draft context for every prefill ubatch; the
-`graphs reused` counter shows this interleaving **halves graph reuse on both
-backends**, but only CUDA pays a large time cost for the lost reuse (re-capture /
-rebuild being far more expensive there than Vulkan's dispatch path).
+prompt processing **~1.8–2× slower in every configuration except single-GPU Vulkan
+(~1.15×)** — same model file, same flags, same machine. The MTP `process()` hook runs
+a synchronous catch-up decode in the draft context for every prefill ubatch, and the
+measurements separate two independent costs:
+
+1. **Graph-reuse loss** — the target/draft interleaving halves the `graphs reused`
+   counter on BOTH backends, but only CUDA pays heavily for it (graph re-capture is
+   expensive there; Vulkan's dispatch path barely cares): 1.82× on a single CUDA GPU.
+2. **Cross-device interleaving** — on any multi-GPU layer split the per-ubatch draft
+   decode also defeats ubatch pipelining: an all-Vulkan two-GPU split pays **2.0×**
+   even though each Vulkan GPU solo pays only ~1.15×.
+
+The two costs do not stack (CUDA+Vulkan split ≈ CUDA solo ≈ 1.8×); whichever
+bottleneck binds, binds.
 
 For long-context workloads (agents, large-document ingestion, cache-cold re-prefills)
 this roughly doubles every cold prefill on CUDA and CUDA-containing multi-GPU splits.
@@ -52,10 +60,11 @@ llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 -ngl 999 -fa on \
 | 27B UD-Q3_K_XL, 7900 XTX solo | Vulkan | 572 | 505 | **1.13×** |
 | 35B-A3B Q4_K_M, 7900 XTX solo | Vulkan | 1593 | 1307 | 1.22× |
 | 27B UD-Q6_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 973 | 532 | 1.83× |
+| 27B UD-Q6_K_XL, Vulkan1+Vulkan2 layer split | **Vulkan only** | 754 | 376 | **2.00×** |
 
-Same model, same flags, two backends: **1.82× on CUDA vs 1.13× on Vulkan** — the cost
-is backend-specific, not (as I first assumed) a multi-GPU pipeline effect; the split
-setup inherits CUDA's tax.
+Rows 1–2: same file, two backends, single GPU → the CUDA-specific graph cost.
+Row 5: no CUDA anywhere, yet 2.0× → the multi-GPU interleaving cost is real and
+independent. Single-GPU Vulkan, escaping both, is the only cheap configuration.
 
 **`graphs reused` (print_timings) for the Q3 pairs — MTP halves reuse on both
 backends:**
@@ -81,11 +90,12 @@ if (!is_mem_shared) {
     ...
 ```
 
-Alternating target-ctx and draft-ctx decodes every ubatch defeats graph reuse (see
-table above). Vulkan tolerates the rebuilds; CUDA's graph re-capture cost appears to
-account for most of the 1.8×. The target also emits embeddings for every prompt
-position (`llama_set_embeddings_nextn`), which presumably adds some memory traffic on
-top.
+Alternating target-ctx and draft-ctx decodes every ubatch (a) defeats graph reuse
+(table above; Vulkan tolerates the rebuilds, CUDA's re-capture cost accounts for most
+of its 1.8×), and (b) on layer-split multi-GPU, serializes against ubatch pipelining
+(GGML_SCHED_MAX_COPIES overlap) — which is why an all-Vulkan split pays 2.0× despite
+each Vulkan GPU solo paying ~1.15×. The target also emits embeddings for every prompt
+position (`llama_set_embeddings_nextn`), adding memory traffic on top.
 
 ## Possible directions (outsider's read)
 

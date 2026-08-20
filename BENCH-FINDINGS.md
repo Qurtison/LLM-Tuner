@@ -174,13 +174,18 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
   48–96min of gen. **Keeping MTP wins decisively** despite the tax.
 - **Re-measured after rebuilding at master `6d0549831` (2026-08-18): the tax is
   unchanged** — prefill 532/522 t/s with MTP vs 973/965 without (~1.85×).
-- **Isolation matrix (2026-08-19) — the tax is CUDA-specific, not multi-GPU**:
-  same Q3 27B file solo on each card: **1.82× on CUDA** (1007→555) vs **1.13× on
-  Vulkan** (572→505); 35B-A3B on Vulkan 1.22×; the CUDA+Vulkan split's 1.85× is
-  inherited from the CUDA side. Smoking gun: `graphs reused` **halves under MTP on
-  both backends** (960→425 CUDA, 897→346 Vulkan) — the per-ubatch target/draft
-  interleaving defeats graph reuse, and CUDA's graph re-capture is what's expensive.
-  eGPU/TB4 and the pipeline-stall theory both exonerated by measurement.
+- **Isolation matrix (2026-08-19) — TWO independent costs, cheap only on solo
+  Vulkan**: same Q3 27B solo: **1.82× CUDA** (1007→555) vs **1.13× Vulkan**
+  (572→505); 35B-A3B Vulkan solo 1.22×; CUDA+Vulkan split 1.83×; **all-Vulkan split
+  2.00×** (754→376). Component (a): graph-reuse loss — `graphs reused` halves under
+  MTP on both backends (960→425 CUDA, 897→346 Vulkan) but only CUDA's re-capture is
+  expensive. Component (b): on any multi-GPU split the per-ubatch draft decode
+  defeats ubatch pipelining, backend-irrelevant. The costs don't stack. eGPU/TB4
+  exonerated. **Pairing verdict UNCHANGED by spec**: MTP'd prefill is 532 on the
+  CUDA pair vs 376 on the Vulkan pair (and 434 for Q8-Vulkan); gen equal (~27) —
+  CUDA0/Vulkan2 remains the daily driver. Batch knobs can't bridge a 30-40% gap
+  (they moved ≤10% in bench and 0% in server), so no -ub/-b retest on the Vulkan
+  pair is warranted.
 - Isolation bonus: on the A3B, MTP is +61% generation (83.9 vs 52.1 t/s, 66%
   acceptance) — the 35B-A3B solo on the XTX is a legitimately fast light-duty
   config (~84 t/s gen, ~1300-1600 t/s prefill).
