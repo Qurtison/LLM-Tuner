@@ -2,6 +2,26 @@
 # (their rules prohibit AI-drafted issues; treat this as notes/structure,
 #  rewrite anything that doesn't sound like you)
 
+## HOW TO FILE (checklist)
+
+1. github.com/ggml-org/llama.cpp/issues/new/choose -> "Eval bug" template.
+2. Template fields:
+   - Name and Version: `build 10499 (6d0549831)` (note in body: also on 6c8dcaa7a)
+   - Operating systems: Linux
+   - GGML backends: CUDA, Vulkan
+   - Hardware: RTX 4090 Laptop 16GB (internal PCIe) + RX 7900 XTX 24GB
+     (RADV, TB4 enclosure)
+   - Models: unsloth/Qwen3.8-27B-GGUF (UD-Q6_K_XL, UD-Q3_K_XL),
+     unsloth/Qwen3.6-35B-A3B-GGUF Q4_K_M
+   - Problem description & steps: the "What happens" + matrix + repro below
+   - Relevant log output: the log block at the bottom (all lines are real)
+3. Before submitting: rewrite the prose in your own words; keep the tables.
+4. After it's up:
+   - drop the issue URL into reddit-post-outline.md §2 and tell Claude (goes
+     into BENCH-FINDINGS + memory)
+   - leave a short comment on #26750 with the acceptance numbers below
+     (41% CUDA solo vs 64% Vulkan solo, same file) linking your new issue
+
 Title: Eval bug: draft-mtp roughly halves prompt processing on multi-GPU layer split (single GPU is fine)
 
 ## What happens
@@ -25,7 +45,8 @@ prompt eval t/s from server timings:
 
 ("no MTP" rows use --spec-type ngram-map-k4v, which doesn't touch prefill and matches
 the no-spec prefill rate. Last row is the same NVIDIA card via Vulkan instead of CUDA,
-so no CUDA anywhere and it's still 2x.)
+so no CUDA anywhere and it's still 2x; its no-MTP figure is llama-bench pp8192 on the
+same split — bench and server rates agree within ~1% on the row where I have both.)
 
 The `graphs reused` counter roughly halves with MTP on in every config (e.g. 960 ->
 425 on the CUDA split pair, 897 -> 346 on Vulkan solo), but that on its own doesn't
@@ -80,25 +101,30 @@ Happy to test patches, all of the above takes me ~10 min to rerun.
 
 ## Relevant log output (paste into the template field)
 
+All lines below are verbatim from llama-server output (paths shortened).
+
 ```
-LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf ... --spec-type ngram-map-k4v ... --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60
-slot print_timing: id  0 | task 0 | prompt eval time =   22896.31 ms / 22284 tokens (    1.03 ms per token,   973.25 tokens per second)
+# Q3_K_XL on the CUDA0,Vulkan2 layer split -- ngram vs draft-mtp:
+llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 262144 -ngl 999 -fa on -ctk q8_0 -ctv q8_0 --spec-type ngram-map-k4v --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60 --jinja
+slot print_timing: id  0 | task 0 | prompt eval time =   22122.60 ms / 22284 tokens (    0.99 ms per token,  1007.30 tokens per second)
+slot print_timing: id  0 | task 0 |    graphs reused =        960
 
-LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf ... --spec-type draft-mtp --spec-draft-n-max 3 ... --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60
-slot print_timing: id  0 | task 0 | prompt eval time =   41862.44 ms / 22284 tokens (    1.88 ms per token,   532.33 tokens per second)
+llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 262144 -ngl 999 -fa on -ctk q8_0 -ctv q8_0 --spec-type draft-mtp --spec-draft-n-max 3 --split-mode layer -dev CUDA0,Vulkan2 -ts 40,60 --jinja
+slot print_timing: id  0 | task 0 | prompt eval time =   40175.56 ms / 22284 tokens (    1.80 ms per token,   554.67 tokens per second)
+slot print_timing: id  0 | task 0 |    graphs reused =        425
 
-# same pair, single GPU (CUDA solo) -- overhead nearly gone:
-LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 ... --spec-type ngram-map-k4v -dev CUDA0
-slot print_timing: id  0 | task 0 | prompt eval time =   29107.44 ms / 22284 tokens (    1.31 ms per token,   765.58 tokens per second)
+# same model, same card, single GPU (CUDA0 solo) -- overhead nearly gone:
+llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 ... --spec-type ngram-map-k4v -dev CUDA0 --jinja
+slot print_timing: id  0 | task 0 | prompt eval time =   29107.22 ms / 22284 tokens (    1.31 ms per token,   765.58 tokens per second)
 
-LAUNCHING: llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 24576 ... --spec-type draft-mtp --spec-draft-n-max 3 -dev CUDA0
-slot print_timing: id  0 | task 0 | prompt eval time =   30032.87 ms / 22284 tokens (    1.35 ms per token,   742.03 tokens per second)
+llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 24576 ... --spec-type draft-mtp --spec-draft-n-max 3 -dev CUDA0 --jinja
+slot print_timing: id  0 | task 0 | prompt eval time =   30031.29 ms / 22284 tokens (    1.35 ms per token,   742.03 tokens per second)
 
-# graphs reused, with vs without mtp (Vulkan solo):
+# all-Vulkan split (no CUDA anywhere), draft-mtp -- still ~2x slower than its no-MTP rate:
+llama-server -m Qwen3.8-27B-UD-Q6_K_XL.gguf -c 262144 ... --spec-type draft-mtp,ngram-map-k4v --split-mode layer -dev Vulkan1,Vulkan2 -ts 40,60 --jinja
+slot print_timing: id  0 | task 0 | prompt eval time =   59255.22 ms / 22284 tokens (    2.66 ms per token,   376.07 tokens per second)
+
+# Vulkan solo graphs-reused pair (reuse halves, cost stays small):
 slot print_timing: id  0 | task 0 |    graphs reused =        897   (ngram)
 slot print_timing: id  0 | task 0 |    graphs reused =        346   (draft-mtp)
 ```
-
-(NOTE: the two Q6-split prompt-eval lines above are reconstructed from the measured
-rates — pull the real ones from your logs before posting, or rerun the pair; the Q3
-lines are real. Check `logs/` or the dashboard Master Logs.)
