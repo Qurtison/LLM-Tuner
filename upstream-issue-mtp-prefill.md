@@ -76,8 +76,13 @@ backends:**
 | Vulkan solo, ngram | 897 / 1841 |
 | Vulkan solo, draft-mtp | 346 / 773 |
 
-Generation-side MTP behavior is good (+40–60% gen in these runs); this issue is only
-about the prompt-processing cost.
+Generation-side note: this issue is only about the prompt-processing cost, but our
+acceptance data independently corroborates **#26750** (draft-mtp acceptance collapses
+on CUDA vs Vulkan): pure-mtp acceptance in these runs was 64–66% on Vulkan-solo
+configs vs 39–46% on every CUDA-containing config, same GGUF — a different model
+family and consumer hardware, same direction. The prompt-processing tax reported here
+is measured identically on both backends' *processing rate*, so it is not an artifact
+of that acceptance bug — but the two may share a root in the CUDA MTP path.
 
 ## Where the cost seems to come from
 
