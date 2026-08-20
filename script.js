@@ -477,7 +477,9 @@ function handleSseMessage(e) {
 
     // 0. ERRORS & LOGS (run first; never throws, so state handling below always runs)
     if (data.error) {
-        lastKnownServerError = data.error; // consumed by the sweep runner's failure messages
+        // 'LAUNCH CMD:' is an informational banner that rides the error channel
+        // -- it must not overwrite the real failure reason the sweep reports.
+        if (!data.error.startsWith('LAUNCH CMD:')) lastKnownServerError = data.error;
         displayErrorInUI(data.error);
     } else if (data.log) {
         appendLogToUI(data.log);
