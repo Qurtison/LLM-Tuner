@@ -184,6 +184,10 @@ Real-workload A/B (code-review prompt, 22k cold prefill + 1024 gen tokens, CUDA 
   exonerated. **Pairing verdict unchanged**: MTP'd prefill 532 CUDA pair vs 376
   Vulkan pair (434 Q8-Vulkan), gen equal — CUDA0/Vulkan2 stays. Batch knobs can't
   bridge that gap (≤10% bench, 0% server) — no vk-pair -ub/-b retest warranted.
+- Workaround test: `--spec-draft-device CUDA0` on the split lifts MTP'd prefill
+  532→573 (+8%, outside the ±3 noise band) but doesn't recover the 2× — the stall is
+  the per-ubatch interruption itself, not draft-context placement. **Adopted into the
+  daily profile anyway: +8% free.**
 - **Acceptance corroborates upstream #26750** (CUDA MTP acceptance collapse): same
   Q3 file solo — 41% acceptance on CUDA vs 64% on Vulkan; explains why Vulkan-solo
   MTP gen (44 t/s) far outruns CUDA-solo (26 t/s) on this rig.

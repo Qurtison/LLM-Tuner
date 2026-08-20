@@ -71,6 +71,11 @@ reproduce that one too on this hardware btw (41% acceptance CUDA solo vs 64% Vul
 solo, same Q3 file), though it's a different symptom (decode quality vs prefill speed).
 Also #27306 crashes in the same draft-mtp prompt path on RADV.
 
+Tried `--spec-draft-device CUDA0` on the split as a workaround — helps a little
+(532 -> 573) but doesn't recover the loss, so it doesn't look like it's about where
+the draft context lives; the per-ubatch interruption of the target pipeline seems to
+be the cost either way.
+
 Happy to test patches, all of the above takes me ~10 min to rerun.
 
 ## Relevant log output (paste into the template field)
