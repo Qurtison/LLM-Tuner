@@ -56,15 +56,15 @@ llama-server -m Qwen3.8-27B-UD-Q3_K_XL.gguf -c 32768 -ngl 999 -fa on \
 
 | config | backend | no MTP | with MTP | tax |
 |---|---|---|---|---|
-| 27B UD-Q3_K_XL, 4090 solo | **CUDA** | 1007 | 555 | **1.82×** |
+| 27B UD-Q3_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 1007 | 555 | 1.82× |
 | 27B UD-Q3_K_XL, 7900 XTX solo | Vulkan | 572 | 505 | **1.13×** |
 | 35B-A3B Q4_K_M, 7900 XTX solo | Vulkan | 1593 | 1307 | 1.22× |
 | 27B UD-Q6_K_XL, CUDA0+Vulkan2 layer split | CUDA+Vulkan | 973 | 532 | 1.83× |
 | 27B UD-Q6_K_XL, Vulkan1+Vulkan2 layer split | **Vulkan only** | 754 | 376 | **2.00×** |
 
-Rows 1–2: same file, two backends, single GPU → the CUDA-specific graph cost.
+[PENDING: true CUDA-solo row — rerun in progress]
 Row 5: no CUDA anywhere, yet 2.0× → the multi-GPU interleaving cost is real and
-independent. Single-GPU Vulkan, escaping both, is the only cheap configuration.
+backend-independent. Single-GPU Vulkan is the only cheap configuration measured.
 
 **`graphs reused` (print_timings) for the Q3 pairs — MTP halves reuse on both
 backends:**
