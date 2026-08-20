@@ -1,3 +1,62 @@
+# Mission Control
+
+A single-host dashboard for running and measuring llama.cpp models on local
+GPU(s), with an optional remote RPC worker. It launches `llama-server`
+natively, watches it over an SSE stream, captures per-request performance for
+*any* client that hits the model's OpenAI endpoint (this dashboard's own
+chat, opencode, curl — anything), benchmarks hardware with `llama-bench`, and
+logs every request to CSV for later comparison.
+
+It serves the UI and all `/api/*` endpoints on **port 3000**. Run it under
+pm2 (see below) or `node server4.js` in the foreground.
+
+## Files
+
+| File | What it is |
+|---|---|
+| `server4.js` | The backend: HTTP server + SSE state stream. Spawns/stops `llama-server`, parses its log lines (model status, per-request timing, fatal errors), writes the benchmark CSV, spawns `monitor.py`. |
+| `monitor.py` | Telemetry child process on **port 8081**: GPU/CPU/VRAM/power/temp via `nvidia-smi`/`amdgpu_top` — for this machine, a second local GPU, or a remote worker over SSH. |
+| `index.html` / `script.js` | The frontend. Single page, no build step, fully offline (see below). |
+| `dashboard.config.json` | User-editable and gitignored: the `llamaServerBuilds` list (id/label/path) behind the "Build" selector. See `dashboard.config.example.json`. Missing/invalid file falls back to the built-in default build. |
+| `ecosystem.config.js` | pm2 config (see below). |
+| `vendor/` | Vendored Chart.js / marked / prebuilt Tailwind CSS (offline support). |
+| `logs/` | Created at runtime: `benchmarks.csv` (one row per completed request) + `bench-history.log` (bench/sweep transcript, tail reloaded on boot). |
+
+## Ports
+
+| Port | What |
+|---|---|
+| 3000 | Dashboard UI + API |
+| 8080 | `llama-server` (default; a `--port` in the raw command box overrides it, and the telemetry follows) |
+| 8081 | `monitor.py` telemetry |
+| 50052 | Remote RPC worker (llama.cpp RPC) |
+
+Models are picked from top-level `.gguf` files in `../models` (next to this
+directory) or from the local Hugging Face cache
+(`~/.cache/huggingface/hub`, or `$HF_HOME`/`$HUGGINGFACE_HUB_CACHE`).
+
+## UI tabs
+
+- **Interactive** — the dashboard's own chat client against the launched model.
+- **Monitor** — per-request telemetry, session-only. Capture is
+  *client-agnostic*: the server parses `llama-server`'s own `print_timing`
+  lines, so a request from any client gets a row (prompt/gen tokens + tps,
+  wall time, load time, draft-acceptance stats) plus an "omni" graph of GPU
+  power/temp/utilization/VRAM sampled over the request's life.
+- **History** — the persisted view: recent rows and aggregate stats
+  (best/avg prefill, gen, wall time; the last run's full config) from
+  `logs/benchmarks.csv`, filterable by model + transport, with a CSV download.
+- **Bench** — `llama-bench` hardware runs (single or matrix; the matrix queue
+  lives *server-side*, so it keeps running if you close the tab) and sweeps
+  that bench the real `llama-server`, including the speculative-decoding
+  stack that `llama-bench` can't exercise.
+
+Launch settings live in the left sidebar: model, build, ctx/ngl, device A/B
+(auto-detected on load, manual override available), tensor split, KV cache
+types, speculative decoding, sampling params, and a Flag Reference popover
+(parsed from the selected build's `--help`) that click-inserts flags. Saved
+setups persist as launch profiles in the browser.
+
 ## Launching: local GPU(s) + optional RPC worker
 
 The master (`llama-server`) always launches natively now -- there's no more
@@ -5,6 +64,15 @@ Docker-vs-local mode choice. `dashboard.config.json`'s `llamaServerBuilds`
 picks which compiled binary to run (e.g. Vulkan-only vs. a combined
 CUDA+Vulkan build), and up to two local devices (GPU A / GPU B) can be
 selected for a split, both detected automatically on page load.
+
+**The raw command box is the source of truth.** The structured fields seed
+the box (via the preview endpoint) on every change, but whatever text is in
+the box at Boot time is what gets tokenized and run. `-m`, `--port`, and
+`--rpc` in the box are synced back into the server-side launch config, so
+the CSV row, the `/slots` poll, and worker telemetry all use the values that
+actually ran. Launches are validated server-side (model path present, finite
+ctx/ngl, port 1–65535, a valid build) — a bad launch returns a clean error
+in the UI instead of leaving the dashboard stuck in "starting".
 
 RPC Worker is a separate, optional toggle (off by default) that adds a remote
 `llama.cpp` RPC worker as a second compute target alongside your local GPU(s).
@@ -40,6 +108,26 @@ output on the rebuilt binary and figure out the right explicit `-dev` list
 (does it need the RPC device named in it too, and if so what's its id?)
 before trusting RPC together with a second local GPU.
 
+## What stops a running model server
+
+Only genuinely fatal log lines stop the server: `failed to fit params to free
+device memory`, `llama_server: fatal error`, `segfault`, `out of memory`
+(case-insensitive). Non-fatal lines that merely *contain* `error:` or
+`abort` — client disconnects, per-request HTTP errors — are echoed to the
+log but ignored; an earlier substring check would have killed a healthy model
+over a single bad client request. A process that exits on its own is handled
+by the normal close/shutdown path either way. The Stop button sends SIGTERM
+and escalates to SIGKILL after 3 seconds for a process that ignores it.
+
+## Orphan cleanup on startup
+
+At boot the dashboard `fuser -k`s whatever is holding **8080** and **8081**
+before it starts its own processes. This recovers from a previous dashboard
+crash that left an orphaned `llama-server`/`monitor.py` behind — which would
+otherwise block the next launch with EADDRINUSE. The flip side: restarting
+the dashboard while a model is *deliberately* running kills it too, so
+expect to hit "Boot Cluster" again after any restart (pm2 or manual).
+
 ## Offline / no external dependencies
 
 The frontend used to load Tailwind, Chart.js, and marked from public CDNs, so
@@ -61,20 +149,23 @@ npm run build:css  # regenerates vendor/tailwind.css
 This build step needs internet/npm; the resulting `vendor/tailwind.css` is
 committed so end users never need to run it themselves.
 
-# Running the dashboard under pm2
+## Running the dashboard under pm2
 
-`server4.js` is the dashboard backend. It's the process that spawns `monitor.py`
-as a child, drives the Docker Compose lifecycle for the master/worker
-llama-server containers, and serves the SSE state stream + telemetry the UI
-depends on. Because a crash in this process used to take the whole dashboard
-down until someone manually restarted it (see `dashboard-bugs1-analysis.md`
-item 13), it now runs under [pm2](https://pm2.keymetrics.io/), a Node process
-manager that auto-restarts it if it ever dies.
+`server4.js` is the dashboard backend. It's the process that spawns the
+master `llama-server` directly (no Docker — the master has been a native
+launch since the refactor), reaches the remote worker over SSH (Docker
+compose on the *worker* machine), spawns `monitor.py` as a child, and serves
+the SSE state stream + HTTP API the UI depends on. Because a crash in this
+process used to take the whole dashboard down until someone manually
+restarted it (see `dashboard-bugs1-analysis.md` item 13), it now runs under
+[pm2](https://pm2.keymetrics.io/), a Node process manager that auto-restarts
+it if it ever dies.
 
-`monitor.py` is not managed separately — `server4.js` spawns it on startup and
-kills it on shutdown, so a single pm2 entry for `server4.js` covers both.
+`monitor.py` is not managed separately — `server4.js` spawns it on startup
+and kills it on shutdown (along with any running `llama-server` and bench
+process), so a single pm2 entry for `server4.js` covers everything.
 
-## Config
+### Config
 
 Process settings live in `ecosystem.config.js`:
 
@@ -93,12 +184,10 @@ module.exports = {
 ```
 
 `max_restarts`/`min_uptime` together are a crash-loop guard: if something is
-broken badly enough that the process dies within 5s of every restart, pm2 gives
-up after 20 attempts instead of restart-looping forever (which would otherwise
-hammer the GPUs with repeated container boot/teardown all night for no
-benefit).
+broken badly enough that the process dies within 5s of every restart, pm2
+gives up after 20 attempts instead of restart-looping forever.
 
-## Common commands
+### Common commands
 
 Run these from this directory (`/home/kyle/AI/experiment-1/dashboard`).
 
@@ -114,20 +203,21 @@ Run these from this directory (`/home/kyle/AI/experiment-1/dashboard`).
 
 A restart via pm2 (or a crash it recovers from) does **not** preserve
 in-flight model state — if a model was loaded, you'll need to hit "Boot
-Cluster" again in the UI afterward. pm2 only guarantees the dashboard
-backend itself comes back up; it doesn't remember or reissue your last
-`/api/start` config.
+Cluster" again in the UI afterward, and the orphan cleanup on startup (above)
+will have already reaped whatever was holding 8080. pm2 only guarantees the
+dashboard backend itself comes back up; it doesn't remember or reissue your
+last `/api/start` config.
 
-## Checking restart history
+### Checking restart history
 
 The `↺` column in `pm2 status` is a cumulative restart counter for the
 process's whole lifetime (not just since the last boot) — a non-zero count
-after leaving it running unattended (e.g. overnight) tells you it crashed and
-recovered at least that many times, worth cross-referencing against
+after leaving it running unattended (e.g. overnight) tells you it crashed
+and recovered at least that many times, worth cross-referencing against
 `pm2 logs dashboard --lines 500` (or the raw log files under `~/.pm2/logs/`)
 to see what actually happened.
 
-## Removing pm2 management
+### Removing pm2 management
 
 If you want to go back to running it directly:
 
