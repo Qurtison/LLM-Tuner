@@ -1,0 +1,112 @@
+diff --git a/common/speculative.cpp b/common/speculative.cpp
+index ae55e357d..a441afc07 100644
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1297,6 +1297,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+     int32_t n_mtp_layers  = 1;
+     bool    is_mem_shared = false;   // gemma4
+     bool    chain_heads   = false;   // derived in the ctor: n_mtp_layers > 1 && !is_mem_shared
++    bool    defer_catchup = false;   // accumulate prompt-phase catch-up decodes and flush in
++                                     // large chunks -- the draft KV is not read until drafting
++                                     // begins, and per-ubatch synchronous ctx_dft decodes break
++                                     // multi-GPU ubatch pipelining (~2x prompt processing cost
++                                     // on layer split). single-head only; chained heads keep
++                                     // the immediate path.
++    int32_t n_b_dft       = 0;
+ 
+     // Per-sequence cross-batch carryover: pair (h_p, x_{p+1}) at MTP pos p+1.
+     // The last h-row of one process() call needs the first token of the NEXT
+@@ -1373,6 +1380,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+ 
+         is_mem_shared = llama_get_ctx_other(ctx_dft) == ctx_tgt;
+         chain_heads   = n_mtp_layers > 1 && !is_mem_shared;
++        n_b_dft       = (int32_t) llama_n_batch(ctx_dft);
++        defer_catchup = !is_mem_shared && !chain_heads;
+ 
+         if (chain_heads) {
+             this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
+@@ -1413,6 +1422,23 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         llama_batch_free(batch);
+     }
+ 
++    // Decode all accumulated catch-up rows in one go. Returns false on decode
++    // failure (already logged). No-op when nothing is accumulated.
++    bool flush_catchup() {
++        if (!defer_catchup || batch.n_tokens == 0) {
++            return true;
++        }
++        const int32_t rc = llama_decode(params.ctx_dft, batch);
++        const int32_t n_flushed = batch.n_tokens;
++        common_batch_clear(batch);
++        if (rc != 0) {
++            SPC_ERR("deferred catch-up llama_decode(ctx_dft) failed rc=%d (n_tokens=%d)\n",
++                    (int) rc, (int) n_flushed);
++            return false;
++        }
++        return true;
++    }
++
+     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+         const int32_t N = (int32_t) prompt.size();
+         if (N <= 0) {
+@@ -1420,6 +1446,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         }
+ 
+         auto * ctx_dft = this->params.ctx_dft;
++        flush_catchup();
+         const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id);
+ 
+         if (pos_max < N - 1 && !is_mem_shared) {
+@@ -1466,7 +1493,39 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+         const size_t row_bytes = (size_t) n_embd * sizeof(float);
+ 
+         // if kv is shared with target (e.g Gemma4), then we can skip this catch-up decode
+-        if (!is_mem_shared) {
++        if (!is_mem_shared && defer_catchup) {
++            // Deferred path (single head): accumulate this ubatch's rows and
++            // return WITHOUT decoding -- ctx_dft's KV is not read until
++            // drafting starts, so the catch-up can run in n_batch-sized chunks
++            // (flush below when full; begin()/draft() flush the remainder).
++            // This avoids breaking the target's multi-GPU ubatch pipelining
++            // with a synchronous ctx_dft decode after every ubatch.
++            if (batch.n_tokens + n_tokens > n_b_dft) {
++                if (!flush_catchup()) {
++                    return false;
++                }
++            }
++
++            const int32_t base = batch.n_tokens;
++
++            for (int k = 0; k < n_tokens; ++k) {
++                common_batch_add(batch, batch_in.token[k], batch_in.pos[k], { batch_in.seq_id[k][0] }, 0);
++            }
++
++            // same embedding-shift scheme as the immediate path below, offset
++            // by the accumulation base
++            {
++                const float * h_tgt = llama_get_embeddings_nextn(ctx_tgt);
++                std::memcpy(batch.embd + ((size_t) base + 1) * n_embd, h_tgt, row_bytes * (n_tokens-1));
++            }
++
++            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
++                if (i_batch_beg[seq_id] < 0) {
++                    continue;
++                }
++                std::memcpy(batch.embd + ((size_t) base + i_batch_beg[seq_id]) * n_embd, pending_h[seq_id].data(), row_bytes);
++            }
++        } else if (!is_mem_shared) {
+             common_batch_clear(batch);
+ 
+             for (int k = 0; k < n_tokens; ++k) {
+@@ -1552,6 +1611,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
+     void draft(common_speculative_draft_params_vec & dparams) override {
+         auto & ctx_dft = params.ctx_dft;
+ 
++        // the accumulator shares `batch` -- any not-yet-decoded catch-up rows
++        // must land in ctx_dft's KV before drafting reads it (and before the
++        // clear below destroys them)
++        flush_catchup();
++
+         common_batch_clear(batch);
+ 
+         // keep track of which sequences are still drafting
