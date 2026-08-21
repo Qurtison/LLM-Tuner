@@ -4,13 +4,33 @@
   "description": "Cluster Command Center dashboard (server4.js backend + static frontend).",
   "main": "ecosystem.config.js",
   "scripts": {
+    "dev": "bun --hot server4.js & vite",
+    "dev:server": "bun --hot server4.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "bun server4.js",
     "build:css": "tailwindcss -i ./tailwind.src.css -o ./vendor/tailwind.css --minify",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
-    "tailwindcss": "^3.4.17"
+    "@tailwindcss/cli": "^4.3.3",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/bun": "^1.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "tailwindcss": "^4",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "marked": "^18.0.10",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }
