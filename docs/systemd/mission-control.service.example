@@ -1,0 +1,34 @@
+# Example systemd unit for the Mission Control dashboard (Phase 7).
+#
+# Install: copy to /etc/systemd/system/mission-control.service, fill in
+# User/WorkingDirectory, then: systemctl daemon-reload and enable.
+#
+# All machine-specific values belong in config/dashboard.json (see
+# config/dashboard.example.json) or Environment overrides below -- never in
+# code. DASHBOARD_* env vars override the config file (see src/server/config.ts).
+
+[Unit]
+Description=Mission Control dashboard (Bun + Vite/React)
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/path/to/LLM-Tuner
+# Required: the config file (defaults < file < env precedence).
+Environment=DASHBOARD_CONFIG=/path/to/LLM-Tuner/config/dashboard.json
+# Optional per-deploy overrides (any of these beats the config file):
+#Environment=DASHBOARD_HOST=127.0.0.1
+#Environment=DASHBOARD_PORT=3000
+#Environment=DASHBOARD_LOGS_DIR=/var/lib/mission-control/logs
+# The monitor child needs python (paths.pythonCommand in the config file).
+ExecStart=/usr/local/bin/bun run start
+Restart=on-failure
+RestartSec=3
+# Tracked-process cleanup is handled in-process (SIGTERM -> grace -> SIGKILL);
+# give systemd the same grace window.
+TimeoutStopSec=15
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
