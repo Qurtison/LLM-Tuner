@@ -170,13 +170,7 @@ const DEFAULT_LLAMA_SERVER_BUILDS = [
 const DASHBOARD_CONFIG_FILE = path.join(__dirname, 'dashboard.config.json');
 let dashboardConfig = { llamaServerBuilds: DEFAULT_LLAMA_SERVER_BUILDS };
 
-// A build entry is usable only if it carries a non-empty binary path --
-// dashboard.config.json is user-editable, and a half-deleted entry must not
-// corrupt the build list (see getLlamaServerBinary below).
-function isValidBuild(b) {
-    return b && typeof b.path === 'string' && b.path.trim().length > 0;
-}
-
+// isValidBuild moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
 async function loadDashboardConfig() {
     try {
         const parsed = JSON.parse(await fs.readFile(DASHBOARD_CONFIG_FILE, 'utf-8'));
@@ -201,19 +195,9 @@ function getLlamaServerBuilds() {
     return dashboardConfig.llamaServerBuilds;
 }
 
-// Resolves a build id to its binary path, falling back to the first
-// configured build if the id is missing/unknown -- e.g. a saved profile or
-// restored launch config from before builds existed (no `build` field at
-// all), or a stale id left over after dashboard.config.json was edited to
-// remove a build.
-function getLlamaServerBinary(buildId) {
-    const builds = getLlamaServerBuilds();
-    if (!builds || builds.length === 0) {
-        throw new Error('No valid llama-server builds configured');
-    }
-    const found = buildId ? builds.find(b => b.id === buildId) : null;
-    return (found || builds[0]).path;
-}
+// getLlamaServerBinary moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
+// Unknown/stale build id falls back to builds[0]; empty builds list throws.
+function getLlamaServerBinary(buildId) { return _ln.getLlamaServerBinary(getLlamaServerBuilds(), buildId); }
 
 // In-memory ring buffer for master logs (last 500 lines) — sidesteps the
 // docker compose run --rm one-off container issue (see dashboard-bugs1-analysis.md item 5)
@@ -325,184 +309,17 @@ async function cleanupPort(port) {
 // "--prefill-assistant, --no-prefill-assistant") has no description on its
 // own line -- the actual description is the following indented line(s),
 // handled by the continuation-line branch below.
-const HELP_DESC_COLUMN = 40;
-// Help text is static per binary, not globally -- different builds (e.g.
-// CUDA+Vulkan vs Vulkan-only) can expose different flags, so this is keyed by
-// build id rather than a single cached value.
+// parseHelpFlags / HELP_DESC_COLUMN moved verbatim to src/server/lib/helpparse.js (Phase 1 extraction).
 const cachedFlagReferenceByBuild = new Map();
-function parseHelpFlags(helpText) {
-    const lines = helpText.split('\n');
-    const entries = [];
-    let currentSection = 'general';
-    for (const rawLine of lines) {
-        const line = rawLine.replace(/\r$/, '');
-        if (/^-{3,}.*-{3,}$/.test(line.trim())) {
-            currentSection = line.trim().replace(/^-+\s*/, '').replace(/\s*-+$/, '');
-            continue;
-        }
-        if (!line.trim()) continue;
-        if (!/^\s/.test(line)) {
-            const candidateFlagPart = line.slice(0, HELP_DESC_COLUMN);
-            let flagPart, descPart;
-            if (candidateFlagPart.trimEnd().length < HELP_DESC_COLUMN) {
-                flagPart = candidateFlagPart.trim();
-                descPart = line.slice(HELP_DESC_COLUMN).trim();
-            } else {
-                flagPart = line.trim();
-                descPart = '';
-            }
-            entries.push({ flags: flagPart, description: descPart, section: currentSection });
-        } else if (entries.length > 0) {
-            const last = entries[entries.length - 1];
-            last.description = (last.description ? last.description + ' ' : '') + line.trim();
-        }
-    }
-    for (const e of entries) {
-        const flagTokens = e.flags.match(/--?[\w-]+/g) || [];
-        const longForm = [...flagTokens].reverse().find(t => t.startsWith('--')) || flagTokens[flagTokens.length - 1] || '';
-        const withoutFlags = e.flags.replace(/^(-{1,2}[\w-]+,?\s*)+/, '').trim();
-        e.insertText = withoutFlags ? `${longForm} ` : longForm;
-        e.primaryFlag = longForm;
-    }
-    return entries;
-}
+var _hp = require('./src/server/lib/helpparse');
+var parseHelpFlags = _hp.parseHelpFlags;
 
-// Coerce a UI/API value to a finite number, or undefined when it's missing,
-// empty, or not numeric. Number.isNaN() alone is NOT sufficient: it doesn't
-// coerce, so '' and 'abc' sail through it, and an empty string would emit a
-// flag with no value (e.g. `--top-k` "").
-function toFiniteNumber(v) {
-    if (v === null || v === undefined) return undefined;
-    if (typeof v === 'boolean') return undefined;
-    if (typeof v === 'string' && v.trim() === '') return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-}
-
-// Coerce to a non-empty trimmed string, or undefined. Preserves "0" (unlike
-// `v || undefined`, which would drop a legitimate zero).
-function toNonEmptyString(v) {
-    if (v === null || v === undefined) return undefined;
-    const s = String(v).trim();
-    return s.length > 0 ? s : undefined;
-}
-
-function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
-    // Validate the required knobs up front so a malformed config fails with a
-    // clear message instead of spawning `llama-server -m undefined -c NaN`
-    // (a blank ctx/ngl field reaches us as NaN -> JSON null).
-    const modelPath = toNonEmptyString(config.modelPath);
-    if (!modelPath) throw new Error('modelPath is required');
-
-    const ctx = toFiniteNumber(config.ctx);
-    const ngl = toFiniteNumber(config.ngl);
-    if (ctx === undefined || ngl === undefined) {
-        throw new Error('ctx and ngl must be numbers');
-    }
-
-    // Port: the UI has no port field today, but a raw command (or a future UI)
-    // may set one -- and the /slots poll + CSV rows depend on this being real.
-    const port = toFiniteNumber(toNonEmptyString(config.port) || '8080');
-    if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
-        throw new Error('port must be an integer between 1 and 65535');
-    }
-
-    const args = ['-m', mapModelPath(modelPath),
-        '-c', String(ctx), '-ngl', String(ngl),
-        '--host', '0.0.0.0', '--port', String(port), '--metrics'];
-
-    if (config.fa) args.push('-fa', 'on');
-    const cacheK = toNonEmptyString(config.cacheK);
-    if (cacheK) args.push('--cache-type-k', cacheK);
-    const cacheV = toNonEmptyString(config.cacheV);
-    if (cacheV) args.push('--cache-type-v', cacheV);
-    // specType is a comma-separated list of strategies (llama-server accepts
-    // e.g. `--spec-type draft-mtp,ngram-simple`); older configs stored a
-    // single value, which is just a one-item list.
-    const specType = toNonEmptyString(config.specType);
-    if (specType) {
-        args.push('--spec-type', specType);
-        const specDraftNMax = toFiniteNumber(config.specDraftNMax);
-        args.push('--spec-draft-n-max', String(specDraftNMax !== undefined ? specDraftNMax : 2));
-        const specDraftNMin = toFiniteNumber(config.specDraftNMin);
-        if (specDraftNMin !== undefined) {
-            args.push('--spec-draft-n-min', String(specDraftNMin));
-        }
-        const specDraftModel = toNonEmptyString(config.specDraftModel);
-        if (specDraftModel) args.push('--spec-draft-model', specDraftModel);
-        // Shared ngram knobs: llama-server namespaces them per strategy
-        // (--spec-ngram-map-k4v-size-n etc.), so emit the same value for each
-        // checked strategy that takes them. Blank fields omit the flags
-        // (llama defaults: size-n 12, size-m 48, min-hits 1).
-        const ngramFlagStems = { 'ngram-simple': 'ngram-simple', 'ngram-map-k': 'ngram-map-k', 'ngram-map-k4v': 'ngram-map-k4v' };
-        for (const type of specType.split(',').map(s => s.trim())) {
-            const stem = ngramFlagStems[type];
-            if (!stem) continue;
-            const sizeN = toFiniteNumber(config.specNgramSizeN);
-            if (sizeN !== undefined) args.push(`--spec-${stem}-size-n`, String(sizeN));
-            const sizeM = toFiniteNumber(config.specNgramSizeM);
-            if (sizeM !== undefined) args.push(`--spec-${stem}-size-m`, String(sizeM));
-            const minHits = toFiniteNumber(config.specNgramMinHits);
-            if (minHits !== undefined) args.push(`--spec-${stem}-min-hits`, String(minHits));
-        }
-        args.push('-np', '1');
-    }
-    const specDraftNgl = toFiniteNumber(config.specDraftNgl);
-    if (specDraftNgl !== undefined) args.push('--spec-draft-ngl', String(specDraftNgl));
-    // preserveThinking is a legacy field (older saved profiles) that implies
-    // reasoningPreserve -- dedupe so the flag is only emitted once.
-    const preserveThinking = !!config.preserveThinking;
-    const reasoningPreserve = !!config.reasoningPreserve;
-    if (preserveThinking) {
-        args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
-    }
-    if (preserveThinking || reasoningPreserve) {
-        args.push('--reasoning-preserve');
-    }
-    args.push(...deviceArgs);
-    const temp = toFiniteNumber(config.temp);
-    if (temp !== undefined) args.push('--temp', String(temp));
-    const topK = toFiniteNumber(config.topK);
-    if (topK !== undefined) args.push('--top-k', String(topK));
-    const topP = toFiniteNumber(config.topP);
-    if (topP !== undefined) args.push('--top-p', String(topP));
-    const minP = toFiniteNumber(config.minP);
-    if (minP !== undefined) args.push('--min-p', String(minP));
-    const presencePenalty = toFiniteNumber(config.presencePenalty);
-    if (presencePenalty !== undefined) args.push('--presence-penalty', String(presencePenalty));
-    const repeatPenalty = toFiniteNumber(config.repeatPenalty);
-    if (repeatPenalty !== undefined) args.push('--repeat-penalty', String(repeatPenalty));
-    const nCpuMoe = toFiniteNumber(config.nCpuMoe);
-    if (nCpuMoe !== undefined) args.push('--n-cpu-moe', String(nCpuMoe));
-    // --jinja must precede --chat-template-file -- llama.cpp only accepts a
-    // custom (non-built-in) template file when --jinja was already set by the
-    // time it processes this flag (see arg.cpp's --chat-template-file help text).
-    // So a custom template file forces --jinja even if the checkbox is off.
-    const chatTemplateFile = toNonEmptyString(config.chatTemplateFile);
-    if (config.jinja || chatTemplateFile) args.push('--jinja');
-    if (chatTemplateFile) args.push('--chat-template-file', chatTemplateFile);
-    const loadMode = toNonEmptyString(config.loadMode);
-    if (loadMode) args.push('-lm', loadMode);
-    const verbosity = toFiniteNumber(config.verbosity);
-    if (verbosity !== undefined) args.push('-lv', String(verbosity));
-    // Item 6: pass-through raw arg string (takes priority when provided).
-    // tokenizeCommand (not a plain whitespace split) so quoted spans like
-    // `--chat-template-kwargs '{"preserve_thinking": true}'` survive as ONE
-    // argument instead of quote-laden fragments.
-    const argString = toNonEmptyString(config.argString);
-    if (argString) {
-        const rawTokens = tokenizeCommand(argString.trim());
-        for (let i = 0; i < rawTokens.length; i++) {
-            const t = rawTokens[i];
-            if (t === '-m' && i + 1 < rawTokens.length) {
-                args.push('-m', mapModelPath(rawTokens[++i]));
-            } else {
-                args.push(t);
-            }
-        }
-    }
-    return args;
-}
+// toFiniteNumber / toNonEmptyString / buildLlamaArgs moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
+var _ln = require('./src/server/lib/launch');
+var toFiniteNumber = _ln.toFiniteNumber;
+var toNonEmptyString = _ln.toNonEmptyString;
+var buildLlamaArgs = _ln.buildLlamaArgs;
+var isValidBuild = _ln.isValidBuild;
 
 // --- LAUNCH COMMAND RESOLUTION (structured config -> command + args) ---
 // Shared by /api/preview-command (which only needs the resolved command/args
@@ -519,41 +336,10 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
 // applyRpcToggleUI), so at most one of localSplit/config.rpcTarget is ever
 // true below -- this only supports a 2-way split (this machine vs. one other
 // target), not a 3-way local-A + local-B + worker split.
-function resolveLaunchCommand(config) {
-    const command = getLlamaServerBinary(config.build);
-    const mapModelPath = (p) => p; // raw host path, no container mount to remap into
-    const deviceArgs = [];
-    // deviceA === deviceB happens whenever device detection finds exactly one
-    // device (no eGPU/second GPU plugged in) -- renderDeviceOptions() has a
-    // "None" option for GPU B for exactly this case, but treat an accidental
-    // match defensively too rather than passing llama-server a redundant
-    // `-dev X,X --split-mode layer` for a single physical GPU.
-    const localSplit = !!(config.deviceA && config.deviceB && config.deviceA !== config.deviceB);
-    const rpcTarget = toNonEmptyString(config.rpcTarget);
-    if (localSplit || rpcTarget) {
-        deviceArgs.push('--split-mode', 'layer');
-        if (localSplit) deviceArgs.push('-dev', `${config.deviceA},${config.deviceB}`);
-        if (rpcTarget) deviceArgs.push('--rpc', `${hostFromRpcTarget(rpcTarget)}:50052`);
-        // A tensor split of 0..99 is a 2-way ratio; negative/NaN values would
-        // emit a nonsensical `-ts` pair, so validate before emitting.
-        const tensorSplit = toFiniteNumber(config.tensorSplit);
-        if (tensorSplit !== undefined && tensorSplit >= 0 && tensorSplit < 100) {
-            deviceArgs.push('-ts', `${tensorSplit},${100 - tensorSplit}`);
-        }
-    }
+// resolveLaunchCommand moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
+function resolveLaunchCommand(config) { return _ln.resolveLaunchCommand(config, getLlamaServerBuilds()); }
 
-    const args = buildLlamaArgs(config, { mapModelPath, deviceArgs });
-    return { command, args };
-}
-
-// Extract the bare hostname from an RPC/SSH target like "user@host:22" --
-// the RPC port (50052) is appended separately, so a user-supplied :port must
-// not survive ("host:22:50052" is not a valid RPC endpoint).
-function hostFromRpcTarget(target) {
-    const s = String(target || '').trim();
-    const withoutUser = s.split('@').pop() || s;
-    return withoutUser.split(':')[0];
-}
+// hostFromRpcTarget moved to src/server/lib/launch.js (Phase 1 extraction).
 
 // Shell-safe quoting for the displayed/copied launch command. JSON.stringify
 // is not shell-safe: inside its double quotes, $, backtick, and ! can still
@@ -573,47 +359,15 @@ function formatCommand(command, args) {
     return [shellQuoteArg(command), ...args.map(shellQuoteArg)].join(' ');
 }
 
-// Last occurrence of `flag`'s value (the FOLLOWING token) in a token array --
-// later flags override earlier ones, same as the shell / llama-server do.
-function extractLastFlagValue(tokens, flag) {
-    for (let i = tokens.length - 1; i >= 0; i--) {
-        if (tokens[i] === flag && i + 1 < tokens.length) return tokens[i + 1];
-    }
-    return undefined;
-}
+// tokenizeCommand / extractLastFlagValue moved verbatim to src/server/lib/tokenize.js (Phase 1 extraction). (extractLastFlagValue original inlined below deleted after move.)
+var _tk = require('./src/server/lib/tokenize');
+var tokenizeCommand = _tk.tokenizeCommand;
+var extractLastFlagValue = _tk.extractLastFlagValue;
 
-// Minimal shell-lite tokenizer for the raw-command box: splits on whitespace,
-// respecting single/double-quoted spans (no escape-sequence support -- good
-// enough for llama-server flags and JSON args like --chat-template-kwargs
-// '{"preserve_thinking": true}', which is the actual case this needs to handle).
-function tokenizeCommand(str) {
-    const tokens = [];
-    let current = '';
-    let quoteChar = null;
-    for (let i = 0; i < str.length; i++) {
-        const c = str[i];
-        if (quoteChar) {
-            if (c === quoteChar) quoteChar = null;
-            else current += c;
-        } else if (c === '"' || c === "'") {
-            quoteChar = c;
-        } else if (/\s/.test(c)) {
-            if (current.length > 0) { tokens.push(current); current = ''; }
-        } else {
-            current += c;
-        }
-    }
-    if (current.length > 0) tokens.push(current);
-    return tokens;
-}
-
-// --- SHARED PROCESS SPAWN + LIFECYCLE ---
-// Lines that mean the process is actually dying or unusable. Deliberately NOT
-// "any line containing 'error:' or 'abort'" -- llama-server logs non-fatal
-// client aborts and per-request errors all the time, and the old substring
-// check would have SIGTERM'd a healthy model server over any of them. A
-// process that exits on its own is handled by the 'close' handler below.
-const FATAL_LINE_RE = /failed to fit params to free device memory|llama_server: fatal error|segfault|out of memory/i;
+// FATAL_LINE_RE / isFatalLogLine moved to src/server/lib/fatallogs.js (Phase 1 extraction).
+var _fl = require('./src/server/lib/fatallogs');
+var FATAL_LINE_RE = _fl.FATAL_LINE_RE;
+var isFatalLogLine = _fl.isFatalLogLine;
 // The master is always a directly-spawned llama-server binary now (no Docker
 // invocation). `onErrorCleanup`, if given, is called (in addition to
 // `proc.kill()`) when handleLogs detects an abort/OOM/error line -- currently
@@ -919,65 +673,12 @@ function generateRunId() {
     return `${ts}_${rand}`;
 }
 
-// Convert any CSV cell to a safe single-line string. Newlines inside a quoted
-// field would break the line-based readers in /api/logs/recent and
-// /api/logs/summary -- argString in particular comes from a UI textarea, so
-// it can carry them. NaN/Infinity become '' (they can't be parsed back).
-function csvValue(v) {
-    if (v === null || v === undefined) return '';
-    if (typeof v === 'number' && !Number.isFinite(v)) return '';
-    return String(v).replace(/\r\n|\r|\n/g, ' ');
-}
-
-// Parse a CSV cell to a number or null -- unlike `parseFloat(x) || null`, a
-// genuine 0 reading survives instead of collapsing to null.
-function parseNumOrNull(s) {
-    if (s === null || s === undefined) return null;
-    const t = String(s).trim();
-    if (t === '') return null;
-    const n = Number(t);
-    return Number.isFinite(n) ? n : null;
-}
-
-// Safely quote a CSV field — wraps in double-quotes, escaping internal quotes
-function csvQuote(val) {
-    if (val === null || val === undefined) return '""';
-    const s = String(val);
-    if (s.includes(',') || s.includes('"') || s.includes('\n')) {
-        return '"' + s.replace(/"/g, '""') + '"';
-    }
-    return s;
-}
-
-// Minimal CSV parser that respects double-quoted fields with embedded commas
-// -- shared by /api/logs/summary and /api/logs/recent.
-// Single forward character scan -- the previous indexOf-based version could
-// send its cursor BACKWARDS on a `""""` sequence (an escaped empty string
-// inside a quoted field, e.g. configJson's `""argString"":""""`), re-parsing
-// the same line in an infinite loop and OOMing the whole server on the first
-// /api/logs/summary call after such a row existed in the CSV.
-function splitCsvLine(line) {
-    if (!line) return [];
-    const cols = [];
-    let field = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-        const c = line[i];
-        if (inQuotes) {
-            if (c === '"') {
-                if (line[i + 1] === '"') { field += '"'; i++; } // escaped quote
-                else inQuotes = false; // closing quote
-            } else field += c;
-        } else if (c === '"' && field.length === 0) {
-            inQuotes = true; // opening quote of a quoted field
-        } else if (c === ',') {
-            cols.push(field);
-            field = '';
-        } else field += c;
-    }
-    cols.push(field);
-    return cols;
-}
+// csvValue / parseNumOrNull / csvQuote / splitCsvLine moved verbatim to src/server/lib/csv.js (Phase 1 extraction).
+var _cv = require('./src/server/lib/csv');
+var csvValue = _cv.csvValue;
+var parseNumOrNull = _cv.parseNumOrNull;
+var csvQuote = _cv.csvQuote;
+var splitCsvLine = _cv.splitCsvLine;
 
 // Shared by the /api/log HTTP route and logCompletedRequest() (server-side,
 // client-agnostic completion capture -- see that function). `data` uses the

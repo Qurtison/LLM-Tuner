@@ -1,0 +1,19 @@
+usage: llama-server [options] [--] [prompt]
+
+-m FNAME, --model FNAME     model path (default: '')
+-c N, --ctx-size N          context size
+
+--- Server options ---
+--host HOST               host to bind
+--port N                  port to bind
+--metrics                 enable metrics
+
+--- Model options ---
+--temp N                  temperature
+--top-k N                 top-k
+--top-p N                 top-p
+
+--- Specular options ---
+--prefill-assistant, --no-prefill-assistant  assistant prefill flag
+    detailed continuation for the prefill flag line wrapping onto next line
+--- End ---
