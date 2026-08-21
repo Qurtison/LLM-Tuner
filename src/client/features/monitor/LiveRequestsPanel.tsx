@@ -1,8 +1,26 @@
-// Placeholder for Phase 5 slice 5 — Live request table. Replaced by its conversion agent.
+import { useEffect, useRef, useState } from 'react';
+import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Legend, Tooltip } from 'chart.js';
+import { api } from '../../api/client';
+import { onSseLine, useServer } from '../../state/server';
+import type { CompletionEvent, SamplesResponse, TelemetrySample } from '../../../../shared/contracts';
+
+Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Legend, Tooltip);
+const empty = '—';
+const num = (value: number | null | undefined, digits = 1) => value == null || !Number.isFinite(value) ? empty : value.toFixed(digits);
+const draft = (row: Pick<CompletionEvent, 'draftAcceptRate' | 'draftAccepted' | 'draftGenerated' | 'draftMeanLen'>) => row.draftAcceptRate == null ? empty : (row.draftAcceptRate * 100).toFixed(0) + '% / ' + (row.draftAccepted ?? '?') + '/' + (row.draftGenerated ?? '?') + ' / ' + num(row.draftMeanLen, 2);
+
+function SampleDialog({ runId, onClose }: { runId: string; onClose: () => void }) {
+    const canvas = useRef<HTMLCanvasElement>(null); const chart = useRef<Chart | null>(null);
+    const [samples, setSamples] = useState<TelemetrySample[] | null>(null); const [error, setError] = useState('');
+    useEffect(() => { let alive = true; api<SamplesResponse>('/api/logs/samples?runId=' + encodeURIComponent(runId)).then(data => { if (alive) setSamples(data.samples); }).catch(e => { if (alive) setError(e instanceof Error ? e.message : 'Failed to load samples'); }); return () => { alive = false; }; }, [runId]);
+    useEffect(() => { if (!canvas.current || !samples || samples.length < 2) return; chart.current?.destroy(); chart.current = new Chart(canvas.current, { type: 'line', data: { labels: samples.map(s => new Date(s.t).toLocaleTimeString()), datasets: [{ label: 'Prefill t/s', data: samples.map(s => s.prefillTps), borderColor: '#60a5fa' }, { label: 'Gen t/s', data: samples.map(s => s.genTps), borderColor: '#4ade80' }] }, options: { responsive: true, maintainAspectRatio: false, animation: false } }); return () => { chart.current?.destroy(); chart.current = null; }; }, [samples]);
+    useEffect(() => { const key = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; document.addEventListener('keydown', key); return () => document.removeEventListener('keydown', key); }, [onClose]);
+    return <div role="dialog" aria-modal="true" aria-label="Request telemetry" className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}><div className="w-full max-w-3xl rounded border border-neutral-700 bg-neutral-900 p-4"><div className="mb-3 flex justify-between"><h2 className="font-semibold">Request telemetry</h2><button type="button" onClick={onClose} className="rounded px-2 text-neutral-300 hover:bg-neutral-800">Close</button></div>{error ? <p role="alert" className="text-red-400">Failed to load samples: {error}</p> : samples === null ? <p className="text-neutral-400">Loading…</p> : samples.length < 2 ? <p className="text-neutral-400">No telemetry samples for this request.</p> : <div className="h-80"><canvas ref={canvas} /></div>}</div></div>;
+}
+
 export default function LiveRequestsPanel() {
-    return (
-        <div className="p-6 text-sm text-neutral-400">
-            LiveRequestsPanel — slice 5 (not converted yet)
-        </div>
-    );
+    const { completions, progress, state } = useServer(); const [now, setNow] = useState(Date.now()); const [selected, setSelected] = useState<string | null>(null);
+    useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); const unsubscribe = onSseLine(() => setNow(Date.now())); return () => { window.clearInterval(timer); unsubscribe(); }; }, []);
+    const active = progress && state ? { runId: 'live', timestamp: now, model: state.model || 'Current request', promptTps: progress.prefill ? Number(progress.prefill.tps) : null, genTps: progress.gen ? Number(progress.gen.tps) : null, promptTokens: progress.prefill?.tokens ?? null, genTokens: progress.gen?.tokens ?? null } : null;
+    return <section className="rounded-lg border border-neutral-800 bg-neutral-900 p-4"><h2 className="mb-3 text-sm font-semibold text-neutral-200">Requests this session</h2><div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead className="border-b border-neutral-800 text-neutral-500"><tr><th className="p-2">Time</th><th className="p-2">Model</th><th className="p-2">Prompt</th><th className="p-2">Gen</th><th className="p-2">Wall</th><th className="p-2">Draft accept / accepted / generated / mean len</th><th className="p-2">Status</th><th className="p-2">Samples</th></tr></thead><tbody>{active && <tr className="border-b border-neutral-800 text-amber-300"><td className="p-2">Live</td><td className="p-2">{active.model}</td><td className="p-2">{active.promptTokens ?? empty} @ {num(active.promptTps)}</td><td className="p-2">{active.genTokens ?? empty} @ {num(active.genTps)}</td><td className="p-2">…</td><td className="p-2">{empty}</td><td className="p-2">In flight</td><td className="p-2">{empty}</td></tr>}{completions.map(row => <tr key={row.runId} className="border-b border-neutral-800 text-neutral-300"><td className="p-2">{new Date(row.timestamp).toLocaleTimeString()}</td><td className="max-w-48 truncate p-2" title={row.model}>{row.model}</td><td className="p-2">{row.promptTokens ?? empty} @ {num(row.promptTps)}</td><td className="p-2">{row.genTokens ?? empty} @ {num(row.genTps)}</td><td className="p-2">{num(row.wallTime)}s</td><td className="p-2">{draft(row)}</td><td className="p-2">{row.aborted ? <span className="rounded bg-red-950 px-1 text-red-300">Aborted</span> : 'Done'}</td><td className="p-2"><button type="button" onClick={() => setSelected(row.runId)} className="text-indigo-300 hover:underline">View</button></td></tr>)}</tbody></table></div>{!active && completions.length === 0 && <p className="py-6 text-center text-sm text-neutral-500">No requests completed since this page loaded.</p>}{selected && <SampleDialog runId={selected} onClose={() => setSelected(null)} />}</section>;
 }
