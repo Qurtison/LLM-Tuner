@@ -10,8 +10,8 @@
  *
  * Requires tokenize.js for tokenizeCommand (verbatim move).
  * Note: getLlamaServerBinary takes the filtered builds list as an arg now;
- * server4.js still owns the dashboardConfig.llamaServerBuilds state +
- * getLlamaServerBuilds() accessor and filters via isValidBuild before calling.
+ * server4.js owns the config-backed build list (Phase 2) and passes it in.
+ * rpcPort/defaultPort opts flow in from server config (Phase 2).
  */
 'use strict';
 
@@ -37,7 +37,7 @@ function toNonEmptyString(v) {
     return s.length > 0 ? s : undefined;
 }
 
-function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
+function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }) {
     // Validate the required knobs up front so a malformed config fails with a
     // clear message instead of spawning `llama-server -m undefined -c NaN`
     // (a blank ctx/ngl field reaches us as NaN -> JSON null).
@@ -52,7 +52,9 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs }) {
 
     // Port: the UI has no port field today, but a raw command (or a future UI)
     // may set one -- and the /slots poll + CSV rows depend on this being real.
-    const port = toFiniteNumber(toNonEmptyString(config.port) || '8080');
+    // Default port comes from server config (llama.defaultPort); a per-launch
+    // config.port or --port in a raw command still wins.
+    const port = toFiniteNumber(toNonEmptyString(config.port) || String(defaultPort));
     if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
         throw new Error('port must be an integer between 1 and 65535');
     }
@@ -178,7 +180,7 @@ function hostFromRpcTarget(target) {
 // applyRpcToggleUI), so at most one of localSplit/config.rpcTarget is ever
 // true below -- this only supports a 2-way split (this machine vs. one other
 // target), not a 3-way local-A + local-B + worker split.
-function resolveLaunchCommand(config, builds) {
+function resolveLaunchCommand(config, builds, { rpcPort = 50052, defaultPort = 8080 } = {}) {
     const command = getLlamaServerBinary(builds, config.build);
     const mapModelPath = (p) => p; // raw host path, no container mount to remap into
     const deviceArgs = [];
@@ -187,14 +189,14 @@ function resolveLaunchCommand(config, builds) {
     if (localSplit || rpcTarget) {
         deviceArgs.push('--split-mode', 'layer');
         if (localSplit) deviceArgs.push('-dev', config.deviceA + ',' + config.deviceB);
-        if (rpcTarget) deviceArgs.push('--rpc', hostFromRpcTarget(rpcTarget) + ':50052');
+        if (rpcTarget) deviceArgs.push('--rpc', hostFromRpcTarget(rpcTarget) + ':' + rpcPort);
         const tensorSplit = toFiniteNumber(config.tensorSplit);
         if (tensorSplit !== undefined && tensorSplit >= 0 && tensorSplit < 100) {
             deviceArgs.push('-ts', tensorSplit + ',' + (100 - tensorSplit));
         }
     }
 
-    const args = buildLlamaArgs(config, { mapModelPath, deviceArgs });
+    const args = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort });
     return { command, args };
 }
 

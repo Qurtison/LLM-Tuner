@@ -1,16 +1,21 @@
 const http = require('http');
 const fs = require('fs/promises');
 const path = require('path');
-const os = require('os');
 const { spawn, exec, execFile } = require('child_process');
 const { promisify } = require('util');
+const { loadConfig, ConfigError, publicConfig } = require('./src/server/config.ts');
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
-const ROOT_DIR = path.join(__dirname, '..');
-const PORT = 3000;
-const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB payload limit to prevent OOM
+const APP_ROOT = __dirname; // repo root (P3 moves the entry to src/server)
+// Phase 2: every machine-specific value now comes from src/server/config.ts
+// (defaults < config file < env). CFG is set in initServer() before anything
+// reads it; the lets below are assigned there as well.
+let CFG = null;
+let LOGS_DIR = '';
+let CSV_FILE = '';
+let HF_CACHE_DIR = '';
 
 // --- STATE ---
 let llamaProcess = null;
@@ -156,43 +161,15 @@ function benchLog(line) {
         .catch(() => {});
 }
 
-// --- LOCAL (NON-DOCKER) LAUNCH CONFIG ---
-// dashboard.config.json is user-editable and gitignored (see dashboard.config.example.json);
-// missing/invalid file silently falls back to this default. llamaServerBuilds
-// is a list (not a single path) so the GUI can offer a "Build" selector for
-// local-multi-gpu mode -- e.g. a Vulkan-only build vs. a combined CUDA+Vulkan
-// build of the same repo, which expose different devices for the same
-// physical GPUs (a CUDA-capable NVIDIA card only shows up as a native CUDA
-// device when launched from a binary actually compiled with GGML_CUDA=ON).
-const DEFAULT_LLAMA_SERVER_BUILDS = [
-    { id: 'default', label: 'Default', path: '/home/kyle/AI/llama-official/llama.cpp/build/bin/llama-server' }
-];
-const DASHBOARD_CONFIG_FILE = path.join(__dirname, 'dashboard.config.json');
-let dashboardConfig = { llamaServerBuilds: DEFAULT_LLAMA_SERVER_BUILDS };
-
-// isValidBuild moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
-async function loadDashboardConfig() {
-    try {
-        const parsed = JSON.parse(await fs.readFile(DASHBOARD_CONFIG_FILE, 'utf-8'));
-        let builds = null;
-        if (Array.isArray(parsed.llamaServerBuilds)) {
-            builds = parsed.llamaServerBuilds.filter(isValidBuild);
-        } else if (typeof parsed.llamaServerBinary === 'string' && parsed.llamaServerBinary.trim() !== '') {
-            // Old single-path config format, from before builds existed --
-            // wrap it as a one-item build list rather than requiring every
-            // existing dashboard.config.json to be hand-migrated.
-            builds = [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary.trim() }];
-        }
-        if (builds && builds.length > 0) {
-            dashboardConfig.llamaServerBuilds = builds;
-        }
-    } catch {
-        // missing/invalid config file -- keep the default
-    }
-}
-
+// --- LAUNCH BUILDS (Phase 2: from config) ---
+// Builds used to fall back to one user's hardcoded absolute path. Now the
+// config's llama.builds is the single source (defaults < config file < env,
+// strict validation in src/server/config.ts; the legacy dashboard.config.json
+// format is still mapped). An empty list disables launch/bench actions at the
+// routes (resolveLaunchCommand throws) while models/history/telemetry keep
+// working -- the GUI's Build selector stays usable for setup.
 function getLlamaServerBuilds() {
-    return dashboardConfig.llamaServerBuilds;
+    return CFG.llama.builds;
 }
 
 // getLlamaServerBinary moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
@@ -204,8 +181,8 @@ function getLlamaServerBinary(buildId) { return _ln.getLlamaServerBinary(getLlam
 let masterLogBuffer = [];
 const MASTER_LOG_BUFFER_SIZE = 500;
 
-// --- PATH HELPERS ---
-const HF_CACHE_DIR = process.env.HF_HOME || process.env.HUGGINGFACE_HUB_CACHE || path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+// HF_CACHE_DIR (resolved in initServer from config; env HF_HOME /
+// HUGGINGFACE_HUB_CACHE take precedence over the file value there).
 
 // --- SAFE SSE BROADCAST ---
 function broadcastState(logLine = '', errorMessage = '') {
@@ -228,7 +205,7 @@ function parseBody(req) {
         let size = 0;
         req.on('data', chunk => {
             size += chunk.length;
-            if (size > MAX_BODY_SIZE) {
+            if (size > CFG.server.maxBodyBytes) {
                 req.destroy();
                 return reject(new Error('Payload too large'));
             }
@@ -283,7 +260,12 @@ async function runSSHCommand(host, command) {
     });
 }
 
-// --- PORT CLEANUP (Restored safely) ---
+function workerComposeCommand(command) {
+    const dir = CFG.worker.workDirectory;
+    return dir ? `cd ${dir} && ${command}` : command;
+}
+
+// --- PORT CLEANUP (legacy; opt-in via processes.cleanupManagedPortsOnStart) ---
 async function cleanupPort(port) {
     try {
         await execAsync(`fuser -k ${port}/tcp`, { stdio: 'ignore' });
@@ -337,7 +319,7 @@ var isValidBuild = _ln.isValidBuild;
 // true below -- this only supports a 2-way split (this machine vs. one other
 // target), not a 3-way local-A + local-B + worker split.
 // resolveLaunchCommand moved verbatim to src/server/lib/launch.js (Phase 1 extraction).
-function resolveLaunchCommand(config) { return _ln.resolveLaunchCommand(config, getLlamaServerBuilds()); }
+function resolveLaunchCommand(config) { return _ln.resolveLaunchCommand(config, getLlamaServerBuilds(), { rpcPort: CFG.llama.rpcPort, defaultPort: CFG.llama.defaultPort }); }
 
 // hostFromRpcTarget moved to src/server/lib/launch.js (Phase 1 extraction).
 
@@ -374,7 +356,7 @@ var isFatalLogLine = _fl.isFatalLogLine;
 // always omitted, since a direct spawn has nothing extra to tear down; kept
 // as a hook for whatever future launch path might need one.
 function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
-    const proc = spawn(command, args, { cwd: cwd || ROOT_DIR, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(command, args, { cwd: cwd || APP_ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
 
     // Line-buffering to prevent regex misses when stdout chunks split a single
     // log line across multiple 'data' events (item 7)
@@ -663,8 +645,7 @@ function spawnLlamaProcess(command, args, { cwd, onErrorCleanup } = {}) {
 // "what did I run last time for this exact combo" and restore it exactly,
 // rather than reconstructing a guess from the scattered individual columns.
 const CSV_HEADERS = "Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len,Aborted\n";
-const LOGS_DIR = path.join(ROOT_DIR, 'logs');
-const CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
+// LOGS_DIR / CSV_FILE / HF_CACHE_DIR are assigned in initServer() from config.
 
 // Generate a short run_id: timestamp + 4 random hex chars
 function generateRunId() {
@@ -819,7 +800,7 @@ async function takeOneTelemetrySample(statsArg) {
             // a raw command's --port (see /api/start's sync) -- anything else
             // falls back to the default 8080.
             const port = toFiniteNumber(currentLaunchConfig?.port) ?? 8080;
-            const slotsRes = await fetch(`http://localhost:${port}/slots`, { signal: AbortSignal.timeout(1500) });
+            const slotsRes = await fetch(`http://${CFG.llama.defaultHost}:${port}/slots`, { signal: AbortSignal.timeout(1500) });
             const slots = await slotsRes.json();
             const slot = Array.isArray(slots) ? slots[0] : null;
             if (slot && slot.n_ctx) {
@@ -931,7 +912,7 @@ async function fetchCurrentTelemetry() {
             // GPU B graphed as all-zeros during every bench run.
             body.local_second_gpu = 'amd';
         }
-        const res = await fetch('http://localhost:8081/stats', {
+        const res = await fetch(`http://${CFG.telemetry.host}:${CFG.telemetry.port}/stats`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -1050,13 +1031,24 @@ async function initLogsDir() {
             await fs.writeFile(CSV_FILE, CSV_HEADERS);
         }
     } catch (err) {
-        console.warn('Failed to init logs directory:', err.message);
+        // Phase 2 startup check: a logs dir we cannot create/write is fatal --
+        // every benchmark row and the bench transcript depend on it.
+        console.error(`Failed to init logs directory ${LOGS_DIR}: ${err.message}`);
+        process.exit(1);
     }
 }
 
 // --- HTTP SERVER ---
 const server = http.createServer(async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Phase 2: CORS is config-driven. Empty corsOrigins (default) means
+    // same-origin only -- the UI is served from this origin, so no header at
+    // all; remote origins get nothing.
+    const origin = req.headers.origin;
+    if (CFG.server.corsOrigins.length > 0) {
+        if (origin && CFG.server.corsOrigins.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+        else if (CFG.server.corsOrigins.includes('*')) res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Vary', 'Origin');
+    }
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     if (req.method === 'OPTIONS') { res.writeHead(200); return res.end(); }
 
@@ -1080,12 +1072,20 @@ const server = http.createServer(async (req, res) => {
             return;
         }
 
+        // --- PUBLIC CONFIG (Phase 2: safe UI defaults + feature flags; never
+        // filesystem paths or remote commands -- see publicConfig) ---
+        else if (req.url === '/api/config' && req.method === 'GET') {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            return res.end(JSON.stringify(publicConfig(CFG)));
+        }
+
         // --- MODELS ---
         else if (req.url === '/api/models') {
             const allModels = [];
-            const localDir = path.join(ROOT_DIR, 'models');
-
-            if (await fs.access(localDir).then(() => true).catch(() => false)) {
+            // Phase 2: scan every configured model directory (default
+            // ./models relative to the repo root). Missing dirs are skipped.
+            for (const localDir of CFG.paths.modelDirectories) {
+                if (!await fs.access(localDir).then(() => true).catch(() => false)) continue;
                 const items = await fs.readdir(localDir);
                 for (const f of items) {
                     if (f.endsWith('.gguf')) {
@@ -1624,7 +1624,7 @@ const server = http.createServer(async (req, res) => {
             broadcastState('', 'LAUNCH CMD: ' + currentLaunchCommand);   // shows in chat as an "error"-style banner
 
             try {
-                llamaProcess = spawnLlamaProcess(command, args, { cwd: ROOT_DIR });
+                llamaProcess = spawnLlamaProcess(command, args, { cwd: APP_ROOT });
             } catch (err) {
                 // Synchronous spawn failure (e.g. non-string command) -- reset
                 // the state just set above so the dashboard doesn't sit in
@@ -1663,7 +1663,7 @@ const server = http.createServer(async (req, res) => {
                 // clears state, so a kill that lands after close is a no-op.
                 setTimeout(() => {
                     try { proc.kill('SIGKILL'); } catch { /* already gone */ }
-                }, 3000).unref();
+                }, CFG.processes.stopGraceMs).unref();
             }
             serverState = 'stopped';
             currentModel = '';
@@ -1674,14 +1674,19 @@ const server = http.createServer(async (req, res) => {
             return res.end(JSON.stringify({ status: 'stopped' }));
         }
 
-        // --- WORKER START ---
+        // --- WORKER (Phase 2: commands come from server config, never from
+        // the browser; the host may come from the request or config default) ---
+        // Optional workDirectory is prepended as a cd so relative compose
+        // file paths resolve where the worker's files actually live.
+        // (helper defined at module scope below -- see workerComposeCommand)
         else if (req.url === '/api/worker/start' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
-            const { worker_ssh } = body;
-            if (!worker_ssh) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            const workerHost = body.worker_ssh || CFG.worker.sshHost;
+            if (!workerHost) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            if (!CFG.worker.startCommand) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ success: false, error: 'Worker commands not configured' })); }
             try {
-                const { stdout, stderr } = await runSSHCommand(worker_ssh, 'cd ~/AI/experiment-1 && docker compose -f docker-compose.worker.yml up -d');
+                const { stdout, stderr } = await runSSHCommand(workerHost, workerComposeCommand(CFG.worker.startCommand));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ success: true, stdout, stderr }));
             } catch (err) {
@@ -1694,10 +1699,11 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/worker/stop' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
-            const { worker_ssh } = body;
-            if (!worker_ssh) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            const workerHost = body.worker_ssh || CFG.worker.sshHost;
+            if (!workerHost) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            if (!CFG.worker.stopCommand) { res.writeHead(500, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ success: false, error: 'Worker commands not configured' })); }
             try {
-                const { stdout, stderr } = await runSSHCommand(worker_ssh, 'cd ~/AI/experiment-1 && docker compose -f docker-compose.worker.yml down');
+                const { stdout, stderr } = await runSSHCommand(workerHost, workerComposeCommand(CFG.worker.stopCommand));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ success: true, stdout, stderr }));
             } catch (err) {
@@ -1710,10 +1716,11 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/worker/status' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
-            const { worker_ssh } = body;
-            if (!worker_ssh) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            const workerHost = body.worker_ssh || CFG.worker.sshHost;
+            if (!workerHost) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            if (!CFG.worker.statusCommand) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ status: 'offline', error: 'Worker commands not configured' })); }
             try {
-                const { stdout } = await runSSHCommand(worker_ssh, 'cd ~/AI/experiment-1 && docker compose -f docker-compose.worker.yml ps --filter status=running -q');
+                const { stdout } = await runSSHCommand(workerHost, workerComposeCommand(CFG.worker.statusCommand));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ status: stdout.trim().length > 0 ? 'running' : 'stopped' }));
             } catch (err) {
@@ -1726,10 +1733,11 @@ const server = http.createServer(async (req, res) => {
         else if (req.url === '/api/worker/logs' && req.method === 'POST') {
             let body;
             try { body = JSON.parse(await parseBody(req)); } catch (e) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Invalid JSON' })); }
-            const { worker_ssh } = body;
-            if (!worker_ssh) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            const workerHost = body.worker_ssh || CFG.worker.sshHost;
+            if (!workerHost) { res.writeHead(400); return res.end(JSON.stringify({ error: 'Missing worker_ssh' })); }
+            if (!CFG.worker.logsCommand) { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify({ logs: 'Failed to fetch logs: Worker commands not configured' })); }
             try {
-                const { stdout, stderr } = await runSSHCommand(worker_ssh, 'cd ~/AI/experiment-1 && docker compose -f docker-compose.worker.yml logs --tail=50');
+                const { stdout, stderr } = await runSSHCommand(workerHost, workerComposeCommand(CFG.worker.logsCommand));
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 return res.end(JSON.stringify({ logs: stdout || stderr || 'No logs available.' }));
             } catch (err) {
@@ -1766,13 +1774,43 @@ const server = http.createServer(async (req, res) => {
 
 // --- SERVER INITIALIZATION ---
 async function initServer() {
-    await loadDashboardConfig();
+    // Phase 2: typed config loads first and gates startup -- an invalid
+    // config is a field-specific fatal error (ConfigError.issues), never a
+    // silent fallback to machine values.
+    try {
+        CFG = await loadConfig({ appRoot: APP_ROOT });
+    } catch (err) {
+        if (err instanceof ConfigError) for (const issue of err.issues) console.error('[config] ' + issue);
+        else console.error('Failed to load config:', err);
+        process.exit(1);
+    }
+    LOGS_DIR = CFG.paths.logsDirectory;
+    CSV_FILE = path.join(LOGS_DIR, 'benchmarks.csv');
+    HF_CACHE_DIR = CFG.paths.huggingFaceCache;
+
     await initLogsDir();
-    // Clean BOTH the model-server port and the monitor port -- an orphaned
-    // llama-server from a previous dashboard crash would otherwise keep 8080
-    // and make the next launch fail with EADDRINUSE.
-    await cleanupPort(8080);
-    await cleanupPort(8081);
+
+    // Legacy fuser-based port cleanup is OFF by default: it killed whatever
+    // PID happened to own the ports, including unrelated processes. Opt in
+    // explicitly via processes.cleanupManagedPortsOnStart.
+    if (CFG.processes.cleanupManagedPortsOnStart) {
+        await cleanupPort(CFG.llama.defaultPort);
+        if (CFG.telemetry.enabled) await cleanupPort(CFG.telemetry.port);
+    }
+
+    // Startup checks (soft): surface a broken setup without crashing the
+    // dashboard -- a missing build disables launch/bench at the routes.
+    if (CFG.llama.builds.length === 0) {
+        console.warn('[config] no llama.cpp builds configured -- launch and bench actions are disabled (add llama.builds to config/dashboard.json)');
+    }
+    for (const b of CFG.llama.builds) {
+        if (!await fs.access(b.path).then(() => true).catch(() => false)) {
+            console.warn(`[config] build "${b.id}" binary missing or unreadable: ${b.path}`);
+        }
+    }
+    if (!CFG.worker.sshHost) {
+        console.warn('[config] worker.sshHost empty -- worker controls stay disabled in the UI');
+    }
 
     // Reload the tail of the bench transcript so a dashboard restart doesn't
     // present an empty Bench tab (the full history lives in the file).
@@ -1791,17 +1829,26 @@ async function initServer() {
     // stdio must be 'ignore': the default pipes are never read here, so once
     // monitor.py printed 64KB (e.g. a stream of warnings) it would block on
     // write and its /stats endpoint would silently stall.
-    pythonProcess = spawn('python3', ['monitor.py'], { cwd: __dirname, stdio: 'ignore' });
-    // An unhandled 'error' event (python3 missing, spawn failure, ...) would
-    // become an uncaughtException and take the whole dashboard down over a
-    // missing monitor -- telemetry is best-effort, so log and move on.
-    pythonProcess.on('error', (err) => {
-        console.error('monitor.py spawn error:', err.message);
-        pythonProcess = null;
-    });
-    pythonProcess.on('exit', () => {
-        pythonProcess = null;
-    });
+    // Phase 2: monitor command/script come from config; a missing python or
+    // script must never stop the dashboard (telemetry is best-effort).
+    if (CFG.telemetry.enabled) {
+        const monitorExists = await fs.access(CFG.paths.monitorScript).then(() => true).catch(() => false);
+        if (!monitorExists) {
+            console.warn(`[config] telemetry enabled but monitor script missing: ${CFG.paths.monitorScript} -- telemetry disabled`);
+        } else {
+            pythonProcess = spawn(CFG.paths.pythonCommand, [CFG.paths.monitorScript], { cwd: APP_ROOT, stdio: 'ignore' });
+            // An unhandled 'error' event (python missing, spawn failure, ...)
+            // would become an uncaughtException and take the whole dashboard
+            // down over a missing monitor -- telemetry is best-effort.
+            pythonProcess.on('error', (err) => {
+                console.error('monitor spawn error:', err.message);
+                pythonProcess = null;
+            });
+            pythonProcess.on('exit', () => {
+                pythonProcess = null;
+            });
+        }
+    }
     startTelemetryLoop();
 
     const shutdownHandler = async () => {
@@ -1846,7 +1893,7 @@ process.on('unhandledRejection', (reason) => {
     console.error('Unhandled rejection:', reason);
 });
 
-    server.listen(PORT, () => console.log(`\n🚀 Mission Control running at: http://localhost:${PORT}`));
+    server.listen(CFG.server.port, CFG.server.host, () => console.log(`\n🚀 Mission Control running at: http://${CFG.server.host}:${CFG.server.port}`));
 }
 
 initServer().catch(err => {
