@@ -36,6 +36,9 @@ cluster_averages, cluster_chat_history, omni_smoothing, bench_auto_queue, bench_
 bench_custom_rows, bench_row_status, cluster_sidebar_width, launch_sidebar_width,
 sidebar_collapsed_left, sidebar_collapsed_right, launch_ab, bench_subtab
 
+## Decisions (post-migration behavior)
+- same_host worker stats (2026-08-21): a GPU is a "worker" only when connected over RPC to another machine; otherwise it is a local GPU sharing master's machine-level cpu/ram/net pool. monitor.py marks the worker slot `same_host: true` for the local second-GPU mode and for RPC targets resolving to this machine (loopback / own hostname; collected locally, no SSH to self). MonitorPanel suppresses the worker cpu/ram line and value on same_host points; per-GPU stats (util/pwr/temp/VRAM) still show. Frozen API suite untouched: fake monitor already returns `worker: null`. Future: when monitor.py is folded into the Bun server (SSE stats), the TS side produces the same flag.
+
 ## Plan per phase (delta vs scroll)
 - P1: A=inventory doc, B=extraction+fixtures. Then: route smoke tests (start server with fake monitor fixture? decide), freeze API in shared/contracts.ts.
 - P2: config.ts TS module + config/dashboard.example.json + /api/config + .gitignore update.

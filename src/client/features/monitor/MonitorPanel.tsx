@@ -28,6 +28,11 @@ function stat(stats: Stats | null, key: string): number | null { return stats ? 
 function text(value: number | null, unit: string): string { return value === null ? '--' + unit : value.toFixed(unit === '%' ? 0 : 1) + unit; }
 function labels(points: Point[]): string[] { return points.map(point => new Date(point.t).toLocaleTimeString()); }
 function series(points: Point[], from: 'master' | 'worker', key: string): (number | null)[] { return points.map(point => stat(point[from], key)); }
+// Machine-level stats a worker shares with main when it runs on the same host
+// (local second GPU or loopback RPC target). monitor.py marks those points
+// same_host; showing the worker value there would just repeat main's.
+const SHARED_KEYS = new Set(['cpu_util', 'ram_used']);
+function workerSeries(points: Point[], key: string): (number | null)[] { return points.map(point => SHARED_KEYS.has(key) && point.worker && point.worker.same_host === true ? null : stat(point.worker, key)); }
 function metricSeries(samples: TelemetrySample[], key: keyof TelemetrySample): (number | null)[] { return samples.map(sample => { const value = sample[key]; return typeof value === 'number' ? value : null; }); }
 function chartOptions(compact = false): object {
     return { responsive: true, maintainAspectRatio: false, animation: false, spanGaps: false, plugins: { legend: { display: !compact, labels: { color: '#a3a3a3' } } }, scales: { x: { display: !compact, ticks: { color: '#737373', maxTicksLimit: 6 } }, y: { ticks: { color: '#737373', font: { size: compact ? 8 : 12 } } } } };
@@ -55,12 +60,12 @@ function MiniChart({ metric, points, smooth, master, worker, net }: { metric: Mi
         const data = metric.key === 'net' ? netSeries(points) : series(points, 'master', metric.key);
         chart.data.datasets = [
             { label: 'Main', data, borderColor: '#eab308', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 },
-            ...(metric.key === 'net' ? [] : [{ label: 'Worker', data: series(points, 'worker', metric.key), borderColor: '#ef4444', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 }]),
+            ...(metric.key === 'net' ? [] : [{ label: 'Worker', data: workerSeries(points, metric.key), borderColor: '#ef4444', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 }]),
         ];
         chart.update('none');
     }, [metric.key, points, smooth]);
     const value = metric.key === 'net' ? net : stat(master, metric.key);
-    const workerValue = metric.key === 'net' ? null : stat(worker, metric.key);
+    const workerValue = metric.key === 'net' || (SHARED_KEYS.has(metric.key) && worker?.same_host === true) ? null : stat(worker, metric.key);
     return <div className="rounded border border-neutral-800 bg-neutral-900 p-2"><div className="mb-1 flex items-baseline justify-between"><p className="text-xs text-neutral-400">{metric.title}</p><p className="font-mono text-sm text-yellow-300">{text(value, metric.unit)}{workerValue !== null && <span className="text-red-300"> / {text(workerValue, metric.unit)}</span>}</p></div><div className="h-24"><canvas ref={canvas} /></div></div>;
 }
 

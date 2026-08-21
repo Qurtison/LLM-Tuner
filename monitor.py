@@ -4,6 +4,7 @@ import socketserver
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -183,6 +184,17 @@ def _identify_interface_by_subnet(iface_bytes, subnet_prefix):
     first = next(iter(iface_bytes.items()), None)
     return first[0] if first else None, first[1] if first else {}
 
+def _is_same_host(ssh_target):
+    """True if an SSH-style target ('[user@]host') points at this machine.
+    A GPU only counts as a real worker when it is connected over RPC to a
+    different machine; a loopback / own-hostname RPC target (or the local
+    second-GPU mode) shares master's machine-level cpu/ram/net pool. The
+    worker slot is then marked same_host so the frontend does not show those
+    shared stats twice."""
+    host = ssh_target.split('@')[-1].strip().strip('[]').lower()
+    return bool(host) and (host in ('localhost', '127.0.0.1', '0.0.0.0', '::1')
+                           or host == socket.gethostname().lower())
+
 class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
     """HTTP handler for hardware telemetry. Wraps all request methods in
     try/except to prevent client disconnections (ConnectionResetError,
@@ -221,10 +233,23 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
             local_second_gpu = req.get('local_second_gpu', '').strip()
             if local_second_gpu == 'amd':
                 # Local-multi-gpu launch mode: "worker" slot is the second GPU on
-                # THIS machine (the AMD eGPU), not a remote SSH host.
-                stats['worker'] = self.get_amd_stats()
+                # THIS machine (the AMD eGPU), not a remote SSH host. It shares
+                # master's machine-level cpu/ram/net pool, so the worker is marked
+                # same_host and the frontend skips showing those stats twice.
+                worker = self.get_amd_stats()
+                worker['same_host'] = True
+                stats['worker'] = worker
             elif worker_ssh:
-                stats['worker'] = self.get_stats(worker_ssh)
+                if _is_same_host(worker_ssh):
+                    # RPC target is this machine (loopback / own hostname): the
+                    # worker GPU is local, not a remote box. Collect locally
+                    # instead of SSHing to ourselves; same_host tells the
+                    # frontend the cpu/ram/net fields duplicate master's.
+                    worker = self.get_stats()
+                    worker['same_host'] = True
+                else:
+                    worker = self.get_stats(worker_ssh)
+                stats['worker'] = worker
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
@@ -685,7 +710,10 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
 # reach the port). ThreadingTCPServer handles each request on its own thread;
 # nothing in HardwareMonitorHandler touches shared mutable module state (no
 # globals written in do_POST), so there's no new race condition introduced.
-socketserver.ThreadingTCPServer.allow_reuse_address = True
-socketserver.ThreadingTCPServer.daemon_threads = True
-with socketserver.ThreadingTCPServer(("", PORT), HardwareMonitorHandler) as httpd:
-    httpd.serve_forever()
+if __name__ == '__main__':
+    # __main__ guard so tests can import the helpers (e.g. _is_same_host)
+    # without starting the HTTP server; `python3 monitor.py` is unchanged.
+    socketserver.ThreadingTCPServer.allow_reuse_address = True
+    socketserver.ThreadingTCPServer.daemon_threads = True
+    with socketserver.ThreadingTCPServer(("", PORT), HardwareMonitorHandler) as httpd:
+        httpd.serve_forever()
