@@ -1,5 +1,5 @@
-import fs = require('node:fs/promises');
-import path = require('node:path');
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { tokenizeCommand } from '../lib/tokenize';
 import type { BenchStatusResponse, LaunchConfig, TelemetrySample } from '../../../shared/contracts';
 import type { ServerCtx } from './types';
@@ -91,6 +91,11 @@ export class BenchService {
         this.process?.kill('SIGTERM');
     }
 
+    // Shutdown escalation after the grace period (called by the entry).
+    killForce(): void {
+        try { this.process?.kill('SIGKILL'); } catch { /* already gone */ }
+    }
+
     start(cfg: Record<string, unknown>): StartResult {
         if (this.running) return { error: 'A bench run is already in progress', code: 409 };
         if (this.deps.llamaRunning()) return { error: 'Stop the running model first -- llama-bench needs its VRAM for clean numbers', code: 409 };
@@ -125,8 +130,8 @@ export class BenchService {
             if (config.cacheV) args.push('-ctv', config.cacheV);
             // '' guards: a blanked-out UI field arrives as '' and must not
             // emit a flag with an empty value (parity with server4.js).
-            if (config.nPrompt != null && config.nPrompt !== '') args.push('-p', String(config.nPrompt));
-            if (config.nGen != null && config.nGen !== '') args.push('-n', String(config.nGen));
+            if (config.nPrompt != null && String(config.nPrompt) !== '') args.push('-p', String(config.nPrompt));
+            if (config.nGen != null && String(config.nGen) !== '') args.push('-n', String(config.nGen));
             if (config.depths) args.push('-d', String(config.depths));
             if (config.reps != null && config.reps !== '') args.push('-r', String(config.reps));
             if (config.devices) args.push('-dev', String(config.devices));
@@ -180,15 +185,16 @@ export class BenchService {
         return null;
     }
 
-    private async readOutput(stream: ReadableStream<Uint8Array> | null): Promise<void> {
-        if (!stream) return;
-        const reader = stream.pipeThrough(new TextDecoderStream()).getReader();
+    private async readOutput(stream: ReadableStream<Uint8Array> | number | null | undefined): Promise<void> {
+        if (!stream || typeof stream === 'number') return;
+        const reader = stream.getReader();
+        const decoder = new TextDecoder();
         let buffer = '';
         try {
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                buffer += value;
+                buffer += value ? decoder.decode(value, { stream: true }) : '';
                 const lines = buffer.split(/\r\n|\r|\n/);
                 buffer = lines.pop()!;
                 for (const line of lines) this.log(line);

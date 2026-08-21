@@ -1,5 +1,5 @@
-import fs = require('node:fs/promises');
-import path = require('node:path');
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { ModelEntry } from '../../../shared/contracts';
 
 async function scanDirForGgufs(dir: string): Promise<ModelEntry[]> {

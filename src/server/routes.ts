@@ -14,8 +14,8 @@ import { scanModels } from './services/models';
 import { flagReference, listDevices } from './services/devices';
 import { runSSHCommand } from './services/ssh';
 import { publicConfig } from './config';
-import launch = require('./lib/launch');
-import csv = require('./lib/csv');
+import * as launch from './lib/launch';
+import * as csv from './lib/csv';
 
 // Thrown by the entry's size-guarded body reader; route catches must let it
 // propagate (it maps to 413 in the entry, NOT 400 Invalid JSON).
@@ -51,7 +51,7 @@ function workerComposeCommand(ctx: RouteCtx, command: string): string {
 // BodyTooLargeError from the entry's size-guarded reader (maps to 413).
 async function parseJsonBody(ctx: RouteCtx, req: Request): Promise<Record<string, unknown>> {
     const raw = await ctx.readBody(req);
-    return JSON.parse(raw) as Record<string, unknown>;
+    return JSON.parse(raw ?? '') as Record<string, unknown>;
 }
 
 // Every POST route parses bodies through this so the frozen 400 shape stays

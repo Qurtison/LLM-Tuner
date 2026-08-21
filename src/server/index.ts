@@ -11,9 +11,8 @@
 // cheaper to review; split when route count or import cycles demand it.
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { exec } from 'node:child_process';
-import { promisify } from 'node:util';
 import { loadConfig, ConfigError, type DashboardConfig } from './config';
+import type { TelemetrySample } from '../../shared/contracts';
 import { LlamaService } from './services/llama';
 import { BenchService } from './services/bench';
 import { TelemetryService } from './services/telemetry';
@@ -24,7 +23,6 @@ import { handleApiRoute, type RouteCtx, BodyTooLargeError } from './routes';
 
 const APP_ROOT = path.join(import.meta.dir, '..', '..'); // src/server/<entry> -> repo root
 const DIST_DIR = path.join(APP_ROOT, 'dist', 'client');
-const execAsync = promisify(exec);
 
 // --- CONFIG (gates startup; invalid -> field-specific fatal error) ---
 let config: DashboardConfig;
@@ -119,7 +117,7 @@ const llama = new LlamaService(
             logCompletedRequest({ config, state, broadcast }, {
                 fetchStats: () => telemetry.fetchStats(),
                 finalLoadTime: () => state.finalLoadTime as number,
-                rememberSamples: (runId, s) => telemetry.rememberSamples(runId, s),
+                rememberSamples: (runId, s) => telemetry.rememberSamples(runId, s as TelemetrySample[]),
             }, timing, samples, completedAt, opts),
     }
 );
@@ -128,7 +126,7 @@ function benchStatusRunning(): boolean {
     return bench.status().running;
 }
 
-import launchLib = require('./lib/launch');
+import * as launchLib from './lib/launch';
 const bench = new BenchService(
     { config, state, broadcast },
     {
@@ -177,7 +175,8 @@ async function spawnMonitor(): Promise<void> {
 // --- LEGACY PORT CLEANUP (opt-in only; default never kills strangers) ---
 async function cleanupPort(port: number): Promise<void> {
     try {
-        await execAsync(`fuser -k ${port}/tcp`, { stdio: 'ignore' });
+        const proc = Bun.spawn(['fuser', '-k', `${port}/tcp`], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
+        await proc.exited;
     } catch { /* fuser unavailable or port already free -- ignore */ }
 }
 

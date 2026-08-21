@@ -1,11 +1,14 @@
-import fs = require('node:fs/promises');
-import path = require('node:path');
-import csv = require('../lib/csv');
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as csv from '../lib/csv';
 import type { ServerCtx, TelemetryStats } from './types';
 
 export const CSV_HEADERS = 'Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len,Aborted\n';
 
-type LaunchConfig = Record<string, unknown> & {
+// Structural superset of shared/contracts LaunchConfig: keeps the fields the
+// CSV row reads, with loose value types, and (unlike the contracts interface)
+// carries no index signature so either type is assignable here.
+type LaunchConfig = {
     modelPath?: string;
     ctx?: unknown;
     ngl?: unknown;

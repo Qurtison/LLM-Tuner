@@ -1,8 +1,8 @@
 import type { LaunchConfig } from '../../../shared/contracts';
 import type { ServerCtx } from './types';
-import launch = require('../lib/launch');
-import tokenize = require('../lib/tokenize');
-import fatalLogs = require('../lib/fatallogs');
+import * as launch from '../lib/launch';
+import * as tokenize from '../lib/tokenize';
+import * as fatalLogs from '../lib/fatallogs';
 
 const MASTER_LOG_BUFFER_SIZE = 500;
 
@@ -11,7 +11,7 @@ type Pending = {
     timing: Timing;
     samples: unknown[];
     completedAt: number;
-    config: Record<string, unknown> | null;
+    config: LaunchConfig | null;
     launchCommand: string;
     timer: ReturnType<typeof setTimeout>;
 };
@@ -19,7 +19,7 @@ type Pending = {
 type LlamaOptions = {
     onActivity?: () => void;
     takeSamples?: () => unknown[];
-    logCompletedRequest?: (timing: Timing, samples: unknown[], completedAt: number, opts: { config: Record<string, unknown> | null; launchCommand: string }) => Promise<void>;
+    logCompletedRequest?: (timing: Timing, samples: unknown[], completedAt: number, opts: { config: LaunchConfig | null; launchCommand: string }) => Promise<void>;
 };
 
 type Launch = {
@@ -61,7 +61,7 @@ export class LlamaService {
         this.logCompletedRequest = opts.logCompletedRequest;
     }
 
-    private complete(timing: Timing, samples: unknown[], completedAt: number, opts: { config: Record<string, unknown> | null; launchCommand: string }): void {
+    private complete(timing: Timing, samples: unknown[], completedAt: number, opts: { config: LaunchConfig | null; launchCommand: string }): void {
         this.logCompletedRequest?.(timing, samples, completedAt, opts).catch(() => {});
     }
 

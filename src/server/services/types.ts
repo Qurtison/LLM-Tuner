@@ -1,4 +1,5 @@
 import type { DashboardConfig } from '../config';
+import type { LaunchConfig } from '../../../shared/contracts';
 
 export interface ServerState {
     serverState: 'stopped' | 'loading' | 'ready' | 'starting' | 'stopping';
@@ -9,7 +10,7 @@ export interface ServerState {
     // the original server; CSV/load-time consumers expect the raw value.
     finalLoadTime: number | string;
     currentLaunchCommand: string;
-    currentLaunchConfig: Record<string, unknown> | null;
+    currentLaunchConfig: LaunchConfig | null;
 }
 
 export interface ServerCtx {

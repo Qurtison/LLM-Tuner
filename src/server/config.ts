@@ -1,6 +1,6 @@
-import fs = require('fs');
-import os = require('os');
-import path = require('path');
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 export interface Build { id: string; label: string; path: string }
 export interface TransportPreset { id: string; label: string }
@@ -89,7 +89,8 @@ function integer(value: unknown, field: string, min: number, max: number, issues
 function validate(raw: Raw, issues: string[]): void {
     const s = raw.server as Raw; const p = raw.paths as Raw; const l = raw.llama as Raw;
     const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw;
-    for (const [field, value] of [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['paths.pythonCommand', p.pythonCommand], ['paths.monitorScript', p.monitorScript], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]]) nonEmpty(value, field, issues);
+    const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['paths.pythonCommand', p.pythonCommand], ['paths.monitorScript', p.monitorScript], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
+    for (const [field, value] of hostChecks) nonEmpty(value, field, issues);
     if (p.huggingFaceCache !== null) nonEmpty(p.huggingFaceCache, 'paths.huggingFaceCache', issues);
     for (const [field, value] of [['worker.sshHost', w.sshHost], ['worker.rpcTarget', w.rpcTarget], ['worker.workDirectory', w.workDirectory], ['worker.startCommand', w.startCommand], ['worker.stopCommand', w.stopCommand], ['worker.statusCommand', w.statusCommand], ['worker.logsCommand', w.logsCommand]]) if (typeof value !== 'string') issues.push(field + ' must be a string');
     for (const [field, value] of [['server.corsOrigins', s.corsOrigins], ['paths.modelDirectories', p.modelDirectories]]) {

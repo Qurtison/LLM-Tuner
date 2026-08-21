@@ -58,9 +58,10 @@ async function startTestServer(opts = {}) {
     }, opts.config || {});
     fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(config));
     let output = '';
-    // DASH_TEST_ENTRY selects the entry under test; default is the Bun
-    // entry. (The legacy server4.js entry was removed in Phase 6.)
-    const entry = opts.entry || process.env.DASH_TEST_ENTRY || path.join(repoRoot, 'src', 'server', 'index.ts');
+    // Entry under test: the Bun server. (The legacy server4.js entry and its
+    // DASH_TEST_ENTRY override were removed in Phase 6.) opts.entry remains
+    // for tests that need to boot a different entry file.
+    const entry = opts.entry || path.join(repoRoot, 'src', 'server', 'index.ts');
     const child = spawn(process.execPath, [entry], {
         cwd: repoRoot,
         env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(config.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
