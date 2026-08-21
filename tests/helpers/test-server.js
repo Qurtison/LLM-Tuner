@@ -41,7 +41,7 @@ async function startTestServer(opts = {}) {
     fs.mkdirSync(logsDir);
     fs.mkdirSync(fixturesDir);
     for (const name of opts.models || ['fake.gguf']) fs.writeFileSync(path.join(modelsDir, name), 'x');
-    for (const name of ['fake-llama-server.sh', 'fake-llama-bench.sh', 'fake-monitor.ts']) {
+    for (const name of ['fake-llama-server.sh', 'fake-llama-bench.sh', 'fake-monitor.ts', 'fake-llama-http.ts']) {
         const destination = path.join(fixturesDir, name.replace('.sh', ''));
         fs.copyFileSync(path.join(fixturesRoot, name), destination);
         if (name.endsWith('.sh')) fs.chmodSync(destination, 0o755);
@@ -58,9 +58,13 @@ async function startTestServer(opts = {}) {
     }, opts.config || {});
     fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(config));
     let output = '';
-    const child = spawn(process.execPath, [opts.entry || path.join(repoRoot, 'server4.js')], {
+    // DASH_TEST_ENTRY selects the entry under test; default is the Bun
+    // entry. The legacy entry stays runnable via DASH_TEST_ENTRY=server4.js
+    // (removed with the legacy UI in Phase 6).
+    const entry = opts.entry || process.env.DASH_TEST_ENTRY || path.join(repoRoot, 'src', 'server', 'index.ts');
+    const child = spawn(process.execPath, [entry], {
         cwd: repoRoot,
-        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(config.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid') },
+        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(config.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });

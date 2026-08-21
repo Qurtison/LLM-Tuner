@@ -172,7 +172,16 @@ describe('server4 route smoke', () => {
         const missingRoute = await json(server.url('/api/definitely-not'));
         expect(missingRoute.response.status).toBe(404);
         expect(missingRoute.body).toEqual({ error: 'Not found' });
-        await expect(fetch(server.url('/api/log'), { method: 'POST', body: 'x'.repeat(11 * 1024 * 1024) })).rejects.toThrow();
+        // Frozen: oversized body is refused and the server stays alive.
+        // Legacy entry resets the socket (no status); the Bun entry answers
+        // 413 -- same protection, documentable deviation (see migration notes).
+        let oversized;
+        try {
+            oversized = await fetch(server.url('/api/log'), { method: 'POST', body: 'x'.repeat(11 * 1024 * 1024) });
+        } catch {
+            oversized = null; // legacy socket reset
+        }
+        if (oversized) expect(oversized.status).toBe(413);
         expect((await json(server.url('/api/config'))).response.status).toBe(200);
     });
 

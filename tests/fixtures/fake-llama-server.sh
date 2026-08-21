@@ -31,5 +31,18 @@ echo "load_model: loading model"
 sleep 0.4 &
 wait $!
 echo "llama_server: model loaded"
+# Serve /slots + /v1/chat/completions on the port we were launched with so the
+# dashboard proxy is testable against real upstream HTTP (streaming included).
+# FAKE_BUN + fake-llama-http.ts are provided by the test helper; the child is
+# in our process group, so trap 'kill 0' TERM takes it down with us.
+LLAMA_PORT=""
+prev=""
+for arg in "$@"; do
+    if [ "$prev" = "--port" ]; then LLAMA_PORT="$arg"; fi
+    prev="$arg"
+done
+if [ -n "$LLAMA_PORT" ] && [ -n "$FAKE_BUN" ]; then
+    FAKE_PORT="$LLAMA_PORT" "$FAKE_BUN" "$(dirname "$0")/fake-llama-http.ts" &
+fi
 sleep 30 &
 wait $!

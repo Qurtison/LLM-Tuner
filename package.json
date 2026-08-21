@@ -4,11 +4,11 @@
   "description": "Cluster Command Center dashboard (server4.js backend + static frontend).",
   "main": "ecosystem.config.js",
   "scripts": {
-    "dev": "bun --hot server4.js & vite",
-    "dev:server": "bun --hot server4.js",
+    "dev": "bun --hot src/server/index.ts & vite",
+    "dev:server": "bun --hot src/server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
-    "start": "bun server4.js",
+    "start": "bun src/server/index.ts",
     "build:css": "tailwindcss -i ./tailwind.src.css -o ./vendor/tailwind.css --minify",
     "test": "bun test",
     "typecheck": "tsc --noEmit"

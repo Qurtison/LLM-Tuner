@@ -2,3 +2,5 @@ node_modules/
 dashboard.config.json
 __pycache__/
 config/dashboard.json
+dist/
+*.local

@@ -1,0 +1,33 @@
+// Mini llama-server HTTP endpoints for /api/llama/* proxy tests. Launched by
+// fake-llama-server.sh with FAKE_PORT once the fake model is "loaded".
+const port = Number(process.env.FAKE_PORT || 0);
+Bun.serve({
+    port,
+    hostname: '0.0.0.0',
+    fetch: async (req) => {
+        if (req.url.endsWith('/slots')) {
+            return Response.json({ slots: [{ id: 0, state: 'available' }] });
+        }
+        if (req.url.endsWith('/v1/chat/completions') && req.method === 'POST') {
+            const body = await req.text();
+            const wantsStream = body.includes('"stream"') && body.includes('true');
+            if (wantsStream) {
+                const stream = new ReadableStream({
+                    start(controller) {
+                        const enc = new TextEncoder();
+                        const chunk = (n: number) => enc.encode('data: {"choices":[{"delta":{"content":"fake' + n + ' token"}}]}\n\n');
+                        controller.enqueue(chunk(1));
+                        setTimeout(() => {
+                            controller.enqueue(chunk(2));
+                            controller.enqueue(enc.encode('data: [DONE]\n\n'));
+                            controller.close();
+                        }, 50);
+                    },
+                });
+                return new Response(stream, { headers: { 'Content-Type': 'text/event-stream' } });
+            }
+            return Response.json({ choices: [{ message: { content: 'fake reply' } }] });
+        }
+        return new Response('not found', { status: 404 });
+    },
+});
