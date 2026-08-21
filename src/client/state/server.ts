@@ -46,10 +46,24 @@ export interface ServerSnapshot {
     connected: boolean;
 }
 
+// ponytail: completions persisted to localStorage so a browser refresh
+// keeps recent request history; if cross-tab sync is ever needed, move to
+// BroadcastChannel or a server round-trip.
+const COMPLETIONS_KEY = 'server_completions';
+function loadCompletions(): CompletionEvent[] {
+    try {
+        const value: unknown = JSON.parse(window.localStorage.getItem(COMPLETIONS_KEY) || '[]');
+        return Array.isArray(value) ? value as CompletionEvent[] : [];
+    } catch { return []; }
+}
+function saveCompletions(completions: CompletionEvent[]): void {
+    try { window.localStorage.setItem(COMPLETIONS_KEY, JSON.stringify(completions)); } catch { /* full or unavailable */ }
+}
+
 const snapshot = new Value<ServerSnapshot>({
     state: null,
     config: null,
-    completions: [],
+    completions: loadCompletions(),
     progress: null,
     lastSseAt: 0,
     connected: false,
@@ -83,6 +97,7 @@ export function applySseFrame(raw: string): void {
         try {
             const event = JSON.parse(log.slice(SseLogPrefixes.COMPLETION.length).trim()) as CompletionEvent;
             const completions = [event, ...current.completions].slice(0, 100);
+            saveCompletions(completions);
             snapshot.set({ ...current, state: { ...payload, log: '' }, completions, lastSseAt: Date.now(), connected: true, progress: null });
             return;
         } catch {

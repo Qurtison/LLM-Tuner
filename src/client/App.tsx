@@ -1,7 +1,8 @@
-// App shell (Phase 5 slice 1): navigation, engine status banner, error
-// surface, and the single SSE owner. Panels come from features/index.ts;
-// each tab renders its slice components (docs/p5-slices.md).
-import { useCallback, useEffect, useRef, useState } from 'react';
+// App shell: three-slot layout — left sidebar (model loading), center
+// (bench + history), right sidebar (monitor). Each sidebar swaps into the
+// center via its arrow button; the displaced view becomes the sidebar.
+// App remains the single SSE owner. Panels come from features/index.ts.
+import { useCallback, useEffect, useState } from 'react';
 import { useSse } from './hooks/useSse';
 import { useServer, applySseFrame, setSseConnected, setServerConfig } from './state/server';
 import { api } from './api/client';
@@ -15,17 +16,58 @@ import {
     BenchPanel,
 } from './features';
 
-const TABS = ['interactive', 'monitor', 'history', 'bench'] as const;
-type Tab = (typeof TABS)[number];
-const TAB_LABELS: Record<Tab, string> = { interactive: 'Interactive', monitor: 'Monitor', history: 'History', bench: 'Bench' };
+type Side = 'left' | 'center' | 'right';
+type View = 'model' | 'bench' | 'monitor';
+type Slots = Record<Side, View>;
 
-function loadTab(): Tab {
+const SIDES: Side[] = ['left', 'center', 'right'];
+const VIEWS: View[] = ['model', 'bench', 'monitor'];
+const DEFAULT_SLOTS: Slots = { left: 'model', center: 'bench', right: 'monitor' };
+const TITLES: Record<View, string> = { model: 'Model', bench: 'Bench + History', monitor: 'Monitor' };
+// Where each view lives by default; used to point the collapse arrow home.
+const HOME: Record<View, 'left' | 'center' | 'right'> = { model: 'left', bench: 'center', monitor: 'right' };
+
+function loadSlots(): Slots {
     try {
-        const saved = window.localStorage.getItem('active_tab');
-        return TABS.includes(saved as Tab) ? (saved as Tab) : 'interactive';
-    } catch {
-        return 'interactive';
+        const raw: unknown = JSON.parse(window.localStorage.getItem('layout_slots') || 'null');
+        if (raw && typeof raw === 'object'
+            && SIDES.every(side => VIEWS.includes((raw as Slots)[side]))
+            && new Set(SIDES.map(side => (raw as Slots)[side])).size === SIDES.length) {
+            return raw as Slots;
+        }
+    } catch { /* storage unavailable or corrupt — use default */ }
+    return DEFAULT_SLOTS;
+}
+
+function swapWithCenter(slots: Slots, side: 'left' | 'right'): Slots {
+    return { ...slots, [side]: slots.center, center: slots[side] };
+}
+
+function ViewContent({ view }: { view: View }) {
+    if (view === 'model') return <><InteractivePanel /><ChatPanel /></>;
+    if (view === 'monitor') return <><MonitorPanel /><LiveRequestsPanel /></>;
+    return <><BenchPanel /><HistoryPanel /></>;
+}
+
+function SlotHeader({ view, side, onMove }: { view: View; side: Side; onMove: () => void }) {
+    const btn = 'rounded bg-neutral-800 px-2 py-1 text-sm leading-none text-neutral-300 hover:bg-neutral-700';
+    let button: React.ReactNode = null;
+    if (side === 'left') {
+        button = <button type="button" onClick={onMove} title="Expand to main area" aria-label={'Expand ' + TITLES[view] + ' to the main area'} className={'ml-auto ' + btn}>→</button>;
+    } else if (side === 'right') {
+        button = <button type="button" onClick={onMove} title="Expand to main area" aria-label={'Expand ' + TITLES[view] + ' to the main area'} className={'ml-auto ' + btn}>←</button>;
+    } else if (view !== 'bench') {
+        // Center holds a displaced view: arrow points back toward its home side.
+        const home = HOME[view];
+        button = <button type="button" onClick={onMove} title="Return to sidebar" aria-label={'Return ' + TITLES[view] + ' to its sidebar'} className={'ml-auto ' + btn}>{home === 'left' ? '←' : '→'}</button>;
     }
+    return (
+        <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300">{TITLES[view]}</h2>
+            <span className="text-[10px] uppercase tracking-wide text-neutral-600">{side === 'center' ? 'main' : 'sidebar'}</span>
+            {button}
+        </div>
+    );
 }
 
 function EngineStatusBanner() {
@@ -53,8 +95,7 @@ function EngineStatusBanner() {
 }
 
 export default function App() {
-    const [tab, setTab] = useState<Tab>(loadTab);
-    const tabsRef = useRef<HTMLDivElement>(null);
+    const [slots, setSlots] = useState<Slots>(loadSlots);
     const { config } = useServer();
     const onMessage = useCallback((data: string) => { applySseFrame(data); }, []);
     const { connected } = useSse('/api/status', onMessage);
@@ -62,53 +103,18 @@ export default function App() {
     useEffect(() => {
         api<ConfigResponse>('/api/config').then(setServerConfig).catch(() => {});
     }, []);
+    useEffect(() => {
+        try { window.localStorage.setItem('layout_slots', JSON.stringify(slots)); } catch { /* storage unavailable */ }
+    }, [slots]);
 
-    const selectTab = (next: Tab) => {
-        setTab(next);
-        try { window.localStorage.setItem('active_tab', next); } catch { /* storage unavailable */ }
-    };
-
-    const onKeyDown = (event: React.KeyboardEvent) => {
-        const idx = TABS.indexOf(tab);
-        let next: number | null = null;
-        if (event.key === 'ArrowRight') next = (idx + 1) % TABS.length;
-        else if (event.key === 'ArrowLeft') next = (idx - 1 + TABS.length) % TABS.length;
-        else if (event.key === 'Home') next = 0;
-        else if (event.key === 'End') next = TABS.length - 1;
-        if (next === null) return;
-        event.preventDefault();
-        const target = TABS[next];
-        selectTab(target);
-        tabsRef.current?.querySelector<HTMLButtonElement>('button[data-tab="' + target + '"]')?.focus();
-    };
+    const expandSide = (side: 'left' | 'right') => setSlots(old => swapWithCenter(old, side));
+    const collapseCenter = () => setSlots(old => swapWithCenter(old, HOME[old.center] === 'right' ? 'right' : 'left'));
 
     return (
         <div className="min-h-screen bg-neutral-950 text-slate-100">
             <header className="border-b border-neutral-800 bg-neutral-900/90">
-                <nav className="mx-auto flex max-w-7xl flex-wrap items-center gap-2 px-4 py-3">
+                <nav className="flex flex-wrap items-center gap-2 px-4 py-3">
                     <span className="mr-2 text-sm font-semibold tracking-wide text-neutral-300">Mission Control</span>
-                    <div ref={tabsRef} role="tablist" aria-label="Dashboard sections" onKeyDown={onKeyDown} className="flex gap-1">
-                        {TABS.map(name => (
-                            <button
-                                key={name}
-                                type="button"
-                                role="tab"
-                                data-tab={name}
-                                id={'tab-' + name}
-                                aria-selected={tab === name}
-                                aria-controls={'panel-' + name}
-                                tabIndex={tab === name ? 0 : -1}
-                                onClick={() => selectTab(name)}
-                                className={
-                                    tab === name
-                                        ? 'rounded bg-neutral-700 px-3 py-1.5 text-sm font-medium text-white'
-                                        : 'rounded px-3 py-1.5 text-sm text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
-                                }
-                            >
-                                {TAB_LABELS[name]}
-                            </button>
-                        ))}
-                    </div>
                     <div className="ml-auto flex items-center gap-3 text-xs text-neutral-500">
                         {config && (
                             <>
@@ -122,27 +128,32 @@ export default function App() {
                 </nav>
             </header>
             <section className="border-b border-neutral-800 bg-neutral-900 px-4 py-2" aria-live="polite">
-                <div className="mx-auto max-w-7xl"><EngineStatusBanner /></div>
+                <EngineStatusBanner />
             </section>
-            <main className="mx-auto max-w-7xl px-4 py-4">
-                {tab === 'interactive' && (
-                    <div role="tabpanel" id="panel-interactive" aria-labelledby="tab-interactive" className="grid gap-4 lg:grid-cols-[2fr,1fr]">
-                        <InteractivePanel />
-                        <ChatPanel />
-                    </div>
-                )}
-                {tab === 'monitor' && (
-                    <div role="tabpanel" id="panel-monitor" aria-labelledby="tab-monitor" className="space-y-4">
-                        <MonitorPanel />
-                        <LiveRequestsPanel />
-                    </div>
-                )}
-                {tab === 'history' && (
-                    <div role="tabpanel" id="panel-history" aria-labelledby="tab-history"><HistoryPanel /></div>
-                )}
-                {tab === 'bench' && (
-                    <div role="tabpanel" id="panel-bench" aria-labelledby="tab-bench"><BenchPanel /></div>
-                )}
+            <main className="grid gap-4 px-4 py-4 lg:grid-cols-[26rem_minmax(0,1fr)_26rem] lg:items-start">
+                {/* Keyed by view, not slot: React keeps each panel mounted (charts,
+                    buffers, form state intact) and only its grid position changes. */}
+                {VIEWS.map(view => {
+                    const side = SIDES.find(s => slots[s] === view) as Side;
+                    const onMove = side === 'center' ? collapseCenter : () => expandSide(side);
+                    const sidebar = side !== 'center';
+                    // Explicit row+column: DOM order differs from visual order after a
+                    // swap, and grid auto-placement would push later DOM items to row 2.
+                    const placement = side === 'left' ? 'lg:col-start-1 lg:row-start-1' : side === 'center' ? 'lg:col-start-2 lg:row-start-1' : 'lg:col-start-3 lg:row-start-1';
+                    return (
+                        <section
+                            key={view}
+                            aria-label={TITLES[view] + (sidebar ? ' sidebar' : ' main area')}
+                            className={
+                                'min-w-0 space-y-4 ' + placement
+                                + (sidebar ? ' lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto lg:pr-1' : '')
+                            }
+                        >
+                            <SlotHeader view={view} side={side} onMove={onMove} />
+                            <ViewContent view={view} />
+                        </section>
+                    );
+                })}
             </main>
         </div>
     );

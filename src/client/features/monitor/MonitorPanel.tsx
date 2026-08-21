@@ -8,12 +8,17 @@ type Stats = Record<string, unknown>;
 type Point = { t: number; master: Stats | null; worker: Stats | null; net: number | null };
 type MiniMetric = { title: string; key: string; unit: string };
 
+const POINTS_KEY = 'monitor_points';
+// Stats compared when deciding whether the worker section has any data at all.
+const WORKER_KEYS = ['gpu_util', 'gpu_pwr', 'gpu_temp', 'cpu_util', 'vram_used', 'ram_used'];
 const miniMetrics: MiniMetric[] = [
     { title: 'GPU util', key: 'gpu_util', unit: '%' },
     { title: 'Power', key: 'gpu_pwr', unit: ' W' },
     { title: 'GPU temp', key: 'gpu_temp', unit: ' °C' },
     { title: 'CPU', key: 'cpu_util', unit: '%' },
     { title: 'VRAM', key: 'vram_used', unit: ' MiB' },
+    { title: 'RAM', key: 'ram_used', unit: ' MiB' },
+    { title: 'Net', key: 'net', unit: ' MB/s' },
 ];
 const throttleLabels: Record<string, string> = { hw_thermal_slowdown: 'HW Thermal', sw_thermal_slowdown: 'SW Thermal', sw_power_cap: 'SW Power Cap', hw_power_brake_slowdown: 'HW Power Brake' };
 const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
@@ -33,7 +38,8 @@ function vramParts(stats: Stats | null): { used: number | null; free: number | n
     const total = stat(stats, 'vram_total') ?? (used !== null && free !== null ? used + free : null);
     return { used, free, total };
 }
-function MiniChart({ metric, points, smooth }: { metric: MiniMetric; points: Point[]; smooth: boolean }) {
+function netSeries(points: Point[]): (number | null)[] { return points.map((point, index) => { const previous = index > 0 ? points[index - 1] : null; if (point.net == null || !previous || previous.net == null) return null; return Math.max(0, (point.net - previous.net) / 1_048_576); }); }
+function MiniChart({ metric, points, smooth, master, worker, net }: { metric: MiniMetric; points: Point[]; smooth: boolean; master: Stats | null; worker: Stats | null; net: number | null }) {
     const canvas = useRef<HTMLCanvasElement>(null);
     const instance = useRef<Chart | null>(null);
     useEffect(() => {
@@ -46,18 +52,28 @@ function MiniChart({ metric, points, smooth }: { metric: MiniMetric; points: Poi
         const chart = instance.current;
         if (!chart) return;
         chart.data.labels = labels(points);
+        const data = metric.key === 'net' ? netSeries(points) : series(points, 'master', metric.key);
         chart.data.datasets = [
-            { label: 'Master', data: series(points, 'master', metric.key), borderColor: '#eab308', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 },
-            { label: 'Worker', data: series(points, 'worker', metric.key), borderColor: '#ef4444', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 },
+            { label: 'Main', data, borderColor: '#eab308', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 },
+            ...(metric.key === 'net' ? [] : [{ label: 'Worker', data: series(points, 'worker', metric.key), borderColor: '#ef4444', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 }]),
         ];
         chart.update('none');
     }, [metric.key, points, smooth]);
-    return <div className="rounded border border-neutral-800 bg-neutral-900 p-2"><p className="mb-1 text-xs text-neutral-400">{metric.title}</p><div className="h-24"><canvas ref={canvas} /></div></div>;
+    const value = metric.key === 'net' ? net : stat(master, metric.key);
+    const workerValue = metric.key === 'net' ? null : stat(worker, metric.key);
+    return <div className="rounded border border-neutral-800 bg-neutral-900 p-2"><div className="mb-1 flex items-baseline justify-between"><p className="text-xs text-neutral-400">{metric.title}</p><p className="font-mono text-sm text-yellow-300">{text(value, metric.unit)}{workerValue !== null && <span className="text-red-300"> / {text(workerValue, metric.unit)}</span>}</p></div><div className="h-24"><canvas ref={canvas} /></div></div>;
 }
 
 export default function MonitorPanel() {
     const { config, completions, progress } = useServer();
-    const [points, setPoints] = useState<Point[]>([]);
+    // ponytail: points restored from localStorage so a refresh keeps the
+    // telemetry history; full backfill would need a server-side ring buffer.
+    const [points, setPoints] = useState<Point[]>(() => {
+        try {
+            const value: unknown = JSON.parse(window.localStorage.getItem(POINTS_KEY) || '[]');
+            return Array.isArray(value) ? value as Point[] : [];
+        } catch { return []; }
+    });
     const [rate, setRate] = useState(1000);
     const [error, setError] = useState('');
     const [failures, setFailures] = useState(0);
@@ -67,11 +83,11 @@ export default function MonitorPanel() {
     const [selectedRunId, setSelectedRunId] = useState('');
     const omniCanvas = useRef<HTMLCanvasElement>(null);
     const requestCanvas = useRef<HTMLCanvasElement>(null);
-    const expandedCanvas = useRef<HTMLCanvasElement>(null);
     const omniChart = useRef<Chart | null>(null);
     const requestChart = useRef<Chart | null>(null);
-    const expandedChart = useRef<Chart | null>(null);
     const inFlight = useRef(false);
+    // Poll effect only re-runs on [rate, failures]; ref keeps latest ring buffer.
+    const pointsRef = useRef<Point[]>(points);
     const restoreFocus = useRef<HTMLButtonElement>(null);
 
     useEffect(() => { if (config?.telemetry.pollMs) setRate(config.telemetry.pollMs); }, [config]);
@@ -95,12 +111,6 @@ export default function MonitorPanel() {
         requestChart.current = chart;
         return () => { chart.destroy(); if (requestChart.current === chart) requestChart.current = null; };
     }, []);
-    useEffect(() => {
-        if (!expanded || !expandedCanvas.current) return;
-        const chart = new Chart(expandedCanvas.current, { type: 'line', data: { labels: [], datasets: [] }, options: chartOptions() });
-        expandedChart.current = chart;
-        return () => { chart.destroy(); if (expandedChart.current === chart) expandedChart.current = null; };
-    }, [expanded]);
 
     const updateOmni = (chart: Chart | null) => {
         if (!chart) return;
@@ -115,7 +125,7 @@ export default function MonitorPanel() {
         ].map(dataset => ({ ...dataset, tension: smooth ? 0.35 : 0 }));
         chart.update('none');
     };
-    useEffect(() => { updateOmni(omniChart.current); updateOmni(expandedChart.current); }, [points, smooth, expanded]);
+    useEffect(() => { updateOmni(omniChart.current); }, [points, smooth]);
     const selectedCompletion = completions.find(completion => completion.runId === selectedRunId) ?? completions[0] ?? null;
     useEffect(() => {
         const samples = selectedCompletion?.metrics ?? [];
@@ -142,7 +152,10 @@ export default function MonitorPanel() {
                 if (!stats || !stats.master || typeof stats.master !== 'object') { setError('No telemetry data.'); return; }
                 const master = stats.master as Stats;
                 const worker = stats.worker && typeof stats.worker === 'object' && !(stats.worker as Stats).nvidia_smi_error && !(stats.worker as Stats).amdgpu_top_error ? stats.worker as Stats : null;
-                setPoints(old => [...old, { t: result.t || Date.now(), master, worker, net: stat(master, 'net_bytes') }].slice(-240));
+                const next = [...pointsRef.current, { t: result.t || Date.now(), master, worker, net: stat(master, 'net_bytes') }].slice(-240);
+                pointsRef.current = next;
+                try { window.localStorage.setItem(POINTS_KEY, JSON.stringify(next)); } catch { /* full or unavailable */ }
+                setPoints(next);
                 setFailures(0); setError('');
             } catch (cause) {
                 if (!alive) return;
@@ -159,7 +172,7 @@ export default function MonitorPanel() {
     const worker = current?.worker ?? null;
     const net = useMemo(() => { if (points.length < 2) return null; const previous = points.at(-2); const a = current?.net; const b = previous?.net; return a == null || b == null ? null : Math.max(0, (a - b) / 1_048_576); }, [points, current]);
     const reasons = [
-        ...((Array.isArray(master?.throttle_reasons) ? master.throttle_reasons : []).filter((reason): reason is string => typeof reason === 'string').map(reason => ({ reason, source: 'Master' }))),
+        ...((Array.isArray(master?.throttle_reasons) ? master.throttle_reasons : []).filter((reason): reason is string => typeof reason === 'string').map(reason => ({ reason, source: 'Main' }))),
         ...((Array.isArray(worker?.throttle_reasons) ? worker.throttle_reasons : []).filter((reason): reason is string => typeof reason === 'string').map(reason => ({ reason, source: 'Worker' }))),
     ];
     const activeReasons = new Map<string, string[]>();
@@ -172,25 +185,19 @@ export default function MonitorPanel() {
         catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not set telemetry rate.'); }
     };
     const toggleSmooth = (on: boolean) => { setSmooth(on); try { window.localStorage.setItem('omni_smoothing', on ? '1' : ''); } catch { setError('Could not save smoothing preference.'); } };
-    const cards = [
-        ['GPU util', text(stat(master, 'gpu_util'), '%'), text(stat(worker, 'gpu_util'), '%')], ['Power', text(stat(master, 'gpu_pwr'), ' W'), text(stat(worker, 'gpu_pwr'), ' W')],
-        ['GPU temp', text(stat(master, 'gpu_temp'), ' °C'), text(stat(worker, 'gpu_temp'), ' °C')], ['CPU util', text(stat(master, 'cpu_util'), '%'), text(stat(worker, 'cpu_util'), '%')],
-        ['VRAM', text(stat(master, 'vram_used'), ' MiB'), text(stat(worker, 'vram_used'), ' MiB')], ['RAM', text(stat(master, 'ram_used'), ' MiB'), text(stat(worker, 'ram_used'), ' MiB')], ['Net', text(net, ' MB/s'), '--'],
-    ];
-    const vram = [{ label: 'Master', parts: vramParts(master), color: 'bg-yellow-400' }, { label: 'Worker', parts: vramParts(worker), color: 'bg-red-400' }];
+    const workerHasData = points.some(point => point.worker !== null && WORKER_KEYS.some(key => stat(point.worker, key) !== null));
+    const vram = [{ label: 'Main', parts: vramParts(master), color: 'bg-yellow-400' }, ...(workerHasData ? [{ label: 'Worker', parts: vramParts(worker), color: 'bg-red-400' }] : [])];
 
-    return <section className="space-y-4" aria-label="Telemetry monitor">
+    return <section className="@container space-y-4" aria-label="Telemetry monitor">
         <div className="flex flex-wrap items-center gap-3"><h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300">Telemetry</h2><label className="ml-auto text-xs text-neutral-400">Rate <select value={rate} onChange={event => { void setPollingRate(Number(event.target.value)); }} className="ml-1 rounded border border-neutral-700 bg-neutral-900 px-2 py-1"><option value={500}>Fast (0.5s)</option><option value={1000}>Normal (1s)</option><option value={2000}>Slow (2s)</option></select></label><label className="text-xs text-neutral-400"><input checked={smooth} onChange={event => toggleSmooth(event.target.checked)} type="checkbox" className="mr-1 accent-indigo-500" />smooth</label></div>
         {failures >= 3 && <p role="alert" className="rounded border border-orange-700/50 bg-orange-900/20 px-3 py-2 text-xs text-orange-300">Telemetry polling failed ({failures} consecutive errors). Backing off.</p>}
         {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{cards.map(([name, a, b]) => <div key={name} className="rounded border border-neutral-800 bg-neutral-900 p-3"><p className="text-xs text-neutral-400">{name}</p><p className="font-mono text-sm text-yellow-300">Master {a}</p><p className="font-mono text-sm text-red-300">Worker {b}</p></div>)}
-            <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><p className="text-xs text-neutral-400">Context usage</p>{context ? <><p className="font-mono text-sm text-indigo-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()}</p><div className="mt-2 h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500" style={{ width: Math.min(context.used / context.limit * 100, 100) + '%' }} /></div><p className="mt-1 text-xs text-neutral-500">{(context.used / context.limit * 100).toFixed(1)}% used</p></> : <p className="font-mono text-sm text-neutral-500">unknown</p>}</div>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2"><div className={'rounded border p-3 ' + (thermalActive ? 'animate-pulse border-red-500/50 bg-red-900/30' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400">Thermal throttle</p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-red-500/50 bg-red-900/40 text-red-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div><div className={'rounded border p-3 ' + (powerActive ? 'animate-pulse border-yellow-500/50 bg-yellow-900/20' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400">Power throttle</p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => !thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-yellow-600/50 bg-yellow-900/30 text-yellow-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div></div>
+        <div className="max-w-sm rounded border border-neutral-800 bg-neutral-900 p-3"><p className="text-xs text-neutral-400">Context usage</p>{context ? <><p className="font-mono text-sm text-indigo-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()}</p><div className="mt-2 h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500" style={{ width: Math.min(context.used / context.limit * 100, 100) + '%' }} /></div><p className="mt-1 text-xs text-neutral-500">{(context.used / context.limit * 100).toFixed(1)}% used</p></> : <p className="font-mono text-sm text-neutral-500">unknown</p>}</div>
+        <div className="grid gap-2 grid-cols-1 @lg:grid-cols-2"><div className={'rounded border p-3 ' + (thermalActive ? 'animate-pulse border-red-500/50 bg-red-900/30' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400">Thermal throttle</p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-red-500/50 bg-red-900/40 text-red-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div><div className={'rounded border p-3 ' + (powerActive ? 'animate-pulse border-yellow-500/50 bg-yellow-900/20' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400">Power throttle</p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => !thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-yellow-600/50 bg-yellow-900/30 text-yellow-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div></div>
         <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><h3 className="mb-2 text-sm text-neutral-200">VRAM breakdown</h3><div className="space-y-3">{vram.map(({ label, parts, color }) => <div key={label}><div className="mb-1 flex justify-between text-xs"><span className="text-neutral-400">{label}</span><span className="font-mono text-neutral-300">{parts.used === null ? 'unknown' : text(parts.used, ' MiB')} used{parts.free === null ? '' : ' · ' + text(parts.free, ' MiB') + ' free'}</span></div><div className="flex h-3 overflow-hidden rounded bg-neutral-800">{parts.total !== null && parts.used !== null && <div className={color} style={{ width: Math.min(parts.used / parts.total * 100, 100) + '%' }} />}{parts.total !== null && parts.free !== null && <div className="bg-neutral-600" style={{ width: Math.min(parts.free / parts.total * 100, 100) + '%' }} />}</div></div>)}</div></div>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">{miniMetrics.map(metric => <MiniChart key={metric.key} metric={metric} points={points} smooth={smooth} />)}</div>
+        <div className="grid gap-2 grid-cols-2 @lg:grid-cols-4">{miniMetrics.map(metric => <MiniChart key={metric.key} metric={metric} points={points} smooth={smooth} master={master} worker={worker} net={net} />)}</div>
         <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex items-center"><div><h3 className="text-sm text-neutral-200">Live hardware</h3><p className="text-xs text-neutral-500">Missing values remain gaps.</p></div><button ref={restoreFocus} type="button" onClick={() => setExpanded(true)} className="ml-auto rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700" aria-label="Expand live hardware chart">Expand</button></div><div className="h-64"><canvas ref={omniCanvas} /></div></div>
         <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><div><h3 className="text-sm text-neutral-200">Completed request samples</h3><p className="text-xs text-neutral-500">{progress?.prefill ? 'PREFILL ' + progress.prefill.progress.toFixed(1) + '%' : progress?.gen ? 'GEN ' + progress.gen.tokens + ' tokens' : 'Idle'}</p></div><label className="ml-auto text-xs text-neutral-400">Request <select value={selectedCompletion?.runId ?? ''} onChange={event => setSelectedRunId(event.target.value)} className="ml-1 max-w-48 rounded border border-neutral-700 bg-neutral-950 px-2 py-1">{completions.length === 0 && <option value="">No completed requests</option>}{completions.map((completion: CompletionEvent) => <option key={completion.runId} value={completion.runId}>{new Date(completion.timestamp).toLocaleTimeString()} · {completion.model || completion.runId}</option>)}</select></label></div><div className="h-56"><canvas ref={requestCanvas} /></div></div>
-        {expanded && <div role="dialog" aria-modal="true" aria-label="Expanded live hardware chart" className="fixed inset-0 z-50 flex flex-col bg-black/95 p-6"><div className="mb-3 flex items-center gap-3"><h2 className="text-lg font-bold">Live hardware</h2><label className="text-xs text-neutral-400"><input checked={smooth} onChange={event => toggleSmooth(event.target.checked)} type="checkbox" className="mr-1 accent-indigo-500" />smooth</label><button type="button" onClick={() => { setExpanded(false); window.setTimeout(() => restoreFocus.current?.focus(), 0); }} className="ml-auto rounded bg-neutral-800 px-3 py-1 text-sm">Close</button></div><div className="min-h-0 flex-1"><canvas ref={expandedCanvas} /></div></div>}
+        {expanded && <div role="dialog" aria-modal="true" aria-label="Expanded live hardware chart" className="fixed inset-0 z-50 flex flex-col bg-black/95 p-6"><div className="mb-3 flex items-center gap-3"><h2 className="text-lg font-bold">Live hardware</h2><label className="text-xs text-neutral-400"><input checked={smooth} onChange={event => toggleSmooth(event.target.checked)} type="checkbox" className="mr-1 accent-indigo-500" />smooth</label><button type="button" onClick={() => { setExpanded(false); window.setTimeout(() => restoreFocus.current?.focus(), 0); }} className="ml-auto rounded bg-neutral-800 px-3 py-1 text-sm">Close</button></div><div className="min-h-0 flex-1 overflow-y-auto"><div className="grid gap-3 grid-cols-1 @lg:grid-cols-2 2xl:grid-cols-3">{miniMetrics.map(metric => <MiniChart key={metric.key} metric={metric} points={points} smooth={smooth} master={master} worker={worker} net={net} />)}</div></div></div>}
     </section>;
 }
