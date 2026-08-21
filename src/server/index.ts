@@ -181,7 +181,7 @@ async function cleanupPort(port: number): Promise<void> {
     } catch { /* fuser unavailable or port already free -- ignore */ }
 }
 
-// --- STATIC FILES (Vite output in production; legacy UI under /legacy/) ---
+// --- STATIC FILES (Vite client build) ---
 const MIME: Record<string, string> = {
     '.html': 'text/html',
     '.js': 'application/javascript',
@@ -278,26 +278,14 @@ async function handleRequest(req: Request): Promise<Response> {
         if (url.pathname === '/' || url.pathname === '/index.html') {
             const distIndex = await serveFile(path.join(DIST_DIR, 'index.html'), 'no-store');
             if (distIndex) return distIndex;
-            // Fresh clone without a build: fall back to the legacy UI so the
-            // dashboard is never a blank page (legacy is removed in Phase 6).
-            const legacy = await serveFile(path.join(APP_ROOT, 'index.html'), 'no-store');
-            return legacy || json({ error: 'Not found' }, 404);
+            // Fresh clone without a build: an honest build-required page.
+            return new Response(
+                '<html><head><title>Mission Control</title></head><body style="font-family:monospace"><h1>Client not built</h1><p>Run <code>bun run build</code>, then reload.</p></body></html>',
+                { status: 200, headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' } },
+            );
         }
         if (url.pathname.startsWith('/assets/')) {
             const file = await serveFile(safeJoin(DIST_DIR, url.pathname.slice(1))!, 'max-age=31536000, immutable');
-            if (file) return file;
-            return json({ error: 'Not found' }, 404);
-        }
-
-        // Legacy UI (temporary home during Phase 5; deleted in Phase 6).
-        if (url.pathname === '/legacy/' || url.pathname === '/legacy/index.html') {
-            return serveFile(path.join(APP_ROOT, 'index.html'), 'no-store') || json({ error: 'Not found' }, 404);
-        }
-        const legacyMatch = url.pathname.match(/^\/legacy\/((?:vendor\/)?[\w.-]+\.(?:js|css|map|ico|png|svg))$/);
-        if (legacyMatch) {
-            // Legacy files live at the repo root; /legacy/ is a pure URL prefix.
-            const rel = legacyMatch[1];
-            const file = await serveFile(safeJoin(APP_ROOT, rel)!, rel.startsWith('vendor/') ? 'max-age=31536000, immutable' : 'no-store');
             if (file) return file;
             return json({ error: 'Not found' }, 404);
         }

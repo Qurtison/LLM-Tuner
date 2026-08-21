@@ -59,8 +59,7 @@ async function startTestServer(opts = {}) {
     fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(config));
     let output = '';
     // DASH_TEST_ENTRY selects the entry under test; default is the Bun
-    // entry. The legacy entry stays runnable via DASH_TEST_ENTRY=server4.js
-    // (removed with the legacy UI in Phase 6).
+    // entry. (The legacy server4.js entry was removed in Phase 6.)
     const entry = opts.entry || process.env.DASH_TEST_ENTRY || path.join(repoRoot, 'src', 'server', 'index.ts');
     const child = spawn(process.execPath, [entry], {
         cwd: repoRoot,
