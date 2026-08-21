@@ -12,6 +12,7 @@ export interface DashboardConfig {
     processes: { cleanupManagedPortsOnStart: boolean; stopGraceMs: number };
     worker: { sshHost: string; rpcTarget: string; workDirectory: string; startCommand: string; stopCommand: string; statusCommand: string; logsCommand: string; transportPresets: TransportPreset[] };
     uiDefaults: { contextSize: number; gpuLayers: number; tensorSplit: number; temperature: number };
+    launch: { modelPath: string; modelName: string; build: string; deviceA: string; deviceB: string; splitMode: string; ctx: number; ngl: number; port: number; fa: boolean; cacheK: string; cacheV: string; specType: string; specDraftNMax: number; reasoningPreserve: boolean; jinja: boolean; temp: number; tensorSplit: number; extraArgs: string; chatTemplateFile: string; chatTemplateKwargs: string };
 }
 
 export class ConfigError extends Error {
@@ -34,7 +35,8 @@ const defaults = {
     telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'] },
     processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 3000 },
     worker: { sshHost: '', rpcTarget: '', workDirectory: '', startCommand: 'docker compose -f docker-compose.worker.yml up -d', stopCommand: 'docker compose -f docker-compose.worker.yml down', statusCommand: 'docker compose -f docker-compose.worker.yml ps --filter status=running -q', logsCommand: 'docker compose -f docker-compose.worker.yml logs --tail=50', transportPresets: [] },
-    uiDefaults: { contextSize: 4096, gpuLayers: 0, tensorSplit: 50, temperature: 0.8 }
+    uiDefaults: { contextSize: 4096, gpuLayers: 0, tensorSplit: 50, temperature: 0.8 },
+    launch: { modelPath: '', modelName: '', build: '', deviceA: '', deviceB: '', splitMode: 'none', ctx: 110000, ngl: 999, port: 8080, fa: true, cacheK: 'q8_0', cacheV: 'q8_0', specType: '', specDraftNMax: 2, reasoningPreserve: false, jinja: false, temp: 0.8, tensorSplit: 50, extraArgs: '', chatTemplateFile: '', chatTemplateKwargs: '' }
 };
 
 const shape: Record<string, unknown> = {
@@ -44,7 +46,8 @@ const shape: Record<string, unknown> = {
     telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0 },
     processes: { cleanupManagedPortsOnStart: 0, stopGraceMs: 0 },
     worker: { sshHost: 0, rpcTarget: 0, workDirectory: 0, startCommand: 0, stopCommand: 0, statusCommand: 0, logsCommand: 0, transportPresets: 0 },
-    uiDefaults: { contextSize: 0, gpuLayers: 0, tensorSplit: 0, temperature: 0 }
+    uiDefaults: { contextSize: 0, gpuLayers: 0, tensorSplit: 0, temperature: 0 },
+    launch: { modelPath: 0, modelName: 0, build: 0, deviceA: 0, deviceB: 0, splitMode: 0, ctx: 0, ngl: 0, port: 0, fa: 0, cacheK: 0, cacheV: 0, specType: 0, specDraftNMax: 0, reasoningPreserve: 0, jinja: 0, temp: 0, tensorSplit: 0, extraArgs: 0, chatTemplateFile: 0, chatTemplateKwargs: 0 }
 };
 
 function isObject(value: unknown): value is Raw {
@@ -88,7 +91,7 @@ function integer(value: unknown, field: string, min: number, max: number, issues
 
 function validate(raw: Raw, issues: string[]): void {
     const s = raw.server as Raw; const p = raw.paths as Raw; const l = raw.llama as Raw;
-    const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw;
+    const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw; const launch = raw.launch as Raw;
     const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['paths.pythonCommand', p.pythonCommand], ['paths.monitorScript', p.monitorScript], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
     for (const [field, value] of hostChecks) nonEmpty(value, field, issues);
     if (p.huggingFaceCache !== null) nonEmpty(p.huggingFaceCache, 'paths.huggingFaceCache', issues);
@@ -99,6 +102,12 @@ function validate(raw: Raw, issues: string[]): void {
     for (const [field, value] of [['telemetry.enabled', t.enabled], ['processes.cleanupManagedPortsOnStart', pr.cleanupManagedPortsOnStart]]) if (typeof value !== 'boolean') issues.push(field + ' must be a boolean');
     integer(s.port, 'server.port', 1, 65535, issues); integer(l.defaultPort, 'llama.defaultPort', 1, 65535, issues); integer(l.rpcPort, 'llama.rpcPort', 1, 65535, issues); integer(t.port, 'telemetry.port', 1, 65535, issues);
     integer(s.maxBodyBytes, 'server.maxBodyBytes', 1, Number.MAX_SAFE_INTEGER, issues); integer(t.pollMs, 'telemetry.pollMs', 50, 60000, issues); integer(pr.stopGraceMs, 'processes.stopGraceMs', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.contextSize, 'uiDefaults.contextSize', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.gpuLayers, 'uiDefaults.gpuLayers', 0, Number.MAX_SAFE_INTEGER, issues);
+    for (const field of ['modelPath', 'modelName', 'build', 'deviceA', 'deviceB', 'cacheK', 'cacheV', 'specType', 'extraArgs', 'chatTemplateFile', 'chatTemplateKwargs']) if (launch[field] !== '' && (typeof launch[field] !== 'string' || launch[field].trim() === '')) issues.push('launch.' + field + ' must be a non-empty string when provided');
+    integer(launch.ctx, 'launch.ctx', 1, Number.MAX_SAFE_INTEGER, issues); integer(launch.ngl, 'launch.ngl', 0, Number.MAX_SAFE_INTEGER, issues); integer(launch.port, 'launch.port', 1, 65535, issues); integer(launch.specDraftNMax, 'launch.specDraftNMax', 0, Number.MAX_SAFE_INTEGER, issues);
+    for (const field of ['fa', 'reasoningPreserve', 'jinja']) if (typeof launch[field] !== 'boolean') issues.push('launch.' + field + ' must be a boolean');
+    if (launch.splitMode !== '' && (typeof launch.splitMode !== 'string' || launch.splitMode.trim() === '')) issues.push('launch.splitMode must be a non-empty string when provided');
+    if (typeof launch.tensorSplit !== 'number' || !Number.isFinite(launch.tensorSplit) || launch.tensorSplit < 0 || launch.tensorSplit > 100) issues.push('launch.tensorSplit must be a number between 0 and 100');
+    if (typeof launch.temp !== 'number' || !Number.isFinite(launch.temp) || launch.temp <= 0) issues.push('launch.temp must be a number greater than 0');
     if (typeof u.tensorSplit !== 'number' || !Number.isFinite(u.tensorSplit) || u.tensorSplit < 0 || u.tensorSplit > 100) issues.push('uiDefaults.tensorSplit must be a number between 0 and 100');
     if (typeof u.temperature !== 'number' || !Number.isFinite(u.temperature) || u.temperature <= 0) issues.push('uiDefaults.temperature must be a number greater than 0');
     if (!Array.isArray(t.providers) || !t.providers.every(v => typeof v === 'string' && ['nvidia', 'amd', 'linux'].includes(v))) issues.push('telemetry.providers must contain only nvidia, amd, or linux');
@@ -170,5 +179,6 @@ export async function loadConfig(opts: { appRoot: string; env?: Record<string, s
 
 export function publicConfig(cfg: DashboardConfig): unknown {
     const worker = cfg.worker;
-    return { uiDefaults: cfg.uiDefaults, llama: { defaultPort: cfg.llama.defaultPort, defaultHost: cfg.llama.defaultHost, rpcPort: cfg.llama.rpcPort, builds: cfg.llama.builds.map(({ id, label }) => ({ id, label })) }, worker: { enabled: !!worker.sshHost && [worker.startCommand, worker.stopCommand, worker.statusCommand, worker.logsCommand].every(Boolean), sshHost: worker.sshHost, rpcTarget: worker.rpcTarget, transportPresets: worker.transportPresets }, telemetry: { enabled: cfg.telemetry.enabled, pollMs: cfg.telemetry.pollMs, providers: cfg.telemetry.providers } };
+    const { modelPath, ...launch } = cfg.launch;
+    return { uiDefaults: cfg.uiDefaults, launch: { ...launch, modelName: modelPath ? path.basename(modelPath) : '' }, llama: { defaultPort: cfg.llama.defaultPort, defaultHost: cfg.llama.defaultHost, rpcPort: cfg.llama.rpcPort, builds: cfg.llama.builds.map(({ id, label }) => ({ id, label })) }, worker: { enabled: !!worker.sshHost && [worker.startCommand, worker.stopCommand, worker.statusCommand, worker.logsCommand].every(Boolean), sshHost: worker.sshHost, rpcTarget: worker.rpcTarget, transportPresets: worker.transportPresets }, telemetry: { enabled: cfg.telemetry.enabled, pollMs: cfg.telemetry.pollMs, providers: cfg.telemetry.providers } };
 }

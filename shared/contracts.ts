@@ -42,6 +42,7 @@ export interface LaunchConfig {
     loadMode?: string;
     verbosity?: number;
     argString?: string;
+    temp?: number;
     deviceA?: string;
     deviceB?: string;
     transport?: string;
@@ -333,6 +334,28 @@ export interface ConfigResponse {
         gpuLayers: number;
         tensorSplit: number;
         temperature: number;
+    };
+    launch: {
+        modelName: string;
+        build: string;
+        deviceA: string;
+        deviceB: string;
+        splitMode: string;
+        ctx: number;
+        ngl: number;
+        port: number;
+        fa: boolean;
+        cacheK: string;
+        cacheV: string;
+        specType: string;
+        specDraftNMax: number;
+        reasoningPreserve: boolean;
+        jinja: boolean;
+        temp: number;
+        tensorSplit: number;
+        extraArgs: string;
+        chatTemplateFile?: string;
+        chatTemplateKwargs: string;
     };
     llama: {
         defaultPort: number;

@@ -19,6 +19,17 @@ describe('typed dashboard config', () => {
         const root = dir(); json(root, { server: { port: 3105 }, llama: { builds: [{ id: 'x', label: 'X', path: './bin' }] }, paths: { logsDirectory: './custom-logs', modelDirectories: ['./m'] } });
         const cfg = await load(root); expect(cfg.server.port).toBe(3105); expect(cfg.paths.logsDirectory).toBe(path.join(root, 'config/custom-logs')); expect(cfg.paths.modelDirectories).toEqual([path.join(root, 'config/m')]); expect(cfg.llama.builds[0].path).toBe(path.join(root, 'config/bin'));
     });
+    it('loads and exposes dashboard launch settings', async () => {
+        const root = dir();
+        const launch = { modelPath: '/models/test.gguf', modelName: 'test.gguf', build: 'default', deviceA: 'CUDA0', deviceB: 'Vulkan1', splitMode: 'layer', ctx: 262144, ngl: 99, port: 18083, fa: true, cacheK: 'q4_0', cacheV: 'q4_0', specType: 'draft-mtp,ngram-mod', specDraftNMax: 3, reasoningPreserve: true, jinja: true, temp: 1, tensorSplit: 42.5, extraArgs: '--batch-size 2048', chatTemplateFile: '/templates/test.j2', chatTemplateKwargs: '{"reasoning_effort":"high"}' };
+        json(root, { launch });
+        const cfg = await load(root);
+        expect(cfg.launch).toEqual(launch);
+        const publicLaunch = publicConfig(cfg).launch;
+        expect(publicLaunch.modelName).toBe(launch.modelName);
+        expect(publicLaunch).not.toHaveProperty('modelPath');
+        expect(publicLaunch.chatTemplateFile).toBe(launch.chatTemplateFile);
+    });
     it('resolves relative paths from config directory', async () => { const root = dir(); json(root, { paths: { modelDirectories: ['./m'] } }, 'nested/dashboard.json'); expect((await load(root, { DASHBOARD_CONFIG: 'nested/dashboard.json' })).paths.modelDirectories).toEqual([path.join(root, 'nested/m')]); });
     it('selects DASHBOARD_CONFIG file', async () => { const root = dir(); const file = json(root, { server: { port: 3106 } }, 'other/a.json'); expect((await load(root, { DASHBOARD_CONFIG: 'other/a.json' })).server.port).toBe(3106); expect(file).toBeTruthy(); });
     it('lets environment beat file', async () => { const root = dir(); json(root, { server: { port: 3105 } }); const cfg = await load(root, { DASHBOARD_PORT: '3200', DASHBOARD_HOST: '0.0.0.0', DASHBOARD_LOGS_DIR: './env-logs' }); expect(cfg.server.port).toBe(3200); expect(cfg.server.host).toBe('0.0.0.0'); expect(cfg.paths.logsDirectory).toBe(path.join(root, 'config/env-logs')); });
