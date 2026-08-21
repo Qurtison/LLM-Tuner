@@ -6,7 +6,9 @@ Bun.serve({
     hostname: '0.0.0.0',
     fetch: async (req) => {
         if (req.url.endsWith('/slots')) {
-            return Response.json({ slots: [{ id: 0, state: 'available' }] });
+            // Real llama-server /slots shape: a bare array of slot objects
+            // (state 0 = free, 1 = busy) — the UI parses it as an array.
+            return Response.json([{ id: 0, state: 0, n_ctx: 0, n_prompt_tokens: 0, next_token: null }]);
         }
         if (req.url.endsWith('/v1/chat/completions') && req.method === 'POST') {
             const body = await req.text();

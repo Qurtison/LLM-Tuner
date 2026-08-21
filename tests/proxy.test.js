@@ -76,7 +76,7 @@ describe('llama proxy (Phase 3)', () => {
             await new Promise(r => setTimeout(r, 100));
         }
         expect(slots.status).toBe(200);
-        expect((await slots.json()).slots).toEqual([{ id: 0, state: 'available' }]);
+        expect(await slots.json()).toEqual([{ id: 0, state: 0, n_ctx: 0, n_prompt_tokens: 0, next_token: null }]);
 
         const chat = await fetch(server.url('/api/llama/v1/chat/completions'), {
             method: 'POST',

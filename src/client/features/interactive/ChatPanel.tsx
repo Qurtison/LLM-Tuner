@@ -105,7 +105,11 @@ export default function ChatPanel() {
         });
         return unsubscribe;
     }, []);
+    // Legacy slotsLoop polled /slots only while a request was in flight
+    // (cleared on first token). Polling while idle would 502-storm the proxy
+    // whenever no model is launched, so gate on the streaming flag.
     useEffect(() => {
+        if (!streaming) return;
         let active = true;
         const poll = async () => {
             try {
@@ -122,7 +126,7 @@ export default function ChatPanel() {
         void poll();
         const interval = window.setInterval(() => { void poll(); }, 250);
         return () => { active = false; window.clearInterval(interval); };
-    }, [state?.launchConfig?.ctx]);
+    }, [streaming, state?.launchConfig?.ctx]);
     useEffect(() => {
         const element = containerRef.current;
         if (element && atBottomRef.current) element.scrollTop = element.scrollHeight;

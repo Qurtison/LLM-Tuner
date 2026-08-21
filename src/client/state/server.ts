@@ -103,5 +103,6 @@ export function setSseConnected(connected: boolean): void {
 }
 
 export function useServer(): ServerSnapshot {
-    return useSyncExternalStore(snapshot.subscribe, snapshot.get, snapshot.get);
+    // Arrows keep `this`; a bare snapshot.get reference would lose it.
+    return useSyncExternalStore(snapshot.subscribe, () => snapshot.get(), () => snapshot.get());
 }
