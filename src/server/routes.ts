@@ -11,6 +11,10 @@ import type { BenchService } from './services/bench';
 import type { TelemetryService } from './services/telemetry';
 import { appendBenchmarkRow, logCompletedRequest } from './services/csvlog';
 import { scanModels } from './services/models';
+import { PresetStore, validatePreset } from './services/presets';
+import * as unitMod from './services/unit';
+import { listFiles, deleteFile } from './services/files';
+import { runUpgrade, UpgradeError } from './services/upgrade';
 import { flagReference, listDevices } from './services/devices';
 import { runSSHCommand } from './services/ssh';
 import { publicConfig } from './config';
@@ -30,6 +34,7 @@ export interface RouteCtx {
     llama: LlamaService;
     bench: BenchService;
     telemetry: TelemetryService;
+    presets: PresetStore;
     appRoot: string;
     // Body reader honoring config.server.maxBodyBytes; resolves null when the
     // body exceeded the cap (legacy behavior reset the socket; the Bun entry
@@ -65,6 +70,40 @@ async function jsonBodyOr400(ctx: RouteCtx, req: Request): Promise<Record<string
     }
 }
 
+let upgradeRunning = false;
+
+// SSE stream of a build/upgrade run; one run at a time.
+function upgradeStream(ctx: RouteCtx, req: Request): Response {
+    if (upgradeRunning) return ctx.json({ error: 'upgrade already running' }, 409);
+    upgradeRunning = true;
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+        async start(controller) {
+            const emit = (line: string) => {
+                try {
+                    for (const ln of line.split('\n')) {
+                        controller.enqueue(encoder.encode('data: ' + ln + '\n\n'));
+                    }
+                } catch { /* client gone */ }
+            };
+            try {
+                await runUpgrade(ctx.config.upgrade.repoDir, ctx.config.upgrade.buildDir, emit);
+                emit('UPGRADE_DONE ok');
+            } catch (err) {
+                emit('UPGRADE_FAILED ' + (err instanceof Error ? err.message : String(err)));
+            } finally {
+                upgradeRunning = false;
+                try { controller.close(); } catch { /* already closed */ }
+            }
+        },
+        cancel() { upgradeRunning = false; },
+    });
+    return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+    });
+}
+
 export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<Response> {
     const route = url.pathname;
     const method = req.method;
@@ -84,6 +123,180 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
     // --- LIST CONFIGURED BUILDS (frozen shape includes paths) ---
     if (route === '/api/builds') {
         return ctx.json({ builds: ctx.config.llama.builds });
+    }
+
+
+    // --- PRESETS (gap G1) ---
+    if (route === '/api/presets' && method === 'GET') {
+        const presets = await ctx.presets.list();
+        const active = await ctx.presets.getActiveName();
+        return ctx.json({ presets, active });
+    }
+    if (route === '/api/presets' && method === 'POST') {
+        let body: Record<string, unknown>;
+        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const name = typeof body.name === 'string' ? body.name : '';
+        if (!name) return ctx.json({ error: 'preset needs a name' }, 400);
+        const existing = await ctx.presets.get(name);
+        const preset = {
+            name,
+            build: typeof body.build === 'string' && body.build ? body.build : (existing?.build || ctx.config.launch.build || ''),
+            label: typeof body.label === 'string' ? body.label : undefined,
+            config: (body.config && typeof body.config === 'object' ? body.config : existing?.config || {}),
+        } as import('./services/presets').Preset;
+        try {
+            await ctx.presets.save(preset);
+        } catch (err) {
+            return ctx.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+        }
+        const warnings = await validatePreset(preset, ctx.config.paths.modelDirectories);
+        return ctx.json({ ok: true, warnings });
+    }
+    const presetMatch = route.match(/^\/api\/presets\/([^/]+)$/);
+    if (presetMatch && method === 'DELETE') {
+        const name = decodeURIComponent(presetMatch[1]);
+        const ok = await ctx.presets.delete(name);
+        return ctx.json({ ok });
+    }
+    if (presetMatch && method === 'GET') {
+        const name = decodeURIComponent(presetMatch[1]);
+        const preset = await ctx.presets.get(name);
+        if (!preset) return ctx.json({ error: 'not found' }, 404);
+        return ctx.json(preset);
+    }
+    const activateMatch = route.match(/^\/api\/presets\/([^/]+)\/activate$/);
+    if (activateMatch && method === 'POST') {
+        const name = decodeURIComponent(activateMatch[1]);
+        const preset = await ctx.presets.get(name);
+        if (!preset) return ctx.json({ error: 'not found' }, 404);
+        await ctx.presets.setActiveName(name);
+        return ctx.json({ ok: true, active: name });
+    }
+    if (route === '/api/presets/validate' && method === 'POST') {
+        let body: Record<string, unknown>;
+        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const warnings = await validatePreset({ name: String(body.name || 'x'), build: String(body.build || ''), config: (body.config as never) || {} } as import('./services/presets').Preset, ctx.config.paths.modelDirectories);
+        return ctx.json({ warnings });
+    }
+
+    // --- FILES (gap G5) ---
+    if (route === '/api/files' && method === 'GET') {
+        const requested = url.searchParams.get('path') || '';
+        try {
+            return ctx.json(await listFiles(ctx.config.paths.modelDirectories[0], requested));
+        } catch (err) {
+            return ctx.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+        }
+    }
+    if (route === '/api/files/delete' && method === 'POST') {
+        let body: Record<string, unknown>;
+        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        try {
+            await deleteFile(ctx.config.paths.modelDirectories[0], String(body.path || ''));
+            return ctx.json({ ok: true });
+        } catch (err) {
+            return ctx.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+        }
+    }
+
+    // --- UNIT (gap G2; systemd-managed inference server) ---
+    if (route === '/api/unit/status' && method === 'GET') {
+        const viaSystemd = ctx.config.service.manageViaSystemd && !!ctx.config.service.unitName;
+        if (!viaSystemd) {
+            return ctx.json({ activeState: 'disabled', subState: 'managed by dashboard process', since: null, pid: null, restarts: 0, result: '' });
+        }
+        try {
+            return ctx.json(await unitMod.status(ctx.config.service.unitName));
+        } catch (err) {
+            return ctx.json({ activeState: 'error', subState: String(err instanceof Error ? err.message : err), since: null, pid: null, restarts: 0, result: '' });
+        }
+    }
+    if (route === '/api/unit/start' && method === 'POST') {
+        if (!ctx.config.service.manageViaSystemd || !ctx.config.service.unitName) return ctx.json({ error: 'unit management disabled' }, 400);
+        return ctx.json(await unitMod.start(ctx.config.service.unitName));
+    }
+    if (route === '/api/unit/stop' && method === 'POST') {
+        if (!ctx.config.service.manageViaSystemd || !ctx.config.service.unitName) return ctx.json({ error: 'unit management disabled' }, 400);
+        return ctx.json(await unitMod.stop(ctx.config.service.unitName));
+    }
+    if (route === '/api/unit/restart' && method === 'POST') {
+        if (!ctx.config.service.manageViaSystemd || !ctx.config.service.unitName) return ctx.json({ error: 'unit management disabled' }, 400);
+        return ctx.json(await unitMod.restart(ctx.config.service.unitName));
+    }
+    if (route === '/api/unit/logs' && method === 'GET') {
+        const lines = Math.max(1, Math.min(parseInt(url.searchParams.get('lines') || '200', 10) || 200, 2000));
+        if (!ctx.config.service.manageViaSystemd || !ctx.config.service.unitName) return ctx.json({ logs: '' });
+        return ctx.json({ logs: await unitMod.logs(ctx.config.service.unitName, lines) });
+    }
+
+    // --- APPLY (regenerate launch script from active preset, install unit, optionally restart) ---
+    if (route === '/api/apply' && method === 'POST') {
+        const active = await ctx.presets.getActive();
+        if (!active) return ctx.json({ ok: false, error: 'no active preset', warnings: [] });
+        const body = await parseJsonBody(ctx, req).catch(() => ({} as Record<string, unknown>));
+        const restart = (body as Record<string, unknown>)?.restart === true;
+        try {
+            const resolved = launch.resolveLaunchCommand(active.config, ctx.config.llama.builds, {
+                rpcPort: ctx.config.llama.rpcPort,
+                defaultPort: ctx.config.llama.defaultPort,
+            });
+            const command = formatCommand(resolved.command, resolved.args);
+            const warnings = await validatePreset(active, ctx.config.paths.modelDirectories);
+            let restartOk: boolean | undefined;
+            let restartOutput: string | undefined;
+            if (ctx.config.service.manageViaSystemd && ctx.config.service.unitName) {
+                const scriptPath = ctx.config.service.unitPath || path.join(ctx.appRoot, 'generated', 'launch.sh');
+                await fs.mkdir(path.dirname(scriptPath), { recursive: true });
+                const script = '#!/usr/bin/env bash\nset -euo pipefail\nexec ' + command + '\n';
+                await fs.writeFile(scriptPath, script);
+                await fs.chmod(scriptPath, 0o755);
+                const unitPath = ctx.config.service.unitPath || path.join(process.env.HOME || '/home/james', '.config', 'systemd', 'user', ctx.config.service.unitName);
+                const installed = await unitMod.installUnit(unitPath, scriptPath, ctx.config.service.unitName, ctx.config.service.enableOnApply);
+                if (!installed.ok) return ctx.json({ ok: false, error: installed.output, command, warnings });
+                if (restart) {
+                    const r = await unitMod.restart(ctx.config.service.unitName);
+                    restartOk = r.ok; restartOutput = r.output;
+                }
+            } else {
+                // Native mode: apply launches the active preset through the
+                // dashboard-managed child (same path as /api/start).
+                if (ctx.llama.running) {
+                    return ctx.json({ ok: false, error: 'a model server is already running (stop it first)', command, warnings });
+                }
+                try {
+                    ctx.llama.launch(active.config);
+                } catch (err) {
+                    return ctx.json({ ok: false, error: err instanceof Error ? err.message : String(err), command, warnings });
+                }
+            }
+            return ctx.json({ ok: true, command, warnings, restartOk, restartOutput });
+        } catch (err) {
+            return ctx.json({ ok: false, error: err instanceof Error ? err.message : String(err), warnings: [] });
+        }
+    }
+
+    // --- UPGRADE (gap G3; git pull + build, streamed) ---
+    if (route === '/api/upgrade/status' && method === 'GET') {
+        return ctx.json({ running: upgradeRunning });
+    }
+    if (route === '/api/upgrade/stream' && method === 'GET') {
+        if (!ctx.config.upgrade.enabled || !ctx.config.upgrade.repoDir || !ctx.config.upgrade.buildDir) {
+            return ctx.json({ error: 'upgrade not configured' }, 400);
+        }
+        return upgradeStream(ctx, req);
+    }
+
+    // --- SERVER PATHS (gap G7; read-only, path info the UI needs) ---
+    if (route === '/api/server-paths' && method === 'GET') {
+        const builds = ctx.config.llama.builds;
+        return ctx.json({
+            modelsDir: ctx.config.paths.modelDirectories[0] || '',
+            logsDir: ctx.config.paths.logsDirectory,
+            monitorScript: ctx.config.paths.monitorScript,
+            repoDir: ctx.config.upgrade.repoDir || null,
+            buildDirs: builds.map(b => b.path),
+            activeBuildDir: (await ctx.presets.getActive())?.build || builds[0]?.id || null,
+        });
     }
 
     // --- BENCHMARK LOG (manual/external logging) ---

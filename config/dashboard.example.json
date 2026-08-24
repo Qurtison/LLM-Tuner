@@ -50,5 +50,16 @@
     "gpuLayers": 0,
     "tensorSplit": 50,
     "temperature": 0.8
+  },
+  "service": {
+    "unitName": "llama-dashboard-server.service",
+    "unitPath": "",
+    "enableOnApply": false,
+    "manageViaSystemd": false
+  },
+  "upgrade": {
+    "repoDir": "",
+    "buildDir": "",
+    "enabled": false
   }
 }

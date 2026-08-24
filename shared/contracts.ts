@@ -406,3 +406,82 @@ export const ROUTES: Record<string, 'GET' | 'POST'> = {
     '/api/telemetry/rate': 'POST',
     '/api/telemetry/latest': 'GET'
 };
+
+// --- Gap-closing additions (docs/gap-analysis.md) ---
+
+export interface Preset {
+    name: string;
+    build: string;
+    label?: string;
+    config: LaunchConfig;
+}
+
+export interface PresetsResponse {
+    presets: Preset[];
+    active: string | null;
+}
+
+export interface PresetSaveRequest {
+    name: string;
+    build?: string;
+    label?: string;
+    config?: LaunchConfig;
+}
+
+export interface PresetValidateResponse {
+    warnings: string[];
+}
+
+export interface ApplyResult {
+    ok: boolean;
+    command?: string;
+    warnings: string[];
+    error?: string;
+    restartOk?: boolean;
+    restartOutput?: string;
+}
+
+export interface UnitStatus {
+    activeState: string;
+    subState: string;
+    since: string | null;
+    pid: number | null;
+    restarts: number;
+    result: string;
+}
+
+export interface UnitOpResponse {
+    ok: boolean;
+    output: string;
+}
+
+export interface UpgradeStatusResponse {
+    running: boolean;
+}
+
+export interface FilesEntry {
+    name: string;
+    path: string;
+    isDir: boolean;
+    size: number | null;
+}
+
+export interface FilesResponse {
+    root: string;
+    path: string;
+    entries: FilesEntry[];
+}
+
+export interface FilesDeleteResponse {
+    ok: boolean;
+}
+
+export interface ServerPathsResponse {
+    modelsDir: string;
+    logsDir: string;
+    monitorScript: string;
+    repoDir: string | null;
+    buildDirs: string[];
+    activeBuildDir: string | null;
+}
+

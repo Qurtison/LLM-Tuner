@@ -5,3 +5,6 @@ config/dashboard.json
 dist/
 *.local
 logs/
+
+# runtime state
+presets/

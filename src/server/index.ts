@@ -20,6 +20,7 @@ import { logCompletedRequest } from './services/csvlog';
 import { CSV_HEADERS } from './services/csvlog';
 import type { ServerState } from './services/types';
 import { handleApiRoute, type RouteCtx, BodyTooLargeError } from './routes';
+import { PresetStore } from './services/presets';
 
 const APP_ROOT = path.join(import.meta.dir, '..', '..'); // src/server/<entry> -> repo root
 const DIST_DIR = path.join(APP_ROOT, 'dist', 'client');
@@ -139,6 +140,8 @@ const bench = new BenchService(
     }
 );
 
+const presets = new PresetStore(path.join(APP_ROOT, 'presets'));
+
 const routeCtx: RouteCtx = {
     config,
     state,
@@ -146,6 +149,7 @@ const routeCtx: RouteCtx = {
     llama,
     bench,
     telemetry,
+    presets,
     appRoot: APP_ROOT,
     readBody,
     json,

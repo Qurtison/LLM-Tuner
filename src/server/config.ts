@@ -10,6 +10,8 @@ export interface DashboardConfig {
     llama: { builds: Build[]; defaultPort: number; defaultHost: string; rpcPort: number };
     telemetry: { enabled: boolean; host: string; port: number; pollMs: number; providers: string[] };
     processes: { cleanupManagedPortsOnStart: boolean; stopGraceMs: number };
+    service: { unitName: string; unitPath: string; enableOnApply: boolean; manageViaSystemd: boolean };
+    upgrade: { repoDir: string; buildDir: string; enabled: boolean };
     worker: { sshHost: string; rpcTarget: string; workDirectory: string; startCommand: string; stopCommand: string; statusCommand: string; logsCommand: string; transportPresets: TransportPreset[] };
     uiDefaults: { contextSize: number; gpuLayers: number; tensorSplit: number; temperature: number };
     launch: { modelPath: string; modelName: string; build: string; deviceA: string; deviceB: string; splitMode: string; ctx: number; ngl: number; port: number; fa: boolean; cacheK: string; cacheV: string; specType: string; specDraftNMax: number; reasoningPreserve: boolean; jinja: boolean; temp: number; tensorSplit: number; extraArgs: string; chatTemplateFile: string; chatTemplateKwargs: string };
@@ -34,6 +36,8 @@ const defaults = {
     llama: { builds: [], defaultPort: 8080, defaultHost: '127.0.0.1', rpcPort: 50052 },
     telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'] },
     processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 3000 },
+    service: { unitName: 'llama-dashboard-server.service', unitPath: '', enableOnApply: false, manageViaSystemd: false },
+    upgrade: { repoDir: '', buildDir: '', enabled: false },
     worker: { sshHost: '', rpcTarget: '', workDirectory: '', startCommand: 'docker compose -f docker-compose.worker.yml up -d', stopCommand: 'docker compose -f docker-compose.worker.yml down', statusCommand: 'docker compose -f docker-compose.worker.yml ps --filter status=running -q', logsCommand: 'docker compose -f docker-compose.worker.yml logs --tail=50', transportPresets: [] },
     uiDefaults: { contextSize: 4096, gpuLayers: 0, tensorSplit: 50, temperature: 0.8 },
     launch: { modelPath: '', modelName: '', build: '', deviceA: '', deviceB: '', splitMode: 'none', ctx: 110000, ngl: 999, port: 8080, fa: true, cacheK: 'q8_0', cacheV: 'q8_0', specType: '', specDraftNMax: 2, reasoningPreserve: false, jinja: false, temp: 0.8, tensorSplit: 50, extraArgs: '', chatTemplateFile: '', chatTemplateKwargs: '' }
@@ -45,6 +49,8 @@ const shape: Record<string, unknown> = {
     llama: { builds: 0, defaultPort: 0, defaultHost: 0, rpcPort: 0 },
     telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0 },
     processes: { cleanupManagedPortsOnStart: 0, stopGraceMs: 0 },
+    service: { unitName: 0, unitPath: 0, enableOnApply: 0, manageViaSystemd: 0 },
+    upgrade: { repoDir: 0, buildDir: 0, enabled: 0 },
     worker: { sshHost: 0, rpcTarget: 0, workDirectory: 0, startCommand: 0, stopCommand: 0, statusCommand: 0, logsCommand: 0, transportPresets: 0 },
     uiDefaults: { contextSize: 0, gpuLayers: 0, tensorSplit: 0, temperature: 0 },
     launch: { modelPath: 0, modelName: 0, build: 0, deviceA: 0, deviceB: 0, splitMode: 0, ctx: 0, ngl: 0, port: 0, fa: 0, cacheK: 0, cacheV: 0, specType: 0, specDraftNMax: 0, reasoningPreserve: 0, jinja: 0, temp: 0, tensorSplit: 0, extraArgs: 0, chatTemplateFile: 0, chatTemplateKwargs: 0 }
@@ -91,7 +97,7 @@ function integer(value: unknown, field: string, min: number, max: number, issues
 
 function validate(raw: Raw, issues: string[]): void {
     const s = raw.server as Raw; const p = raw.paths as Raw; const l = raw.llama as Raw;
-    const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw; const launch = raw.launch as Raw;
+    const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const svc = raw.service as Raw; const upg = raw.upgrade as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw; const launch = raw.launch as Raw;
     const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['paths.pythonCommand', p.pythonCommand], ['paths.monitorScript', p.monitorScript], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
     for (const [field, value] of hostChecks) nonEmpty(value, field, issues);
     if (p.huggingFaceCache !== null) nonEmpty(p.huggingFaceCache, 'paths.huggingFaceCache', issues);
@@ -101,7 +107,11 @@ function validate(raw: Raw, issues: string[]): void {
     }
     for (const [field, value] of [['telemetry.enabled', t.enabled], ['processes.cleanupManagedPortsOnStart', pr.cleanupManagedPortsOnStart]]) if (typeof value !== 'boolean') issues.push(field + ' must be a boolean');
     integer(s.port, 'server.port', 1, 65535, issues); integer(l.defaultPort, 'llama.defaultPort', 1, 65535, issues); integer(l.rpcPort, 'llama.rpcPort', 1, 65535, issues); integer(t.port, 'telemetry.port', 1, 65535, issues);
-    integer(s.maxBodyBytes, 'server.maxBodyBytes', 1, Number.MAX_SAFE_INTEGER, issues); integer(t.pollMs, 'telemetry.pollMs', 50, 60000, issues); integer(pr.stopGraceMs, 'processes.stopGraceMs', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.contextSize, 'uiDefaults.contextSize', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.gpuLayers, 'uiDefaults.gpuLayers', 0, Number.MAX_SAFE_INTEGER, issues);
+    integer(s.maxBodyBytes, 'server.maxBodyBytes', 1, Number.MAX_SAFE_INTEGER, issues); integer(t.pollMs, 'telemetry.pollMs', 50, 60000, issues); integer(pr.stopGraceMs, 'processes.stopGraceMs', 1, Number.MAX_SAFE_INTEGER, issues);
+    for (const [field, value] of [['service.unitName', svc.unitName], ['service.unitPath', svc.unitPath], ['upgrade.repoDir', upg.repoDir], ['upgrade.buildDir', upg.buildDir]]) if (typeof value !== 'string') issues.push(field + ' must be a string');
+    if (typeof svc.enableOnApply !== 'boolean') issues.push('service.enableOnApply must be a boolean');
+    if (typeof svc.manageViaSystemd !== 'boolean') issues.push('service.manageViaSystemd must be a boolean');
+    if (typeof upg.enabled !== 'boolean') issues.push('upgrade.enabled must be a boolean'); integer(u.contextSize, 'uiDefaults.contextSize', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.gpuLayers, 'uiDefaults.gpuLayers', 0, Number.MAX_SAFE_INTEGER, issues);
     for (const field of ['modelPath', 'modelName', 'build', 'deviceA', 'deviceB', 'cacheK', 'cacheV', 'specType', 'extraArgs', 'chatTemplateFile', 'chatTemplateKwargs']) if (launch[field] !== '' && (typeof launch[field] !== 'string' || launch[field].trim() === '')) issues.push('launch.' + field + ' must be a non-empty string when provided');
     integer(launch.ctx, 'launch.ctx', 1, Number.MAX_SAFE_INTEGER, issues); integer(launch.ngl, 'launch.ngl', 0, Number.MAX_SAFE_INTEGER, issues); integer(launch.port, 'launch.port', 1, 65535, issues); integer(launch.specDraftNMax, 'launch.specDraftNMax', 0, Number.MAX_SAFE_INTEGER, issues);
     for (const field of ['fa', 'reasoningPreserve', 'jinja']) if (typeof launch[field] !== 'boolean') issues.push('launch.' + field + ' must be a boolean');
