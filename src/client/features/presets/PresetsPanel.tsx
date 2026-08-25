@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { getErrorMessage } from '../../api/errors';
+import { fieldClass } from '../../components/Field';
 import type {
     ApplyResult,
     BuildEntry,
@@ -12,7 +13,6 @@ import type {
     UnitStatus,
 } from '../../../../shared/contracts';
 
-const fieldClass = 'w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm text-neutral-100 disabled:opacity-50';
 const btn = 'rounded bg-neutral-800 px-3 py-1.5 text-sm text-neutral-200 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50';
 const btnPrimary = 'rounded bg-indigo-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50';
 const btnDanger = 'rounded bg-red-900/40 px-3 py-1.5 text-sm text-red-300 hover:bg-red-900/60 disabled:cursor-not-allowed disabled:opacity-50';

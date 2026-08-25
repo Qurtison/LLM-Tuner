@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Chart from 'chart.js/auto';
 import { api } from '../../api/client';
+import { getErrorMessage } from '../../api/errors';
+import { chartOptions, labelsFromPoints, metricSeries } from '../../lib/charts';
+import { gpuLabel, stat, toNumber as number, vramParts } from '../../lib/gpu';
 import { onSseLine, useServer } from '../../state/server';
-import type { CompletionEvent, TelemetryLatestResponse, TelemetryRateResponse, TelemetrySample } from '../../../../shared/contracts';
+import type { CompletionEvent, TelemetryLatestResponse, TelemetryRateResponse } from '../../../../shared/contracts';
 
 type Stats = Record<string, unknown>;
 type Point = { t: number; master: Stats | null; worker: Stats | null; net: number | null };
@@ -38,36 +41,19 @@ const DEFAULT_BLOCK_ORDER = ['header', 'context', 'thermal', 'power', 'vram', ..
 const throttleLabels: Record<string, string> = { hw_thermal_slowdown: 'HW Thermal', sw_thermal_slowdown: 'SW Thermal', sw_power_cap: 'SW Power Cap', hw_power_brake_slowdown: 'HW Power Brake' };
 const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
 
-function number(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
-function stat(stats: Stats | null, key: string): number | null { return stats ? number(stats[key]) : null; }
 function text(value: number | null, unit: string): string { return value === null ? '--' + unit : value.toFixed(unit === '%' ? 0 : 1) + unit; }
-function labels(points: { t: number }[]): string[] { return points.map(point => new Date(point.t).toLocaleTimeString()); }
+const labels = labelsFromPoints;
 function series(points: Point[], from: 'master' | 'worker', key: string): (number | null)[] { return points.map(point => stat(point[from], key)); }
 // Machine-level stats a worker shares with main when it runs on the same host
 // (local second GPU or loopback RPC target). monitor.py marks those points
 // same_host; showing the worker value there would just repeat main's.
 const SHARED_KEYS = new Set(['cpu_util', 'ram_used']);
 function workerSeries(points: Point[], key: string): (number | null)[] { return points.map(point => SHARED_KEYS.has(key) && point.worker && point.worker.same_host === true ? null : stat(point.worker, key)); }
-// GPUs are labeled by their real names (nvidia-smi / amdgpu_top) instead of
-// Main/Worker: "Main"/"Worker" describe the RPC role, not the card. Fallback
-// is positional (GPU 1 / GPU 2) when the name is missing or an error marker.
-const BAD_GPU_NAMES = new Set(['', 'Unknown', 'Offline', 'Unknown AMD GPU']);
-function gpuLabel(stats: Stats | null, fallback: string): string { const name = stats && typeof stats.gpu_name === 'string' ? stats.gpu_name.trim() : ''; return BAD_GPU_NAMES.has(name) ? fallback : name; }
 // The block title itself is the drag handle: plain-looking text, but grabbable
 // when unlocked -- dropping it on another block reorders the two (persisted).
 function DragTitle({ text, locked, onDragStart, onDragEnd }: { text: string; locked: boolean; onDragStart: () => void; onDragEnd: () => void }) {
     if (locked) return <>{text}</>;
     return <span draggable title="Drag to reorder" onDragStart={event => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', text); onDragStart(); }} onDragEnd={onDragEnd} className="cursor-grab select-none hover:text-neutral-200 active:cursor-grabbing">{text}</span>;
-}
-function metricSeries(samples: TelemetrySample[], key: keyof TelemetrySample): (number | null)[] { return samples.map(sample => { const value = sample[key]; return typeof value === 'number' ? value : null; }); }
-function chartOptions(compact = false): object {
-    return { responsive: true, maintainAspectRatio: false, animation: false, spanGaps: false, plugins: { legend: { display: !compact, labels: { color: '#a3a3a3' } } }, scales: { x: { display: !compact, ticks: { color: '#737373', maxTicksLimit: 6 } }, y: { ticks: { color: '#737373', font: { size: compact ? 8 : 12 } } } } };
-}
-function vramParts(stats: Stats | null): { used: number | null; free: number | null; total: number | null } {
-    const used = stat(stats, 'vram_used');
-    const free = stat(stats, 'vram_free');
-    const total = stat(stats, 'vram_total') ?? (used !== null && free !== null ? used + free : null);
-    return { used, free, total };
 }
 function netSeries(points: Point[]): (number | null)[] { return points.map((point, index) => { const previous = index > 0 ? points[index - 1] : null; if (point.net == null || !previous || previous.net == null) return null; return Math.max(0, (point.net - previous.net) / 1_048_576); }); }
 function MiniChart({ metric, points, smooth, master, worker, net, masterLabel, workerLabel, tpsPoints, drag }: { metric: MiniMetric; points: Point[]; smooth: boolean; master: Stats | null; worker: Stats | null; net: number | null; masterLabel: string; workerLabel: string; tpsPoints: TpsPoint[]; drag?: { locked: boolean; onDragStart: () => void; onDragEnd: () => void } }) {
@@ -246,7 +232,7 @@ export default function MonitorPanel() {
                 setFailures(0); setError('');
             } catch (cause) {
                 if (!alive) return;
-                setFailures(old => old + 1); setError(cause instanceof Error ? cause.message : 'Telemetry request failed.');
+                setFailures(old => old + 1); setError(getErrorMessage(cause, 'Telemetry request failed.'));
             } finally { inFlight.current = false; }
         };
         void poll();
@@ -271,9 +257,9 @@ export default function MonitorPanel() {
     const setPollingRate = async (next: number) => {
         setRate(next); setError('');
         try { const result = await api<TelemetryRateResponse>('/api/telemetry/rate', { method: 'POST', body: JSON.stringify({ ms: next }) }); setRate(result.ms); }
-        catch (cause) { setError(cause instanceof Error ? cause.message : 'Could not set telemetry rate.'); }
+        catch (cause) { setError(getErrorMessage(cause, 'Could not set telemetry rate.')); }
     };
-    const toggleSmooth = (on: boolean) => { setSmooth(on); try { window.localStorage.setItem('omni_smoothing', on ? '1' : ''); } catch { setError('Could not save smoothing preference.'); } };
+    const toggleSmooth = (on: boolean) => { setSmooth(on); try { window.localStorage.setItem('omni_smoothing', on ? '1' : ''); } catch (cause) { setError(getErrorMessage(cause, 'Could not save smoothing preference.')); } };
     const workerHasData = points.some(point => point.worker !== null && WORKER_KEYS.some(key => stat(point.worker, key) !== null));
     const vram = [{ label: masterLabel, parts: vramParts(master), color: 'bg-yellow-400' }, ...(workerHasData ? [{ label: workerLabel, parts: vramParts(worker), color: 'bg-red-400' }] : [])];
 

@@ -3,12 +3,12 @@
 // presets/unit actions live in their own panels.
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
+import { gpuTitle, stat as gpuStat } from '../../lib/gpu';
 import { useServer } from '../../state/server';
 import type { ServerPathsResponse, TelemetryLatestResponse, UnitStatus } from '../../../../shared/contracts';
 
 type GpuStats = Record<string, unknown>;
 
-function number(value: unknown): number | null { return typeof value === 'number' && Number.isFinite(value) ? value : null; }
 function text(value: number | null, suffix: string): string { return value === null ? '—' + suffix : value.toFixed(suffix === '%' ? 0 : 1) + suffix; }
 // Telemetry values are in KiB units (monitor.py); keep the raw figure.
 function vramText(value: number | null): string { return value === null ? '—' : value.toFixed(0) + ' MiB'; }
@@ -22,11 +22,11 @@ function Bar({ pct }: { pct: number }) {
 }
 
 function GpuCard({ title, stats, isWorker }: { title: string; stats: GpuStats | null; isWorker: boolean }) {
-    const util = number(stats?.gpu_util);
-    const temp = number(stats?.gpu_temp);
-    const pwr = number(stats?.gpu_pwr);
-    const used = number(stats?.vram_used);
-    const total = number(stats?.vram_total);
+    const util = gpuStat(stats, 'gpu_util');
+    const temp = gpuStat(stats, 'gpu_temp');
+    const pwr = gpuStat(stats, 'gpu_pwr');
+    const used = gpuStat(stats, 'vram_used');
+    const total = gpuStat(stats, 'vram_total');
     const reasons = Array.isArray(stats?.throttle_reasons) ? (stats.throttle_reasons as unknown[]).filter((reason): reason is string => typeof reason === 'string') : [];
     const vramPct = used !== null && total !== null && total > 0 ? used / total * 100 : null;
     return (
@@ -52,11 +52,6 @@ function GpuCard({ title, stats, isWorker }: { title: string; stats: GpuStats | 
             )}
         </div>
     );
-}
-
-function gpuTitle(stats: GpuStats | null, fallback: string): string {
-    const name = stats && typeof stats.gpu_name === 'string' ? stats.gpu_name.trim() : '';
-    return name && !['Unknown', 'Offline', 'Unknown AMD GPU'].includes(name) ? name : fallback;
 }
 
 export default function OverviewPanel() {
