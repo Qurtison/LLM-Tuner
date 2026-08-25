@@ -6,5 +6,5 @@ dist/
 *.local
 logs/
 
-# runtime state
-presets/
+# runtime state (repo root only; src/client/features/presets/ is source code)
+/presets/
