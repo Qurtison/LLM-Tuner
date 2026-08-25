@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
 import { getChatErrorMessage } from '../../api/errors';
 import { sanitizeMarkdownHtml } from '../../lib/sanitize';
-import { onSseLine, useServer } from '../../state/server';
+import { useServer } from '../../state/server';
 
 type Role = 'user' | 'assistant';
 type Message = { role: Role; content: string; timestamp: string; reasoning?: string; startedAt?: number; finishedAt?: number };
@@ -63,7 +63,6 @@ export default function ChatPanel() {
     const [streaming, setStreaming] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [slot, setSlot] = useState<Slot | null>(null);
-    const [context, setContext] = useState<{ used: number; limit: number } | null>(null);
     const abortRef = useRef<AbortController | null>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const atBottomRef = useRef(true);
@@ -80,19 +79,8 @@ export default function ChatPanel() {
     };
 
     useEffect(() => () => abortRef.current?.abort(), []);
-    useEffect(() => {
-        const unsubscribe = onSseLine(line => {
-            if (!line.startsWith('CTX_LIVE:')) return;
-            const [, usedText, limitText] = line.split(':');
-            const used = Number.parseInt(usedText, 10);
-            const limit = Number.parseInt(limitText, 10);
-            if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) setContext({ used, limit });
-        });
-        return unsubscribe;
-    }, []);
-    // Legacy slotsLoop polled /slots only while a request was in flight
-    // (cleared on first token). Polling while idle would 502-storm the proxy
-    // whenever no model is launched, so gate on the streaming flag.
+    // Slots polled only while streaming — keeps "Slot busy/available" fresh
+    // without 502-spamming when no model is launched.
     useEffect(() => {
         if (!streaming) return;
         let active = true;
@@ -100,10 +88,7 @@ export default function ChatPanel() {
             try {
                 const slots = await api<Slot[]>('/api/llama/slots');
                 if (!active) return;
-                const next = slots.find(item => item.state === 1) ?? slots[0] ?? null;
-                setSlot(next);
-                const used = next?.n_ctx ?? next?.n_prompt_tokens;
-                if (typeof used === 'number' && state?.launchConfig?.ctx) setContext({ used, limit: state.launchConfig.ctx });
+                setSlot(slots.find(item => item.state === 1) ?? slots[0] ?? null);
             } catch (caught) {
                 if (active && !(caught instanceof ApiError && caught.status === 502)) setError(errorText(caught));
             }
@@ -111,7 +96,7 @@ export default function ChatPanel() {
         void poll();
         const interval = window.setInterval(() => { void poll(); }, 250);
         return () => { active = false; window.clearInterval(interval); };
-    }, [streaming, state?.launchConfig?.ctx]);
+    }, [streaming]);
     useEffect(() => {
         const element = containerRef.current;
         if (element && atBottomRef.current) element.scrollTop = element.scrollHeight;
@@ -197,17 +182,15 @@ export default function ChatPanel() {
         }
     };
     const stop = () => abortRef.current?.abort();
-    const newChat = () => { if (messages.length) persist(messages); setSessionId(newId()); setMessages([]); setContext(null); setError(null); };
+    const newChat = () => { if (messages.length) persist(messages); setSessionId(newId()); setMessages([]); setError(null); };
     const clearHistory = () => {
         if (!window.confirm('Clear all chat history?')) return;
         try { window.localStorage.removeItem(HISTORY_KEY); } catch { setError('Chat history could not be cleared.'); }
-        setSessions([]); setSessionId(newId()); setMessages([]); setContext(null);
+        setSessions([]); setSessionId(newId()); setMessages([]);
     };
-    const used = context?.used ?? slot?.n_ctx ?? slot?.n_prompt_tokens;
-    const limit = context?.limit ?? state?.launchConfig?.ctx;
 
     return <section className="flex min-h-[42rem] flex-col rounded-xl border border-neutral-800 bg-neutral-900" aria-label="Chat">
-        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3"><div><h2 className="text-sm font-semibold">Chat</h2><p className="text-xs text-neutral-500">{slot?.state === 1 ? 'Slot busy' : 'Slot available'}{typeof used === 'number' && limit ? ' · context ' + used.toLocaleString() + ' / ' + limit.toLocaleString() : ''}</p></div><div className="flex gap-2"><button type="button" onClick={newChat} className="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">New chat</button><button type="button" onClick={clearHistory} className="rounded px-2 py-1 text-xs text-neutral-400 hover:text-red-300">Clear history</button></div></div>
+        <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3"><div><h2 className="text-sm font-semibold">Chat</h2><p className="text-xs text-neutral-500">{slot?.state === 1 ? 'Slot busy' : 'Slot available'}<span className="ml-2 text-neutral-600">· context in Overview</span></p></div><div className="flex gap-2"><button type="button" onClick={newChat} className="rounded bg-neutral-800 px-2 py-1 text-xs hover:bg-neutral-700">New chat</button><button type="button" onClick={clearHistory} className="rounded px-2 py-1 text-xs text-neutral-400 hover:text-red-300">Clear history</button></div></div>
         {error && <p role="alert" className="mx-4 mt-3 rounded border border-red-900 bg-red-950/50 px-3 py-2 text-xs text-red-300">{error}</p>}
         <div ref={containerRef} onScroll={event => { const target = event.currentTarget; atBottomRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 40; }} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4" aria-live="polite">
             {!messages.length && <p className="py-16 text-center text-sm text-neutral-500">{state?.state === 'ready' ? 'New chat started. Type prompt below.' : 'Model unavailable. Start model to begin.'}</p>}
