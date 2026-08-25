@@ -4,7 +4,8 @@ __pycache__/
 config/dashboard.json
 dist/
 *.local
-logs/
+/logs/
 
-# runtime state (repo root only; src/client/features/presets/ is source code)
+# runtime state (repo root only; src/client/features/presets/ and
+# src/client/features/logs/ are source code)
 /presets/
