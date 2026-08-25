@@ -34,10 +34,10 @@ run_as_owner() {
 }
 
 echo "[llm-tuner] bun install"
-run_as_owner "${BUN}" --cwd "${APP_DIR}" install --frozen-lockfile
+run_as_owner "${BUN}" install --cwd "${APP_DIR}" --frozen-lockfile
 
 echo "[llm-tuner] vite build"
-run_as_owner "${BUN}" --cwd "${APP_DIR}" run build
+run_as_owner "${BUN}" run --cwd "${APP_DIR}" build
 
 echo "[llm-tuner] restart ${UNIT_NAME}"
 run_as_owner systemctl --user restart "${UNIT_NAME}"
