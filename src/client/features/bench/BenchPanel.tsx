@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Chart from 'chart.js/auto';
 import { api, ApiError } from '../../api/client';
+import { getErrorMessage } from '../../api/errors';
 import { onSseLine, useServer } from '../../state/server';
 import type { BenchDequeueResponse, BenchOpResponse, BenchRestoreResponse, BenchStartResponse, BenchStatusResponse, BuildsResponse, DevicesResponse, ModelEntry, TelemetrySample } from '../../../../shared/contracts';
 
@@ -12,7 +13,7 @@ type OutputBlock = { title: string; time: string; lines: string[] };
 const initial: Form = { build: '', modelPath: '', devices: '', splitMode: '', tensorSplit: '', nPrompt: '8192', nGen: '128', depths: '0,32768,98304', reps: '', cacheK: 'q8_0', extraArgs: '', rawArgs: '', fa: true, raw: false };
 function load<T>(key: string, fallback: T): T { try { const value = localStorage.getItem(key); return value ? JSON.parse(value) as T : fallback; } catch { return fallback; } }
 function save(key: string, value: unknown): void { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage unavailable */ } }
-function errorText(error: unknown): string { return error instanceof ApiError && error.status === 409 ? 'Conflict: ' + error.message : error instanceof Error ? error.message : String(error); }
+function errorText(error: unknown): string { return error instanceof ApiError && error.status === 409 ? 'Conflict: ' + error.message : getErrorMessage(error); }
 function configOf(form: Form): Config { const text = (value: string): string | null => value.trim() || null; return { build: form.build, modelPath: form.modelPath, devices: text(form.devices), splitMode: text(form.splitMode), tensorSplit: text(form.tensorSplit), fa: form.fa, cacheK: text(form.cacheK), cacheV: text(form.cacheK), nPrompt: text(form.nPrompt), nGen: text(form.nGen), depths: text(form.depths), reps: text(form.reps), extraArgs: text(form.extraArgs), ...(form.raw ? { rawArgs: text(form.rawArgs) } : {}) }; }
 function outputBlocks(lines: string[]): OutputBlock[] { const blocks: OutputBlock[] = []; let current: OutputBlock | null = null; for (const line of lines) { if (line.startsWith('===== ')) { const title = line.replace(/^=====\s*/, '').replace(/\s*=====$/, '').replace(/^sweep:/, 'llama-server:').replace(/^matrix run /, 'llama-bench '); current = { title, time: '', lines: [line] }; blocks.push(current); } else { if (!current) { current = { title: 'llama-bench', time: '', lines: [] }; blocks.push(current); } current.lines.push(line); if (!current.time && /^--- .* ---$/.test(line)) current.time = line.slice(4, -4); } } return blocks; }
 function physicalPair(a: { description: string }, b: { description: string }): boolean { return a.description === b.description; }

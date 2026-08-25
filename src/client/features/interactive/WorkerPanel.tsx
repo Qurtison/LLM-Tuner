@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
+import { getErrorMessage } from '../../api/errors';
 import { onSseLine, useServer } from '../../state/server';
 import type { WorkerLogsResponse, WorkerStartStopResponse, WorkerStatusResponse } from '../../../../shared/contracts';
 
@@ -17,10 +18,6 @@ const badgeClasses: Record<WorkerState, string> = {
     'start failed': 'border border-red-800 bg-red-900/20 text-red-400',
     'stop failed': 'border border-red-800 bg-red-900/20 text-red-400',
 };
-
-function message(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
 
 export default function WorkerPanel() {
     const { config, state } = useServer();
@@ -66,7 +63,7 @@ export default function WorkerPanel() {
             } catch (error) {
                 if (!live) return;
                 setStatus('error');
-                setStatusError(message(error));
+                setStatusError(getErrorMessage(error));
             } finally {
                 pollActive.current = false;
             }
@@ -86,7 +83,7 @@ export default function WorkerPanel() {
                 });
                 if (live) setLogs(result.logs || 'No logs returned.');
             } catch (error) {
-                if (live) setLogs('Failed to fetch logs: ' + message(error));
+                if (live) setLogs('Failed to fetch logs: ' + getErrorMessage(error));
             }
         };
         void fetchLogs();
@@ -116,8 +113,8 @@ export default function WorkerPanel() {
             if (logsOpen && action === 'start') setLogs('Loading worker logs…');
         } catch (error) {
             setStatus(action + ' failed' as WorkerState);
-            setOperationError(message(error));
-            if (action === 'start') setLogs('Start failed: ' + message(error));
+            setOperationError(getErrorMessage(error));
+            if (action === 'start') setLogs('Start failed: ' + getErrorMessage(error));
         }
     };
 

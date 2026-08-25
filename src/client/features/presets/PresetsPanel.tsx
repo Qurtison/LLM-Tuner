@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
+import { getErrorMessage } from '../../api/errors';
 import type {
     ApplyResult,
     BuildEntry,
@@ -20,7 +21,6 @@ type Draft = { name: string; build: string; label: string; modelPath: string; ct
 const emptyDraft: Draft = { name: '', build: '', label: '', modelPath: '', ctx: '', ngl: '', port: '', fa: false, temp: '' };
 
 function n(value: string): number | undefined { const parsed = Number(value); return value === '' || Number.isNaN(parsed) ? undefined : parsed; }
-function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function basename(path: string): string { return path.split('/').pop() || path; }
 function modelLabel(preset: Preset): string {
     return basename(preset.config.modelPath || preset.config.model || '');
@@ -85,7 +85,7 @@ export default function PresetsPanel() {
             setActive(data.active ?? null);
             setLoadError('');
         } catch (error) {
-            setLoadError(message(error));
+            setLoadError(getErrorMessage(error));
         }
     };
 
@@ -102,7 +102,7 @@ export default function PresetsPanel() {
                 setActive(presetData.active ?? null);
                 setBuilds(buildData.builds || []);
             } catch (error) {
-                if (!dead) setLoadError(message(error));
+                if (!dead) setLoadError(getErrorMessage(error));
             }
         })();
         return () => { dead = true; };
@@ -113,7 +113,7 @@ export default function PresetsPanel() {
             setStatus(await api<UnitStatus>('/api/unit/status'));
             setUnitError('');
         } catch (error) {
-            setUnitError(message(error));
+            setUnitError(getErrorMessage(error));
         }
     };
 
@@ -143,7 +143,7 @@ export default function PresetsPanel() {
             setWarnings(result.warnings || []);
             await refresh();
         } catch (error) {
-            setFormError(message(error));
+            setFormError(getErrorMessage(error));
         } finally {
             setSaving(false);
         }
@@ -155,7 +155,7 @@ export default function PresetsPanel() {
             await api<{ ok: boolean; active: string }>('/api/presets/' + encodeURIComponent(name) + '/activate', { method: 'POST', body: '{}' });
             await refresh();
         } catch (error) {
-            setActionError(message(error));
+            setActionError(getErrorMessage(error));
         }
     };
 
@@ -166,7 +166,7 @@ export default function PresetsPanel() {
             await api<{ ok: boolean }>('/api/presets/' + encodeURIComponent(name), { method: 'DELETE' });
             await refresh();
         } catch (error) {
-            setActionError(message(error));
+            setActionError(getErrorMessage(error));
         }
     };
 
@@ -178,7 +178,7 @@ export default function PresetsPanel() {
             if (result.error) setActionError(result.error);
             await refreshStatus();
         } catch (error) {
-            setApplyResult({ ok: false, warnings: [], error: message(error) });
+            setApplyResult({ ok: false, warnings: [], error: getErrorMessage(error) });
         } finally {
             setApplying(false);
         }
@@ -190,7 +190,7 @@ export default function PresetsPanel() {
             const result = await api<UnitOpResponse>('/api/unit/' + op, { method: 'POST', body: '{}' });
             if (!result.ok) setUnitError(result.output);
         } catch (error) {
-            setUnitError(message(error));
+            setUnitError(getErrorMessage(error));
         } finally {
             setUnitBusy(false);
             await refreshStatus();
@@ -203,7 +203,7 @@ export default function PresetsPanel() {
             const result = await api<{ logs: string }>('/api/unit/logs?lines=200');
             setLogs(result.logs || 'No logs returned.');
         } catch (error) {
-            setLogs('Failed to fetch logs: ' + message(error));
+            setLogs('Failed to fetch logs: ' + getErrorMessage(error));
         } finally {
             setLogsBusy(false);
         }

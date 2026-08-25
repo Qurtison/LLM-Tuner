@@ -1,6 +1,8 @@
 import { marked } from 'marked';
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
+import { getChatErrorMessage } from '../../api/errors';
+import { sanitizeMarkdownHtml } from '../../lib/sanitize';
 import { onSseLine, useServer } from '../../state/server';
 
 type Role = 'user' | 'assistant';
@@ -11,19 +13,6 @@ type Slot = { state?: number; n_ctx?: number; n_prompt_tokens?: number; next_tok
 const HISTORY_KEY = 'cluster_chat_history';
 const MSG_COLLAPSE_HEIGHT = 320;
 
-function sanitizeMarkdownHtml(html: string): string {
-    if (typeof DOMParser === 'undefined') return '';
-    const document = new DOMParser().parseFromString(html, 'text/html');
-    for (const element of document.querySelectorAll('script, style, iframe, object, embed, link, meta, base, form')) element.remove();
-    for (const element of document.querySelectorAll('*')) {
-        for (const attribute of [...element.attributes]) {
-            const name = attribute.name.toLowerCase();
-            const value = attribute.value.trim().toLowerCase();
-            if (name.startsWith('on') || name === 'srcdoc' || ((name === 'href' || name === 'src' || name === 'xlink:href') && /^(javascript|data:text\/html|vbscript):/.test(value))) element.removeAttribute(attribute.name);
-        }
-    }
-    return document.body.innerHTML;
-}
 function messageKey(message: Message, index: number): string { return message.timestamp + '-' + index; }
 function duration(message: Message): string | null {
     if (!message.startedAt || !message.finishedAt) return null;
@@ -49,11 +38,7 @@ function saveSessions(sessions: Session[]): string | null {
     try { window.localStorage.setItem(HISTORY_KEY, JSON.stringify(sessions)); return null; }
     catch { return 'Chat history could not be saved.'; }
 }
-function errorText(error: unknown): string {
-    if (error instanceof ApiError) return error.status === 502 ? 'Model not launched. Start model, then retry.' : error.message || 'Request failed.';
-    if (error instanceof DOMException && error.name === 'AbortError') return 'Generation stopped.';
-    return error instanceof Error ? error.message : 'Request failed.';
-}
+const errorText = getChatErrorMessage;
 function parseSse(buffer: string, onData: (value: unknown) => void): string {
     const lines = buffer.split(/\r?\n/);
     const rest = lines.pop() ?? '';

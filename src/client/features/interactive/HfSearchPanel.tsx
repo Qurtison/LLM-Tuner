@@ -1,37 +1,13 @@
-import { marked } from 'marked';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { useServer } from '../../state/server';
 import { pickHfModel } from './HfModelPick';
+import { MarkdownMessage } from '../../lib/markdown';
+export { sanitizeMarkdownHtml } from '../../lib/sanitize';
+export { MarkdownMessage, ReasoningDisclosure } from '../../lib/markdown';
 
 type HfModel = { id: string; downloads?: number; likes?: number; lastModified?: string };
 type HfError = { error: string };
-
-// Removes executable elements, event handlers, unsafe URLs, and srcdoc. Marked output
-// remains structural HTML only; extend allowlist if richer README HTML becomes required.
-export function sanitizeMarkdownHtml(html: string): string {
-    if (typeof DOMParser === 'undefined') return '';
-    const document = new DOMParser().parseFromString(html, 'text/html');
-    for (const element of document.querySelectorAll('script, style, iframe, object, embed, link, meta, base, form')) element.remove();
-    for (const element of document.querySelectorAll('*')) {
-        for (const attribute of [...element.attributes]) {
-            const name = attribute.name.toLowerCase();
-            const value = attribute.value.trim().toLowerCase();
-            if (name.startsWith('on') || name === 'srcdoc' || ((name === 'href' || name === 'src' || name === 'xlink:href') && /^(javascript|data:text\/html|vbscript):/.test(value))) element.removeAttribute(attribute.name);
-        }
-    }
-    return document.body.innerHTML;
-}
-
-export function MarkdownMessage({ markdown }: { markdown: string }) {
-    const html = sanitizeMarkdownHtml(marked.parse(markdown) as string);
-    return <div className="markdown-body prose prose-invert max-w-none break-words text-sm" dangerouslySetInnerHTML={{ __html: html }} />;
-}
-
-export function ReasoningDisclosure({ children }: { children: React.ReactNode }) {
-    const [open, setOpen] = useState(false);
-    return <div className="rounded border border-neutral-700 bg-neutral-900"><button type="button" className="w-full px-3 py-2 text-left text-xs text-neutral-300" aria-expanded={open} onClick={() => setOpen(!open)}>Reasoning {open ? '▲' : '▼'}</button>{open && <div className="p-3 text-sm text-neutral-300">{children}</div>}</div>;
-}
 
 function number(value: number | undefined): string { return typeof value === 'number' ? value.toLocaleString() : '—'; }
 function modified(value: string | undefined): string { return value ? new Date(value).toLocaleDateString() : '—'; }
