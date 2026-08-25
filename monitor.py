@@ -3,6 +3,7 @@ import http.server
 import socketserver
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -28,6 +29,33 @@ def _reap_children(signum, frame):
         pass
 
 signal.signal(signal.SIGCHLD, _reap_children)
+
+def find_amdgpu_top():
+    """Resolve the amdgpu_top binary even when it isn't on PATH.
+
+    The dashboard runs under a systemd user unit whose default PATH is just
+    /usr/local/bin:/usr/bin:/bin -- ~/.local/bin is only added by interactive
+    shell profile files, and amdgpu_top was installed there (user-local
+    install). A bare 'amdgpu_top' spawn under the service therefore raised
+    FileNotFoundError, get_amd_stats() returned its Offline/amdgpu_top_error
+    placeholder, and the frontend hid the AMD card entirely. Try PATH first
+    (covers dev runs and system-wide installs), then the common per-user and
+    global locations. Returns an absolute path, or None if nowhere found."""
+    found = shutil.which('amdgpu_top')
+    if found:
+        return found
+    for candidate in (
+        os.path.expanduser('~/.local/bin/amdgpu_top'),
+        '/usr/local/bin/amdgpu_top',
+        '/usr/bin/amdgpu_top',
+        '/bin/amdgpu_top',
+    ):
+        try:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+    return None
 
 def read_amdgpu_hwmon():
     """Find the sysfs hwmon dir for the AMD GPU (name == 'amdgpu') and read power
@@ -319,9 +347,14 @@ class HardwareMonitorHandler(http.server.SimpleHTTPRequestHandler):
         """
         device = None
         proc = None
+        amd_top = find_amdgpu_top()
         try:
+            # Same salvage path as any other amdgpu_top failure below: the
+            # Offline placeholder dict at the end of this function.
+            if amd_top is None:
+                raise FileNotFoundError("amdgpu_top not found on PATH or in ~/.local/bin")
             proc = subprocess.Popen(
-                ["amdgpu_top", "-J", "-s", "150", "-n", "1"],
+                [amd_top, "-J", "-s", "150", "-n", "1"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
             )
             # ~0.2s measured live and consistent across 4 runs with -n 1 (see
