@@ -403,6 +403,7 @@ export const ROUTES: Record<string, 'GET' | 'POST'> = {
     '/api/worker/status': 'POST',
     '/api/worker/logs': 'POST',
     '/api/master/logs': 'GET',
+    '/api/master/logs/stream': 'GET',
     '/api/telemetry/rate': 'POST',
     '/api/telemetry/latest': 'GET'
 };

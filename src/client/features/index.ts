@@ -7,6 +7,7 @@ export { default as WorkerPanel } from './interactive/WorkerPanel';
 export { default as HfSearchPanel } from './interactive/HfSearchPanel';
 export { default as MonitorPanel } from './monitor/MonitorPanel';
 export { default as LiveRequestsPanel } from './monitor/LiveRequestsPanel';
+export { default as LogsPanel } from './logs/LogsPanel';
 export { default as FileBrowserPanel } from './files/FileBrowserPanel';
 export { default as OverviewPanel } from './overview/OverviewPanel';
 export { default as HistoryPanel } from './history/HistoryPanel';

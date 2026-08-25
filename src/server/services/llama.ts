@@ -46,6 +46,7 @@ export class LlamaService {
     private onActivity?: () => void;
     private proc: Bun.Subprocess | null = null;
     private logBuffer: string[] = [];
+    private lineListeners = new Set<(line: string) => void>();
     private progress: LiveProgress = {};
     private takeSamples?: () => unknown[];
     private logCompletedRequest?: LlamaOptions['logCompletedRequest'];
@@ -71,6 +72,14 @@ export class LlamaService {
 
     get logs(): readonly string[] {
         return this.logBuffer;
+    }
+
+    // Subscribe to every raw llama-server line (same strings that land in
+    // logs()). Powers the SSE log-follow stream (/api/master/logs/stream);
+    // returns an unsubscribe function.
+    onLine(listener: (line: string) => void): () => void {
+        this.lineListeners.add(listener);
+        return () => { this.lineListeners.delete(listener); };
     }
 
     get liveProgress(): Readonly<LiveProgress> {
@@ -297,6 +306,11 @@ export class LlamaService {
         if (!line.length) return;
         this.logBuffer.push(line);
         if (this.logBuffer.length > MASTER_LOG_BUFFER_SIZE) this.logBuffer.shift();
+        // Fan out to live subscribers after the ring is updated so a
+        // subscriber reading logs() never sees a line before pushLog saw it.
+        for (const listener of this.lineListeners) {
+            try { listener(line); } catch { /* one broken subscriber must not kill log capture */ }
+        }
     }
 
     private reset(): void {

@@ -158,6 +158,29 @@ const routeCtx: RouteCtx = {
 // --- MONITOR (managed child; telemetry is best-effort, never fatal) ---
 let monitor: Bun.Subprocess | null = null;
 
+// Drain a child stream line-by-line into the server log. Piping without
+// draining would re-create the original 'ignore' problem (an unread 64KB+
+// pipe blocks the child and stalls its /stats endpoint); draining keeps the
+// child unblocked AND makes its output visible -- before this, monitor.py
+// startup failures (missing module, EADDRINUSE on the telemetry port from an
+// orphaned copy) vanished completely and telemetry died silently.
+async function drainChildStream(stream: ReadableStream<Uint8Array> | number | undefined | null, log: (line: string) => void): Promise<void> {
+    // Spawned with stdout/stderr 'pipe'; the wider parameter type only
+    // reflects Bun's other stdio options ('ignore'/'inherit').
+    if (!(stream instanceof ReadableStream)) return;
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+        for await (const chunk of stream) {
+            buffer += decoder.decode(chunk, { stream: true });
+            const lines = buffer.split(/\r\n|\r|\n/);
+            buffer = lines.pop() || '';
+            for (const line of lines) log(line);
+        }
+        if (buffer.trim()) log(buffer);
+    } catch { /* stream torn down with the child */ }
+}
+
 async function spawnMonitor(): Promise<void> {
     if (!config.telemetry.enabled) return;
     const monitorExists = await fs.access(config.paths.monitorScript).then(() => true).catch(() => false);
@@ -166,10 +189,16 @@ async function spawnMonitor(): Promise<void> {
         return;
     }
     try {
-        // stdio ignored: an unread 64KB+ of warnings would block the child
-        // and stall its /stats endpoint (frozen behavior + rationale).
-        monitor = Bun.spawn([config.paths.pythonCommand, config.paths.monitorScript], { cwd: APP_ROOT, stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' });
-        monitor.exited.catch(() => { /* python missing etc. -- best-effort */ });
+        monitor = Bun.spawn([config.paths.pythonCommand, config.paths.monitorScript], { cwd: APP_ROOT, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
+        void drainChildStream(monitor.stdout, line => console.log('[monitor]', line));
+        void drainChildStream(monitor.stderr, line => console.error('[monitor]', line));
+        monitor.exited.then(code => {
+            if (code !== 0 && code !== null) {
+                // Non-zero exit = telemetry is down until we restart; say so
+                // loudly instead of leaving /api/telemetry/* quietly empty.
+                console.error(`[monitor] exited with code ${code} -- telemetry unavailable until this server restarts`);
+            }
+        }).catch(() => { /* best-effort */ });
     } catch (err) {
         console.error('monitor spawn error:', (err as Error).message);
         monitor = null;

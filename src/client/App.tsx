@@ -18,6 +18,7 @@ import {
     FileBrowserPanel,
     PresetsPanel,
     UpgradePanel,
+    LogsPanel,
 } from './features';
 
 type Side = 'left' | 'center' | 'right';
@@ -49,7 +50,7 @@ function swapWithCenter(slots: Slots, side: 'left' | 'right'): Slots {
 
 function ViewContent({ view }: { view: View }) {
     if (view === 'model') return <><InteractivePanel /><ChatPanel /></>;
-    if (view === 'monitor') return <><OverviewPanel /><PresetsPanel /><UpgradePanel /><MonitorPanel /><LiveRequestsPanel /><FileBrowserPanel /></>;
+    if (view === 'monitor') return <><OverviewPanel /><PresetsPanel /><UpgradePanel /><MonitorPanel /><LogsPanel /><LiveRequestsPanel /><FileBrowserPanel /></>;
     return <><BenchPanel /><HistoryPanel /></>;
 }
 

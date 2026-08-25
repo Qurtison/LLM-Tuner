@@ -148,6 +148,61 @@ describe('server4 route smoke', () => {
         await poll(async () => { try { process.kill(pid, 0); return null; } catch { return true; } }, 5000);
     });
 
+    it('streams master logs live over SSE and backfills the tail', async () => {
+        const body = { modelPath: path.join(server.tempDir, 'models', 'fake.gguf'), build: 'fake', ctx: 4096, ngl: 1 };
+        let contentType = '';
+        // The ring still holds the previous test's transcript, so the connect
+        // backfill replays old lines. Only the SECOND load/model-loaded cycle
+        // belongs to this test's launch -- count cycles, not lines.
+        const received = [];
+        let loadCycles = 0;
+        const liveDone = new Promise((resolve, reject) => {
+            const req = http.request(server.url('/api/master/logs/stream'), response => {
+                contentType = response.headers['content-type'];
+                let buffer = '';
+                response.on('data', chunk => {
+                    buffer += chunk;
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const text = line.slice(6);
+                        received.push(text);
+                        if (text.includes('load_model: loading model')) loadCycles += 1;
+                        if (text.includes('model loaded') && loadCycles >= 2) {
+                            req.destroy();
+                            resolve();
+                        }
+                    }
+                });
+            });
+            req.setTimeout(10000, () => { req.destroy(); reject(new Error('live log stream timeout')); });
+            req.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+            req.end();
+        });
+        expect((await post('/api/start', body)).body).toEqual({ status: 'launching' });
+        await liveDone;
+        expect(contentType).toContain('text/event-stream');
+
+        // A fresh connection replays the ring tail without needing a launch.
+        const tail = await new Promise((resolve, reject) => {
+            const req = http.request(server.url('/api/master/logs/stream?lines=1'), response => {
+                let buffer = '';
+                response.on('data', chunk => {
+                    buffer += chunk;
+                    if (buffer.includes('data: ')) { req.destroy(); resolve(buffer); }
+                });
+            });
+            req.setTimeout(5000, () => { req.destroy(); reject(new Error('log tail timeout')); });
+            req.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+            req.end();
+        });
+        expect(tail).toContain('llama_server: model loaded');
+        expect((await post('/api/stop', {})).body).toEqual({ status: 'stopped' });
+        const pid = Number(fs.readFileSync(path.join(server.tempDir, 'llm.pid'), 'utf8'));
+        await poll(async () => { try { process.kill(pid, 0); return null; } catch { return true; } }, 5000);
+    });
+
     it('parses flags and GPUs only', async () => {
         const flags = await json(server.url('/api/flags'));
         expect(flags.response.status).toBe(200);
