@@ -3,9 +3,10 @@
 // presets/unit actions live in their own panels.
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
+import { useTelemetryLatest } from '../../hooks/useTelemetry';
 import { gpuTitle, stat as gpuStat } from '../../lib/gpu';
 import { useServer } from '../../state/server';
-import type { ServerPathsResponse, TelemetryLatestResponse, UnitStatus } from '../../../../shared/contracts';
+import type { ServerPathsResponse, UnitStatus } from '../../../../shared/contracts';
 
 type GpuStats = Record<string, unknown>;
 
@@ -58,20 +59,14 @@ export default function OverviewPanel() {
     const { progress } = useServer();
     const [paths, setPaths] = useState<ServerPathsResponse | null>(null);
     const [unit, setUnit] = useState<UnitStatus | null>(null);
-    const [latest, setLatest] = useState<TelemetryLatestResponse | null>(null);
-    const [error, setError] = useState('');
+    const { latest } = useTelemetryLatest(5000);
+    const [error] = useState('');
 
     useEffect(() => {
         let alive = true;
         api<ServerPathsResponse>('/api/server-paths').then(result => { if (alive) setPaths(result); }).catch(() => {});
         api<UnitStatus>('/api/unit/status').then(result => { if (alive) setUnit(result); }).catch(() => {});
-        const poll = async () => {
-            try { const result = await api<TelemetryLatestResponse>('/api/telemetry/latest'); if (alive) setLatest(result); }
-            catch { /* telemetry may be off — leave stale/null */ }
-        };
-        void poll();
-        const timer = window.setInterval(poll, 5000);
-        return () => { alive = false; window.clearInterval(timer); };
+        return () => { alive = false; };
     }, []);
 
     const master = latest?.stats && typeof latest.stats.master === 'object' && latest.stats.master !== null ? latest.stats.master as GpuStats : null;

@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Chart from 'chart.js/auto';
 import { api } from '../../api/client';
 import { getErrorMessage } from '../../api/errors';
+import { useTelemetryLatest } from '../../hooks/useTelemetry';
 import { chartOptions, labelsFromPoints, metricSeries } from '../../lib/charts';
 import { gpuLabel, stat, toNumber as number, vramParts } from '../../lib/gpu';
 import { onSseLine, useServer } from '../../state/server';
-import type { CompletionEvent, TelemetryLatestResponse, TelemetryRateResponse } from '../../../../shared/contracts';
+import type { CompletionEvent, TelemetryRateResponse } from '../../../../shared/contracts';
 
 type Stats = Record<string, unknown>;
 type Point = { t: number; master: Stats | null; worker: Stats | null; net: number | null };
@@ -158,11 +159,10 @@ export default function MonitorPanel() {
     const requestCanvas = useRef<HTMLCanvasElement>(null);
     const omniChart = useRef<Chart | null>(null);
     const requestChart = useRef<Chart | null>(null);
-    const inFlight = useRef(false);
-    // Poll effect only re-runs on [rate, failures]; ref keeps latest ring buffer.
     const pointsRef = useRef<Point[]>(points);
     const restoreFocus = useRef<HTMLButtonElement>(null);
 
+    useEffect(() => { pointsRef.current = points; }, [points]);
     useEffect(() => { if (config?.telemetry.pollMs) setRate(config.telemetry.pollMs); }, [config]);
     useEffect(() => onSseLine(line => {
         if (line.startsWith('PREFILL_PROGRESS:') || line.startsWith('GEN_PROGRESS:')) setError('');
@@ -213,32 +213,29 @@ export default function MonitorPanel() {
         chart.update('none');
     }, [selectedCompletion, smooth]);
 
+    const effectiveInterval = Math.min(rate * Math.max(1, 2 ** Math.min(failures, 4)), 16_000);
+    const { latest: telemetry, error: telemetryError } = useTelemetryLatest(effectiveInterval);
     useEffect(() => {
-        let alive = true;
-        const poll = async () => {
-            if (inFlight.current) return;
-            inFlight.current = true;
-            try {
-                const result = await api<TelemetryLatestResponse>('/api/telemetry/latest');
-                if (!alive) return;
-                const stats = result.stats;
-                if (!stats || !stats.master || typeof stats.master !== 'object') { setError('No telemetry data.'); return; }
-                const master = stats.master as Stats;
-                const worker = stats.worker && typeof stats.worker === 'object' && !(stats.worker as Stats).nvidia_smi_error && !(stats.worker as Stats).amdgpu_top_error ? stats.worker as Stats : null;
-                const next = [...pointsRef.current, { t: result.t || Date.now(), master, worker, net: stat(master, 'net_bytes') }].slice(-240);
-                pointsRef.current = next;
-                try { window.localStorage.setItem(POINTS_KEY, JSON.stringify(next)); } catch { /* full or unavailable */ }
-                setPoints(next);
-                setFailures(0); setError('');
-            } catch (cause) {
-                if (!alive) return;
-                setFailures(old => old + 1); setError(getErrorMessage(cause, 'Telemetry request failed.'));
-            } finally { inFlight.current = false; }
-        };
-        void poll();
-        const timer = window.setInterval(() => { void poll(); }, Math.min(rate * Math.max(1, 2 ** Math.min(failures, 4)), 16_000));
-        return () => { alive = false; window.clearInterval(timer); };
-    }, [rate, failures]);
+        if (telemetryError) {
+            setFailures(old => old + 1);
+            setError(telemetryError);
+            return;
+        }
+        if (!telemetry) return;
+        const stats = telemetry.stats;
+        if (!stats || !stats.master || typeof stats.master !== 'object') {
+            setError('No telemetry data.');
+            return;
+        }
+        const master = stats.master as Stats;
+        const worker = stats.worker && typeof stats.worker === 'object' && !(stats.worker as Stats).nvidia_smi_error && !(stats.worker as Stats).amdgpu_top_error ? stats.worker as Stats : null;
+        const next = [...pointsRef.current, { t: telemetry.t || Date.now(), master, worker, net: stat(master, 'net_bytes') }].slice(-240);
+        pointsRef.current = next;
+        try { window.localStorage.setItem(POINTS_KEY, JSON.stringify(next)); } catch { /* full or unavailable */ }
+        setPoints(next);
+        setFailures(0);
+        setError('');
+    }, [telemetry, telemetryError]);
 
     const current = points.at(-1);
     const master = current?.master ?? null;
