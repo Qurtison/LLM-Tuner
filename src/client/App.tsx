@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useSse } from './hooks/useSse';
 import { useServer, applySseFrame, setSseConnected, setServerConfig } from './state/server';
 import { api } from './api/client';
+import { loadJson, saveJson } from './lib/storage';
 import type { ConfigResponse } from '../../shared/contracts';
 import {
     InteractivePanel,
@@ -33,14 +34,12 @@ const TITLES: Record<View, string> = { model: 'Model', bench: 'Bench + History',
 const HOME: Record<View, 'left' | 'center' | 'right'> = { model: 'left', bench: 'center', monitor: 'right' };
 
 function loadSlots(): Slots {
-    try {
-        const raw: unknown = JSON.parse(window.localStorage.getItem('layout_slots') || 'null');
-        if (raw && typeof raw === 'object'
-            && SIDES.every(side => VIEWS.includes((raw as Slots)[side]))
-            && new Set(SIDES.map(side => (raw as Slots)[side])).size === SIDES.length) {
-            return raw as Slots;
-        }
-    } catch { /* storage unavailable or corrupt — use default */ }
+    const raw = loadJson<unknown>('layout_slots', null);
+    if (raw && typeof raw === 'object'
+        && SIDES.every(side => VIEWS.includes((raw as Slots)[side]))
+        && new Set(SIDES.map(side => (raw as Slots)[side])).size === SIDES.length) {
+        return raw as Slots;
+    }
     return DEFAULT_SLOTS;
 }
 
@@ -108,9 +107,7 @@ export default function App() {
     useEffect(() => {
         api<ConfigResponse>('/api/config').then(setServerConfig).catch(() => {});
     }, []);
-    useEffect(() => {
-        try { window.localStorage.setItem('layout_slots', JSON.stringify(slots)); } catch { /* storage unavailable */ }
-    }, [slots]);
+    useEffect(() => { saveJson('layout_slots', slots); }, [slots]);
 
     const expandSide = (side: 'left' | 'right') => setSlots(old => swapWithCenter(old, side));
     const collapseCenter = () => setSlots(old => swapWithCenter(old, HOME[old.center] === 'right' ? 'right' : 'left'));

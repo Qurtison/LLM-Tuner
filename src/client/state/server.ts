@@ -6,6 +6,7 @@
 // script.js singleton globals (eventSource/lastSseAt/lastKnownServerState
 // etc. — see docs/p5-slices.md, cross-slice globals table).
 import { useSyncExternalStore } from 'react';
+import { loadJson, saveJson } from '../lib/storage';
 import type { ConfigResponse, SseStatePayload, CompletionEvent } from '../../../shared/contracts';
 import { SseLogPrefixes } from '../../../shared/contracts';
 
@@ -51,13 +52,11 @@ export interface ServerSnapshot {
 // BroadcastChannel or a server round-trip.
 const COMPLETIONS_KEY = 'server_completions';
 function loadCompletions(): CompletionEvent[] {
-    try {
-        const value: unknown = JSON.parse(window.localStorage.getItem(COMPLETIONS_KEY) || '[]');
-        return Array.isArray(value) ? value as CompletionEvent[] : [];
-    } catch { return []; }
+    const value = loadJson<unknown>(COMPLETIONS_KEY, []);
+    return Array.isArray(value) ? value as CompletionEvent[] : [];
 }
 function saveCompletions(completions: CompletionEvent[]): void {
-    try { window.localStorage.setItem(COMPLETIONS_KEY, JSON.stringify(completions)); } catch { /* full or unavailable */ }
+    saveJson(COMPLETIONS_KEY, completions);
 }
 
 const snapshot = new Value<ServerSnapshot>({

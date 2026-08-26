@@ -2,10 +2,9 @@ import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { getErrorMessage } from '../../api/errors';
 import { fieldClass } from '../../components/Field';
+import { useBuilds } from '../../hooks/useBuilds';
 import type {
     ApplyResult,
-    BuildEntry,
-    BuildsResponse,
     Preset,
     PresetsResponse,
     PresetSaveRequest,
@@ -57,7 +56,7 @@ function draftToRequest(draft: Draft): PresetSaveRequest {
 export default function PresetsPanel() {
     const [presets, setPresets] = useState<Preset[]>([]);
     const [active, setActive] = useState<string | null>(null);
-    const [builds, setBuilds] = useState<BuildEntry[]>([]);
+    const { builds, error: buildsError } = useBuilds();
     const [loadError, setLoadError] = useState('');
     const [actionError, setActionError] = useState('');
     const [saving, setSaving] = useState(false);
@@ -93,20 +92,17 @@ export default function PresetsPanel() {
         let dead = false;
         void (async () => {
             try {
-                const [presetData, buildData] = await Promise.all([
-                    api<PresetsResponse>('/api/presets'),
-                    api<BuildsResponse>('/api/builds'),
-                ]);
+                const presetData = await api<PresetsResponse>('/api/presets');
                 if (dead) return;
                 setPresets(presetData.presets || []);
                 setActive(presetData.active ?? null);
-                setBuilds(buildData.builds || []);
             } catch (error) {
                 if (!dead) setLoadError(getErrorMessage(error));
             }
         })();
         return () => { dead = true; };
     }, []);
+    useEffect(() => { if (buildsError) setLoadError(buildsError); }, [buildsError]);
 
     const refreshStatus = async () => {
         try {

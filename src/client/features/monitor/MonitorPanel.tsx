@@ -4,7 +4,9 @@ import { api } from '../../api/client';
 import { getErrorMessage } from '../../api/errors';
 import { useTelemetryLatest } from '../../hooks/useTelemetry';
 import { chartOptions, labelsFromPoints, metricSeries } from '../../lib/charts';
+import { fmtWithUnit } from '../../lib/format';
 import { gpuLabel, stat, toNumber as number, vramParts } from '../../lib/gpu';
+import { loadJson, saveJson } from '../../lib/storage';
 import { onSseLine, useServer } from '../../state/server';
 import type { CompletionEvent, TelemetryRateResponse } from '../../../../shared/contracts';
 
@@ -42,7 +44,6 @@ const DEFAULT_BLOCK_ORDER = ['header', 'context', 'thermal', 'power', 'vram', ..
 const throttleLabels: Record<string, string> = { hw_thermal_slowdown: 'HW Thermal', sw_thermal_slowdown: 'SW Thermal', sw_power_cap: 'SW Power Cap', hw_power_brake_slowdown: 'HW Power Brake' };
 const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
 
-function text(value: number | null, unit: string): string { return value === null ? '--' + unit : value.toFixed(unit === '%' ? 0 : 1) + unit; }
 const labels = labelsFromPoints;
 function series(points: Point[], from: 'master' | 'worker', key: string): (number | null)[] { return points.map(point => stat(point[from], key)); }
 // Machine-level stats a worker shares with main when it runs on the same host
@@ -86,7 +87,7 @@ function MiniChart({ metric, points, smooth, master, worker, net, masterLabel, w
     const lastTps = tpsPoints.length > 0 ? tpsPoints[tpsPoints.length - 1] : null;
     const value = isTps ? (lastTps ? (metric.key === 'gen_tps' ? lastTps.genTps : lastTps.prefillTps) : null) : metric.key === 'net' ? net : stat(master, metric.key);
     const workerValue = metric.key === 'net' || isTps || (SHARED_KEYS.has(metric.key) && worker?.same_host === true) ? null : stat(worker, metric.key);
-    return <div className="rounded border border-neutral-800 bg-neutral-900 p-2"><div className="mb-1 flex items-baseline justify-between"><p className="text-xs text-neutral-400">{drag ? <DragTitle text={metric.title} {...drag} /> : metric.title}</p><p className="font-mono text-sm text-yellow-300" title={isTps ? undefined : `${masterLabel}${workerValue !== null ? ' / ' + workerLabel : ''}`}>{text(value, metric.unit)}{workerValue !== null && <span className="text-red-300"> / {text(workerValue, metric.unit)}</span>}</p></div><div className="h-24"><canvas ref={canvas} /></div></div>;
+    return <div className="rounded border border-neutral-800 bg-neutral-900 p-2"><div className="mb-1 flex items-baseline justify-between"><p className="text-xs text-neutral-400">{drag ? <DragTitle text={metric.title} {...drag} /> : metric.title}</p><p className="font-mono text-sm text-yellow-300" title={isTps ? undefined : `${masterLabel}${workerValue !== null ? ' / ' + workerLabel : ''}`}>{fmtWithUnit(value, metric.unit.trim())}{workerValue !== null && <span className="text-red-300"> / {fmtWithUnit(workerValue, metric.unit.trim())}</span>}</p></div><div className="h-24"><canvas ref={canvas} /></div></div>;
 }
 
 export default function MonitorPanel() {
@@ -94,10 +95,8 @@ export default function MonitorPanel() {
     // ponytail: points restored from localStorage so a refresh keeps the
     // telemetry history; full backfill would need a server-side ring buffer.
     const [points, setPoints] = useState<Point[]>(() => {
-        try {
-            const value: unknown = JSON.parse(window.localStorage.getItem(POINTS_KEY) || '[]');
-            return Array.isArray(value) ? value as Point[] : [];
-        } catch { return []; }
+        const value = loadJson<unknown>(POINTS_KEY, []);
+        return Array.isArray(value) ? value as Point[] : [];
     });
     const [rate, setRate] = useState(1000);
     const [error, setError] = useState('');
@@ -231,7 +230,7 @@ export default function MonitorPanel() {
         const worker = stats.worker && typeof stats.worker === 'object' && !(stats.worker as Stats).nvidia_smi_error && !(stats.worker as Stats).amdgpu_top_error ? stats.worker as Stats : null;
         const next = [...pointsRef.current, { t: telemetry.t || Date.now(), master, worker, net: stat(master, 'net_bytes') }].slice(-240);
         pointsRef.current = next;
-        try { window.localStorage.setItem(POINTS_KEY, JSON.stringify(next)); } catch { /* full or unavailable */ }
+        saveJson(POINTS_KEY, next);
         setPoints(next);
         setFailures(0);
         setError('');
@@ -273,7 +272,7 @@ export default function MonitorPanel() {
             case 'power':
                 return <div className={'rounded border p-3 ' + (powerActive ? 'animate-pulse border-yellow-500/50 bg-yellow-900/20' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400"><DragTitle text="Power throttle" {...handle()} /></p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => !thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-yellow-600/50 bg-yellow-900/30 text-yellow-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div>;
             case 'vram':
-                return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><h3 className="mb-2 text-sm text-neutral-200"><DragTitle text="VRAM breakdown" {...handle()} /></h3><div className="space-y-3">{vram.map(({ label, parts, color }) => <div key={label}><div className="mb-1 flex justify-between text-xs"><span className="text-neutral-400">{label}</span><span className="font-mono text-neutral-300">{parts.used === null ? 'unknown' : text(parts.used, ' MiB')} used{parts.free === null ? '' : ' · ' + text(parts.free, ' MiB') + ' free'}</span></div><div className="flex h-3 overflow-hidden rounded bg-neutral-800">{parts.total !== null && parts.used !== null && <div className={color} style={{ width: Math.min(parts.used / parts.total * 100, 100) + '%' }} />}{parts.total !== null && parts.free !== null && <div className="bg-neutral-600" style={{ width: Math.min(parts.free / parts.total * 100, 100) + '%' }} />}</div></div>)}</div></div>;
+                return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><h3 className="mb-2 text-sm text-neutral-200"><DragTitle text="VRAM breakdown" {...handle()} /></h3><div className="space-y-3">{vram.map(({ label, parts, color }) => <div key={label}><div className="mb-1 flex justify-between text-xs"><span className="text-neutral-400">{label}</span><span className="font-mono text-neutral-300">{parts.used === null ? 'unknown' : fmtWithUnit(parts.used, 'MiB')} used{parts.free === null ? '' : ' · ' + fmtWithUnit(parts.free, 'MiB') + ' free'}</span></div><div className="flex h-3 overflow-hidden rounded bg-neutral-800">{parts.total !== null && parts.used !== null && <div className={color} style={{ width: Math.min(parts.used / parts.total * 100, 100) + '%' }} />}{parts.total !== null && parts.free !== null && <div className="bg-neutral-600" style={{ width: Math.min(parts.free / parts.total * 100, 100) + '%' }} />}</div></div>)}</div></div>;
             case 'omni':
                 return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex items-center"><div><h3 className="text-sm text-neutral-200"><DragTitle text="Live hardware" {...handle()} /></h3><p className="text-xs text-neutral-500">Missing values remain gaps.</p></div><button ref={restoreFocus} type="button" onClick={() => setExpanded(true)} className="ml-auto rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700" aria-label="Expand live hardware chart">Expand</button></div><div className="h-64"><canvas ref={omniCanvas} /></div></div>;
             case 'requests':

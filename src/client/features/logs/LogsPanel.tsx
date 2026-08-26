@@ -3,13 +3,13 @@
 // tail-and-follow shape as the old dashboard's journal pane, pointed at our
 // in-memory capture instead of journald. Auto-reconnects with a fresh tail so
 // a dashboard restart never leaves the pane dead.
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEventSource } from '../../hooks/useEventSource';
 
 const MAX_LINES = 1000;
 
 export default function LogsPanel() {
     const [lines, setLines] = useState<string[]>([]);
-    const [live, setLive] = useState(false);
     const [paused, setPaused] = useState(false);
     const pausedRef = useRef(paused);
     const boxRef = useRef<HTMLPreElement>(null);
@@ -17,29 +17,11 @@ export default function LogsPanel() {
 
     useEffect(() => { pausedRef.current = paused; }, [paused]);
 
-    useEffect(() => {
-        let source: EventSource | null = null;
-        let retry: number | undefined;
-        const connect = () => {
-            setLines([]);
-            source = new EventSource('/api/master/logs/stream?lines=300');
-            source.onopen = () => setLive(true);
-            source.onmessage = event => {
-                // Pause drops lines rather than buffering them: the point is
-                // reading a stable window, not replaying a flood afterwards.
-                if (pausedRef.current || !event.data) return;
-                setLines(old => [...old, event.data as string].slice(-MAX_LINES));
-            };
-            source.onerror = () => {
-                setLive(false);
-                source?.close();
-                source = null;
-                retry = window.setTimeout(connect, 3000);
-            };
-        };
-        connect();
-        return () => { if (retry) window.clearTimeout(retry); source?.close(); };
+    const onMessage = useCallback((data: string) => {
+        if (pausedRef.current || !data) return;
+        setLines(old => [...old, data].slice(-MAX_LINES));
     }, []);
+    const { live } = useEventSource('/api/master/logs/stream?lines=300', onMessage);
 
     useEffect(() => {
         const box = boxRef.current;

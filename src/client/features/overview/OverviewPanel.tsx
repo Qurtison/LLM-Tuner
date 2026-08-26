@@ -4,15 +4,12 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { useTelemetryLatest } from '../../hooks/useTelemetry';
+import { fmtWithUnit } from '../../lib/format';
 import { gpuTitle, stat as gpuStat } from '../../lib/gpu';
 import { useServer } from '../../state/server';
 import type { ServerPathsResponse, UnitStatus } from '../../../../shared/contracts';
 
 type GpuStats = Record<string, unknown>;
-
-function text(value: number | null, suffix: string): string { return value === null ? '—' + suffix : value.toFixed(suffix === '%' ? 0 : 1) + suffix; }
-// Telemetry values are in KiB units (monitor.py); keep the raw figure.
-function vramText(value: number | null): string { return value === null ? '—' : value.toFixed(0) + ' MiB'; }
 
 function Stat({ label, value }: { label: string; value: string }) {
     return <div className="flex items-baseline justify-between gap-2 text-xs"><span className="text-neutral-500">{label}</span><span className="truncate font-mono text-neutral-300">{value}</span></div>;
@@ -38,14 +35,14 @@ function GpuCard({ title, stats, isWorker }: { title: string; stats: GpuStats | 
             </div>
             {!stats ? <p className="text-xs text-neutral-600">No data</p> : (
                 <div className="space-y-2">
-                    <Stat label="Temp" value={text(temp, ' °C')} />
+                    <Stat label="Temp" value={fmtWithUnit(temp, '°C')} />
                     <div>
-                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">Util</span><span className="font-mono text-neutral-300">{text(util, '%')}</span></div>
+                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">Util</span><span className="font-mono text-neutral-300">{fmtWithUnit(util, '%')}</span></div>
                         <Bar pct={util ?? 0} />
                     </div>
-                    <Stat label="Power" value={text(pwr, ' W')} />
+                    <Stat label="Power" value={fmtWithUnit(pwr, 'W')} />
                     <div>
-                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">VRAM</span><span className="font-mono text-neutral-300">{vramText(used)} / {vramText(total)}</span></div>
+                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">VRAM</span><span className="font-mono text-neutral-300">{fmtWithUnit(used, 'MiB', 0)} / {fmtWithUnit(total, 'MiB', 0)}</span></div>
                         {vramPct !== null && <Bar pct={vramPct} />}
                     </div>
                     {reasons.length > 0 && <p className="text-[10px] text-amber-400">Throttling: {reasons.join(', ')}</p>}

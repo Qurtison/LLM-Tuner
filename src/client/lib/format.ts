@@ -6,9 +6,11 @@ export function fmt(value: number | null | undefined, digits = 1): string {
 }
 
 export function fmtWithUnit(value: number | null | undefined, unit: string, digits?: number): string {
-    if (value == null || !Number.isFinite(value)) return DASH + (unit ? ' ' + unit : '');
-    const d = digits ?? (unit === '%' ? 0 : 1);
-    return value.toFixed(d) + (unit ? ' ' + unit : '');
+    const suffix = unit.trim();
+    if (value == null || !Number.isFinite(value)) return suffix ? DASH + (suffix === '%' ? suffix : ' ' + suffix) : DASH;
+    const d = digits ?? (suffix === '%' ? 0 : suffix === 'MiB' ? 0 : 1);
+    if (!suffix) return value.toFixed(d);
+    return suffix === '%' ? value.toFixed(d) + '%' : value.toFixed(d) + ' ' + suffix;
 }
 
 // Draft column formatter used by LiveRequestsPanel / HistoryPanel
