@@ -71,6 +71,12 @@ function broadcast(log = '', error = '') {
     if (dead.length) clients = clients.filter(c => !dead.includes(c));
 }
 
+// Keepalive: without frames the client's 45s staleness watchdog (frozen
+// legacy behavior) would tear down a healthy idle connection. A periodic
+// state frame keeps lastSseAt fresh; deviation from the frozen frame
+// sequence (same payload shape, log: '') — see docs/migration-notes.md.
+setInterval(() => { if (clients.length) broadcast(); }, 30_000);
+
 // --- REQUEST BODY WITH FROZEN SIZE GUARD ---
 async function readBody(req: Request): Promise<string> {
     if (!req.body) return '';
@@ -408,6 +414,10 @@ await init();
 Bun.serve({
     hostname: config.server.host,
     port: config.server.port,
+    // SSE connections are long-lived; Bun's default 10s idle timeout
+    // would kill any quiet stream and force the client into a reconnect
+    // loop. Dead clients are reaped by the keepalive broadcast instead.
+    idleTimeout: 0,
     fetch: handleRequest,
     error: (err) => {
         console.error('Bun.serve error:', err);
