@@ -15,7 +15,10 @@ import type { LaunchConfig, Preset, PresetsResponse, PresetSaveRequest } from '.
 import { configWithOverrides, overridesFromConfig, paramForField } from '../features/presets/registry';
 
 const ACTIVE_KEY = 'presets_active';
-const DRAFT_KEY = 'presets_draft';
+// ponytail: no localStorage draft persistence — the server-saved preset is
+// the source of truth on load; unsaved edits live in memory for the session
+// only. Re-add a draft key (tagged with the preset name) if cross-reload
+// draft recovery is ever wanted.
 
 export interface PresetsSnapshot {
     presets: Preset[];
@@ -83,6 +86,11 @@ class PresetsStore {
             const activeName = data.active ?? loadJson<string | null>(ACTIVE_KEY, null);
             const active = activeFrom(presets, activeName);
             this.value.set({ ...this.value.get(), presets, active, loading: false, error: '' });
+            // Sync the draft to the saved preset unless the user has unsaved
+            // edits — a stale localStorage draft must not shadow the server.
+            if (!this.value.get().isDirty) {
+                this.value.set({ ...this.value.get(), draft: active ? { ...active.config } : defaultDraft(), isDirty: false });
+            }
         } catch (err) {
             this.value.set({ ...this.value.get(), loading: false, error: getErrorMessage(err) });
         }
@@ -92,7 +100,6 @@ class PresetsStore {
         const next = activeFrom(this.value.get().presets, name);
         if (name) saveJson(ACTIVE_KEY, name); else removeJson(ACTIVE_KEY);
         this.value.set({ ...this.value.get(), active: next, draft: next ? { ...next.config } : defaultDraft(), isDirty: false });
-        saveJson(DRAFT_KEY, this.value.get().draft);
         if (name) {
             // Keep the server's active.json in sync (drives /api/apply and
             // activeBuildDir); localStorage alone would drift from it.
@@ -119,14 +126,12 @@ class PresetsStore {
             }
         }
         this.value.set({ ...this.value.get(), draft });
-        saveJson(DRAFT_KEY, draft);
         this.recomputeDirty();
     }
 
     revert(): void {
         const { active } = this.value.get();
         this.value.set({ ...this.value.get(), draft: active ? { ...active.config } : defaultDraft(), isDirty: false });
-        saveJson(DRAFT_KEY, this.value.get().draft);
     }
 
     overrides() {
@@ -178,12 +183,6 @@ class PresetsStore {
             this.value.set({ ...this.value.get(), error: getErrorMessage(err) });
             return false;
         }
-    }
-
-    loadDraftFromStorage(): void {
-        const draft = loadJson<LaunchConfig>(DRAFT_KEY, defaultDraft());
-        this.value.set({ ...this.value.get(), draft });
-        this.recomputeDirty();
     }
 }
 

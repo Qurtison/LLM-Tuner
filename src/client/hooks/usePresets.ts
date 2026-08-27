@@ -25,7 +25,6 @@ export function usePresets(): UsePresets {
     const snapshot: PresetsSnapshot = useSyncExternalStore(presetsStore.subscribe, presetsStore.get, presetsStore.get);
 
     useEffect(() => {
-        presetsStore.loadDraftFromStorage();
         void presetsStore.refresh();
     }, []);
 
