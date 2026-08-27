@@ -95,6 +95,67 @@ function promoteBagToFields(config) {
     return config;
 }
 
+// Flags that llama.cpp accepts multiple times on purpose.
+const REPEATABLE_FLAGS = new Set(['-lora', '--lora', '--lora-scaled', '--header', '-H',
+    // -m never dedupes: raw argString remap depends on the base -m surviving.
+    '-m', '--model']);
+
+// Alias map: every known flag -> its registry param id, so `-sm` and
+// `--split-mode` dedupe to the same slot. Unknown flags dedupe literally.
+let FLAG_TO_PARAM_ID = null;
+function flagToParamId(flag) {
+    if (FLAG_TO_PARAM_ID === null) {
+        FLAG_TO_PARAM_ID = new Map();
+        if (PARAM_BY_ID) {
+            for (const def of Object.values(PARAM_BY_ID)) {
+                if (!Array.isArray(def.flags)) continue;
+                for (const f of def.flags) FLAG_TO_PARAM_ID.set(f, def.id);
+            }
+        }
+    }
+    return FLAG_TO_PARAM_ID.get(flag);
+}
+
+function looksLikeFlag(token) {
+    if (typeof token !== 'string' || !token.startsWith('-') || token === '-') return false;
+    return !/^-\d+(\.\d+)?$/.test(token); // negative numbers are values
+}
+
+// Collapse duplicate flags (incl. short/long aliases of one param): the
+// LAST occurrence wins, matching llama-server arg parsing. Value flags
+// keep their value token; repeatable flags (-lora, --header, ...) keep
+// every occurrence.
+function dedupeFlags(args) {
+    const lastIndexOf = new Map();
+    for (let i = 0; i < args.length; i++) {
+        if (!looksLikeFlag(args[i])) continue;
+        if (REPEATABLE_FLAGS.has(args[i])) continue;
+        const key = flagToParamId(args[i]) ?? args[i];
+        lastIndexOf.set(key, i);
+    }
+    const out = [];
+    let skipValue = false;
+    for (let i = 0; i < args.length; i++) {
+        const token = args[i];
+        if (skipValue) { skipValue = false; continue; } // value of a dropped flag
+        if (!looksLikeFlag(token)) { out.push(token); continue; }
+        if (REPEATABLE_FLAGS.has(token)) {
+            out.push(token);
+            if (i + 1 < args.length && !looksLikeFlag(args[i + 1])) { out.push(args[i + 1]); i += 1; }
+            continue;
+        }
+        const key = flagToParamId(token) ?? token;
+        if (lastIndexOf.get(key) !== i) {
+            // superseded by a later occurrence — swallow its value too
+            if (i + 1 < args.length && !looksLikeFlag(args[i + 1])) skipValue = true;
+            continue;
+        }
+        out.push(token);
+        if (i + 1 < args.length && !looksLikeFlag(args[i + 1])) { out.push(args[i + 1]); i += 1; }
+    }
+    return out;
+}
+
 function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }) {
     config = promoteBagToFields(config);
     // Validate the required knobs up front so a malformed config fails with a
@@ -196,7 +257,7 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }
             }
         }
     }
-    return args;
+    return dedupeFlags(args);
 }
 
 // A build entry is usable only if it carries a non-empty binary path --

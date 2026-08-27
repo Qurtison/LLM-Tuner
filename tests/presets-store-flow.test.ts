@@ -88,6 +88,22 @@ describe('launch.js paramOverrides rendering', () => {
         expect(args).not.toContain('--does-not-exist');
     });
 
+    it('dedupes duplicate/aliased flags, last wins; repeatables survive', async () => {
+        const { buildLlamaArgs } = await import('../src/server/lib/launch.js');
+        const args = buildLlamaArgs({
+            modelPath: '/m', ctx: 4096, ngl: 99, port: 18083,
+            deviceA: 'CUDA0', deviceB: 'Vulkan1',
+            paramOverrides: { split_mode: 'layer', device: ['CUDA0','VULKAN1'], metrics: true, lora: '/a.gguf' },
+        }, { mapModelPath: (p: string) => p, deviceArgs: ['--split-mode', 'layer', '-dev', 'CUDA0,Vulkan1'], defaultPort: 18083 });
+        const count = (t: string) => args.filter(a => a === t).length;
+        expect(count('--metrics')).toBe(1);          // base always adds it; bag toggle must not duplicate
+        expect(count('-dev')).toBe(1);               // deviceArgs vs bag alias — last wins
+        expect(count('-sm')).toBe(1);                // alias of --split-mode
+        expect(count('--split-mode')).toBe(0);       // superseded by later -sm
+        expect(args.filter(a => a === '--lora').length).toBe(1); // repeatable kept
+        expect(args[args.indexOf('-sm') + 1]).toBe('layer');     // value kept with flag
+    });
+
     it('promotes known bag ids (ctx_size/ngl) to fields so strict validation passes', async () => {
         const { resolveLaunchCommand } = await import('../src/server/lib/launch.js');
         const config = {
