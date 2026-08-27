@@ -22,7 +22,8 @@ const { tokenizeCommand } = require('./tokenize');
 let PARAM_BY_ID = null;
 try {
     ({ PARAM_BY_ID } = require('../../../shared/llama-params.ts'));
-} catch {
+} catch (e) {
+    console.error('[launch] param registry load failed:', e && e.message);
     PARAM_BY_ID = null;
 }
 
