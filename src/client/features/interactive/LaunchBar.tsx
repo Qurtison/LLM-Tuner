@@ -1,16 +1,19 @@
 /*
- * LaunchBar: model picker, build selector, GPU A/B + RPC, Preview/Start/Stop.
- * Per-model settings (ctx, ngl, sampling, cacheK/V, spec, reasoning, jinja,
- * ...) are edited only in the PresetDock or the ⌘K preset browser; launch
- * requests compose those over the form fields.
+ * LaunchBar: preset picker, build selector, GPU A/B + RPC, Preview/Start/Stop.
+ * The selected preset owns the model and per-model settings (ctx, ngl,
+ * sampling, cacheK/V, spec, reasoning, jinja, ...); launch requests compose
+ * the preset config over the form fields. Models are chosen inside the
+ * preset (PresetDock modelPath dropdown).
  */
 import HfSearchPanel from './HfSearchPanel';
 import { fieldClass, useLaunchForm } from '../../components/launchForm';
+import { usePresets } from '../../hooks/usePresets';
 import { useServer } from '../../state/server';
 
 export default function LaunchBar() {
     const { state } = useServer();
-    const { form, set, models, builds, devices, actionError, preview, previewBusy, previewCommand, start, stop } = useLaunchForm();
+    const { presets, active, setActive } = usePresets();
+    const { form, set, builds, actionError, preview, previewBusy, previewCommand, start, stop } = useLaunchForm();
     const locked = state?.state !== undefined && state.state !== 'stopped';
     const stopDisabled = state?.state === 'stopped';
     return (
@@ -20,10 +23,11 @@ export default function LaunchBar() {
             </div>
             {actionError && <p role="alert" className="text-xs text-red-400">{actionError}</p>}
             <fieldset disabled={locked} className="space-y-2 disabled:opacity-50">
-                <label className="block text-xs text-neutral-400">Model
-                    <select value={form.modelPath} onChange={e => set('modelPath', e.target.value)} className={fieldClass}>
-                        <option value="">{models.length ? 'Choose model' : 'Loading models…'}</option>
-                        {models.map(m => <option key={m.path} value={m.path}>{m.name} ({m.size} GB){m.source === 'huggingface' ? ' [HF cache]' : ''}</option>)}
+                <label className="block text-xs text-neutral-400">Preset
+                    <select value={active?.name ?? ''} onChange={e => setActive(e.target.value || null)} className={fieldClass}>
+                        {presets.length === 0 && <option value="">No presets — create one in the dock</option>}
+                        {presets.length > 0 && !active && <option value="">Select preset…</option>}
+                        {presets.map(p => <option key={p.name} value={p.name}>{p.name}</option>)}
                     </select>
                 </label>
                 <label className="block text-xs text-neutral-400">Build

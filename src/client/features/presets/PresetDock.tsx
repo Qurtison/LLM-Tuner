@@ -13,9 +13,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePresets } from '../../hooks/usePresets';
+import { useModels } from '../../hooks/useModels';
 import { presetBrowser } from '../../state/presetBrowser';
 import { GROUP_ORDER, type ParamGroup } from '../../../../shared/llama-params';
-import type { LaunchConfig, Preset } from '../../../../shared/contracts';
+import type { LaunchConfig, Preset, ModelEntry } from '../../../../shared/contracts';
+import { ModelSelect } from './ModelSelect';
 import type { OverrideEntry } from './registry';
 
 const GROUP_LABELS: Record<ParamGroup, string> = {
@@ -35,6 +37,8 @@ const GROUP_LABELS: Record<ParamGroup, string> = {
 };
 
 const SCOPE_RESTART_HINT = 'N settings apply on next server start';
+
+const INPUT_CLS = 'w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 focus:border-amber-500 focus:outline-none';
 
 function restartCount(overrides: OverrideEntry[]): number {
     return overrides.reduce((n, o) => n + (o.def.requiresRestart ? 1 : 0), 0);
@@ -82,9 +86,10 @@ interface RowProps {
     onChange: (value: unknown) => void;
     onReset: () => void;
     animating: boolean;
+    models: ModelEntry[];
 }
 
-function OverrideRow({ entry, onChange, onReset, animating }: RowProps) {
+function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) {
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState<string | boolean>(() => toInputValue(entry.field, entry.value, entry.def.control));
     const inputRef = useRef<HTMLInputElement | HTMLSelectElement | null>(null);
@@ -112,9 +117,14 @@ function OverrideRow({ entry, onChange, onReset, animating }: RowProps) {
         else if (event.key === 'Backspace' && !editing) { event.preventDefault(); onReset(); }
     };
 
-    const inputBase = 'w-full rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 focus:border-amber-500 focus:outline-none';
+    const inputBase = INPUT_CLS;
 
     const renderControl = () => {
+        // modelPath gets a real dropdown of scanned models instead of a
+        // free-text path input.
+        if (entry.field === 'modelPath') {
+            return <ModelSelect value={String(draft)} models={models} onChange={p => (p ? onChange(p) : onReset())} />;
+        }
         if (control === 'toggle') {
             return (
                 <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-neutral-200">
@@ -184,13 +194,62 @@ function PresetPill({ preset, active, onSelect }: PillProps) {
     return <button type="button" onClick={onSelect} className={cls}>{preset.name}</button>;
 }
 
+// Mirrors the server's NAME_RE in src/server/services/presets.ts — names
+// become file names there, so validate here before POSTing.
+const NAME_RE = /^[A-Za-z0-9._-]+$/;
+
+function NewPresetDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (name: string) => Promise<string | null> }) {
+    const [name, setName] = useState('');
+    const [error, setError] = useState('');
+    const inputRef = useRef<HTMLInputElement | null>(null);
+
+    useEffect(() => { inputRef.current?.focus(); }, []);
+
+    const submit = async () => {
+        const trimmed = name.trim();
+        if (!trimmed) { setError('Name required.'); return; }
+        if (!NAME_RE.test(trimmed)) { setError('Letters, digits, . _ - only.'); return; }
+        const err = await onCreate(trimmed);
+        if (err) setError(err);
+        else onClose();
+    };
+
+    return (
+        <div role="dialog" aria-modal="true" aria-label="New preset" className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onKeyDown={e => { if (e.key === 'Escape') onClose(); }} onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+            <div className="w-80 rounded-lg border border-neutral-700 bg-neutral-900 p-4 shadow-xl">
+                <h2 className="text-[13px] font-semibold text-neutral-100">New preset</h2>
+                <input
+                    ref={inputRef}
+                    value={name}
+                    onChange={e => { setName(e.target.value); setError(''); }}
+                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); void submit(); } }}
+                    placeholder="my-preset"
+                    className="mt-3 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 font-mono text-xs text-neutral-100 focus:border-amber-500 focus:outline-none"
+                />
+                {error && <p role="alert" className="mt-2 text-[11px] text-red-400">{error}</p>}
+                <div className="mt-4 flex justify-end gap-2">
+                    <button type="button" onClick={onClose} className="rounded px-3 py-1 text-[11px] text-neutral-400 hover:text-neutral-200">Cancel</button>
+                    <button type="button" onClick={() => void submit()} className="rounded bg-amber-500 px-3 py-1 text-[11px] font-semibold text-neutral-950 hover:bg-amber-400">Create</button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function PresetDock() {
     const { presets, active, draft, isDirty, overrides, error, setValue, revert, save, saveAsNew, setActive } = usePresets();
     const [removing, setRemoving] = useState<Set<string>>(new Set());
+    const [creating, setCreating] = useState(false);
+
+    const createPreset = async (name: string): Promise<string | null> => {
+        const result = await saveAsNew(name);
+        return result.ok ? null : (result.error ?? 'Could not create preset.');
+    };
 
     const byGroup = useMemo(() => {
         const m = new Map<ParamGroup, OverrideEntry[]>();
         for (const o of overrides) {
+            if (o.field === 'modelPath') continue; // rendered as its own Model section
             const list = m.get(o.def.group) ?? [];
             list.push(o);
             m.set(o.def.group, list);
@@ -198,9 +257,11 @@ export default function PresetDock() {
         for (const list of m.values()) list.sort((a, b) => a.def.label.localeCompare(b.def.label));
         return m;
     }, [overrides]);
+    const modelValue = String(draft.modelPath ?? '');
 
     const restart = restartCount(overrides);
     const hasPresets = presets.length > 0;
+    const { models } = useModels();
 
     const animatedReset = (field: keyof LaunchConfig) => {
         const key = field as string;
@@ -231,7 +292,7 @@ export default function PresetDock() {
                     {presets.map(p => <PresetPill key={p.name} preset={p} active={active?.name === p.name} onSelect={() => setActive(p.name)} />)}
                     <button
                         type="button"
-                        onClick={() => void saveAsNew(((active?.name ?? 'preset') + ' copy').trim())}
+                        onClick={() => setCreating(true)}
                         className="rounded-full border border-dashed border-neutral-700 px-2.5 py-1 text-[11px] text-neutral-500 hover:border-neutral-500 hover:text-neutral-300"
                         aria-label="Create new preset"
                     >+</button>
@@ -260,10 +321,18 @@ export default function PresetDock() {
                     <p className="px-2 py-6 text-center text-[12px] text-neutral-500">No presets yet. Press + to create one.</p>
                 ) : !active ? (
                     <p className="px-2 py-6 text-center text-[12px] text-neutral-500">Select a preset to inspect.</p>
-                ) : overrides.length === 0 ? (
-                    <p className="px-2 py-6 text-center text-[12px] text-neutral-500">Running llama.cpp defaults.</p>
                 ) : (
                     <div className="flex flex-col gap-3">
+                        <section aria-label="Model">
+                            <h3 className="px-2 pb-1.5 pt-1 text-[9.5px] font-semibold uppercase tracking-[0.15em] text-neutral-500">Model</h3>
+                            <div className="border-l-2 border-amber-500 py-2 pl-3 pr-3">
+                                <ModelSelect value={modelValue} models={models} onChange={p => setValue('modelPath', p || undefined)} />
+                                {!modelValue && <p className="mt-1 text-[10.5px] text-neutral-500">No model set for this preset.</p>}
+                            </div>
+                        </section>
+                        {overrides.filter(o => o.field !== 'modelPath').length === 0 && (
+                            <p className="px-2 py-6 text-center text-[12px] text-neutral-500">Running llama.cpp defaults.</p>
+                        )}
                         {GROUP_ORDER.map(group => {
                             const list = byGroup.get(group);
                             if (!list || list.length === 0) return null;
@@ -280,6 +349,7 @@ export default function PresetDock() {
                                                 onChange={v => setValue(o.field, v as never)}
                                                 onReset={() => animatedReset(o.field)}
                                                 animating={removing.has(o.field as string)}
+                                                models={models}
                                             />
                                         ))}
                                     </div>
@@ -306,6 +376,7 @@ export default function PresetDock() {
                     <span className="font-mono text-[10.5px] text-neutral-500">⌘K</span>
                 </button>
             </footer>
+            {creating && <NewPresetDialog onClose={() => setCreating(false)} onCreate={createPreset} />}
         </aside>
     );
 }

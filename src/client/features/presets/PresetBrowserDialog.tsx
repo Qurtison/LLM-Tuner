@@ -11,7 +11,9 @@
  */
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { usePresets } from '../../hooks/usePresets';
+import { useModels } from '../../hooks/useModels';
 import { presetBrowser } from '../../state/presetBrowser';
+import { ModelSelect } from './ModelSelect';
 import {
     LLAMA_PARAMS,
     GROUP_ORDER,
@@ -19,7 +21,7 @@ import {
     type ParamGroup,
     type ParamScope,
 } from '../../../../shared/llama-params';
-import type { LaunchConfig } from '../../../../shared/contracts';
+import type { LaunchConfig, ModelEntry } from '../../../../shared/contracts';
 import { overridesFromConfig, paramForField } from './registry';
 
 const GROUP_LABELS: Record<ParamGroup, string> = {
@@ -76,6 +78,7 @@ interface BrowserDialogProps {
 
 export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
     const { draft, setValue } = usePresets();
+    const { models } = useModels();
     const { open } = useSyncExternalStore(presetBrowser.subscribe, presetBrowser.get, presetBrowser.get);
     const [filter, setFilter] = useState<Filter>('all');
     const [query, setQuery] = useState('');
@@ -270,6 +273,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
                                 <BrowserRow
                                     key={rowKey(row.def)}
                                     row={row}
+                                    models={models}
                                     isFocused={row.def.id === focusedId}
                                     onFocus={() => setFocusedId(row.def.id)}
                                     onChange={v => row.field && setValue(row.field, v as never)}
@@ -299,7 +303,7 @@ function paramScopeLabel(scope: ParamScope): string {
     return 'server';
 }
 
-function BrowserRow({ row, isFocused, onFocus, onChange }: { row: BrowserRow; isFocused: boolean; onFocus: () => void; onChange: (value: unknown) => void }) {
+function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: BrowserRow; models: ModelEntry[]; isFocused: boolean; onFocus: () => void; onChange: (value: unknown) => void }) {
     const { def, modified, currentValue, field } = row;
     const isArchive = def.scope === 'archive';
     const disabled = isArchive && currentValue === undefined;
@@ -334,7 +338,7 @@ function BrowserRow({ row, isFocused, onFocus, onChange }: { row: BrowserRow; is
                     {def.defaultLabel !== undefined && <p className="mt-0.5 font-mono text-[10.5px] text-neutral-500">default {def.defaultLabel}</p>}
                     {def.default !== undefined && def.default !== '' && def.defaultLabel === undefined && <p className="mt-0.5 font-mono text-[10.5px] text-neutral-500">default {String(def.default)}</p>}
                 </div>
-                <div className="shrink-0">{renderControl(def, draftVal, setDraftVal, commit, disabled, field)}</div>
+                <div className="shrink-0">{renderControl(def, draftVal, setDraftVal, commit, disabled, field, models)}</div>
             </div>
         </li>
     );
@@ -357,9 +361,13 @@ function parseInput(raw: string | boolean, control: string): unknown {
     return s;
 }
 
-function renderControl(def: ParamDef, value: string | boolean, setValue: (v: string | boolean) => void, commit: () => void, disabled: boolean, _field: keyof LaunchConfig | null) {
+function renderControl(def: ParamDef, value: string | boolean, setValue: (v: string | boolean) => void, commit: () => void, disabled: boolean, _field: keyof LaunchConfig | null, models: ModelEntry[]) {
     const cls = 'rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[12px] text-neutral-100 focus:border-amber-500 focus:outline-none disabled:opacity-50';
     const id = 'browser-edit-' + def.id;
+    // Model path: real dropdown of scanned models, not a free-text path.
+    if (_field === 'modelPath' && !disabled) {
+        return <ModelSelect value={String(value)} models={models} onChange={v => { setValue(v); commit(); }} className={cls + ' w-64 font-mono'} />;
+    }
     if (def.control === 'toggle') {
         return <input id={id} type="checkbox" disabled={disabled} checked={Boolean(value)} onChange={e => { setValue(e.target.checked); commit(); }} className="h-4 w-4 accent-amber-500" />;
     }

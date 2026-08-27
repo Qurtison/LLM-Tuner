@@ -64,11 +64,9 @@ export function useLaunchForm(): {
                 setForm(old => {
                     const next: LaunchForm = { ...old };
                     if (!next.build) next.build = bs.builds[0]?.id || '';
-                    if (!next.modelPath && ms[0]) next.modelPath = ms[0].path;
-                    if (config?.launch.modelName) {
-                        const m = ms.find(item => item.name === config.launch.modelName || item.path.endsWith('/' + config.launch.modelName));
-                        if (m) next.modelPath = m.path;
-                    }
+                    // modelPath intentionally NOT defaulted here: the active
+                    // preset owns the model (edited via the dock's dropdown);
+                    // request() falls back to presetBase.modelPath.
                     if (config?.launch.build) next.build = config.launch.build;
                     if (config?.launch.deviceA) next.deviceA = config.launch.deviceA;
                     if (config?.launch.deviceB) next.deviceB = config.launch.deviceB;
