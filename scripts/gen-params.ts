@@ -295,6 +295,9 @@ const LABEL_OVERRIDES: Record<string, string> = {
   split_mode: "Split mode",
   tensor_split: "Tensor split",
   n_predict: "Tokens to predict",
+  // "no_" is a llama.cpp id artifact of the --no-... alias, not the flag's
+  // meaning: ON emits --reasoning-preserve, OFF is the (template) default.
+  no_reasoning_preserve: "Reasoning Preserve",
 };
 
 const ACRONYMS = new Set(["gpu", "cpu", "kv", "ctx", "ngl", "api", "ssl", "jinja", "mcp", "rope", "yarn", "numa", "lora", "hf", "mmproj", "bs", "ub", "fim", "id", "url"]);
@@ -309,7 +312,14 @@ export function toLabel(id: string): string {
 
 // ---------- assembly ----------
 
-function buildParam(raw: RawEntry): ParamDef | undefined {
+// Hand corrections for params the heuristics misclassify, applied in
+// buildParam after inference. "(default: template default)" trips the
+// text heuristic on a plain boolean flag pair.
+const CONTROL_OVERRIDES: Record<string, { control?: Control; default?: unknown; defaultLabel?: string }> = {
+  no_reasoning_preserve: { control: "toggle", default: false, defaultLabel: "template default" },
+};
+
+export function buildParam(raw: RawEntry): ParamDef | undefined {
   const flags = extractFlags(raw.flags);
   if (flags.length === 0) return undefined;
   const longFlag = [...flags].reverse().find((f) => f.startsWith("--")) ?? flags.at(-1)!;
@@ -321,7 +331,10 @@ function buildParam(raw: RawEntry): ParamDef | undefined {
   // ("--foo N", "--foo FNAME", "--foo <x|y>", "--foo {a,b}") or the line wrapped
   const tail = raw.flags.replace(/^.*?(?:--?[\w-]+\s*)+/, "").trim();
   const takesValue = /^[<\[]/.test(tail) || /^{\w/.test(tail) || /^[A-Z][A-Z0-9_]*$/.test(tail) || (tail.length > 0 && !/^-/.test(tail));
-  const control = inferControl(id, raw.description, raw.flags, allowed, def.value, takesValue);
+  const override = CONTROL_OVERRIDES[id];
+  const control = override?.control ?? inferControl(id, raw.description, raw.flags, allowed, def.value, takesValue);
+  const defaultValue = override && override.default !== undefined ? override.default : def.value;
+  const defaultLabel = override ? override.defaultLabel ?? def.label : def.label;
   const help = cleanHelp(raw.description) || raw.description.slice(0, 120);
 
   const scope = inferScope(id, raw.description, raw.section);
@@ -337,8 +350,8 @@ function buildParam(raw: RawEntry): ParamDef | undefined {
     group,
     scope,
     control,
-    ...(def.value !== undefined ? { default: def.value } : {}),
-    ...(def.label ? { defaultLabel: def.label } : {}),
+    ...(defaultValue !== undefined ? { default: defaultValue } : {}),
+    ...(defaultLabel ? { defaultLabel: defaultLabel } : {}),
     ...(allowed && allowed.length > 0 ? { options: allowed.map((v) => ({ value: v })) } : {}),
     ...(runtime ? { runtime } : {}),
     help,
@@ -513,6 +526,20 @@ function runSelfCheck(): void {
   assert(inferControl("seed", "RNG seed", "--seed N", undefined, -1, true) === "int", "seed -> int");
   assert(inferControl("verbose", "Set verbosity level to infinity", "--verbose", undefined, undefined, false) === "toggle", "verbose -> toggle");
   assert(inferControl("model", "model path to load", "--model FNAME", undefined, undefined, true) === "path", "model -> path");
+
+  // CONTROL_OVERRIDES: boolean flag pair whose "(default: template default)"
+  // trips the text heuristic must come out a toggle defaulting to false.
+  const rp = buildParam({
+    flags: "--reasoning-preserve, --no-reasoning-preserve",
+    description: "preserve reasoning trace in the full history, not just the last assistant message (default: template default) (env: LLAMA_ARG_REASONING_PRESERVE)",
+    section: "chat params",
+    primaryFlag: "--no-reasoning-preserve",
+  });
+  assert(rp?.id === "no_reasoning_preserve", "rp id");
+  assert(rp?.control === "toggle", "rp control toggle");
+  assert(rp?.default === false, "rp default false");
+  assert(rp?.defaultLabel === "template default", "rp defaultLabel");
+  assert(rp?.label === "Reasoning Preserve", "rp label override");
 
   // toId / toLabel
   assert(toId("--cpu-strict") === "cpu_strict", "toId");

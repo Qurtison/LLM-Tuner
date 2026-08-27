@@ -7,6 +7,13 @@ test('paramForField: ngl maps to n_gpu_layers', () => {
     expect(def?.id).toBe('n_gpu_layers');
 });
 
+test('registry: no_reasoning_preserve is a toggle defaulting to false', () => {
+    const def = PARAM_BY_ID['no_reasoning_preserve'];
+    expect(def.control).toBe('toggle');
+    expect(def.default).toBe(false);
+    expect(def.flags[0]).toBe('--reasoning-preserve');
+});
+
 test('overridesFromConfig: empty config yields no overrides', () => {
     expect(overridesFromConfig({})).toEqual([]);
     expect(overridesFromConfig(null)).toEqual([]);

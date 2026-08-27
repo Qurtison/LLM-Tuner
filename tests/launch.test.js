@@ -122,3 +122,16 @@ test('buildLlamaArgs: fa on emits -fa on', () => {
   expect(args).toContain('-fa');
   expect(args[args.indexOf('-fa') + 1]).toBe('on');
 });
+
+test('buildLlamaArgs: no_reasoning_preserve=true emits --reasoning-preserve with no value', () => {
+  const args = buildLlamaArgs({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, paramOverrides: { no_reasoning_preserve: true } }, { mapModelPath: p => p, deviceArgs: [] });
+  const i = args.indexOf('--reasoning-preserve');
+  expect(i).toBeGreaterThan(-1);
+  expect(args[i + 1]).toBeUndefined();
+});
+
+test('buildLlamaArgs: no_reasoning_preserve=false emits no flag (llama.cpp default)', () => {
+  const args = buildLlamaArgs({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, paramOverrides: { no_reasoning_preserve: false } }, { mapModelPath: p => p, deviceArgs: [] });
+  expect(args).not.toContain('--reasoning-preserve');
+  expect(args).not.toContain('--no-reasoning-preserve');
+});

@@ -1,6 +1,6 @@
 # llama-params snapshot (248 params)
 
-Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server --help` on 2026-08-26T18:31:43.075Z
+Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server --help` on 2026-08-27T21:39:18.429Z
 
 ## By scope
 - server: 195
@@ -249,13 +249,13 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | chat_template | Chat Template | --chat-template | chat | server | text | template taken from model's metadata | set custom jinja chat template if suffix/prefix are specifie |
 | chat_template_file | Chat Template File | --chat-template-file | chat | server | path | template taken from model's metadata | set custom jinja chat template file if suffix/prefix are spe |
 | chat_template_kwargs | Chat Template Kwargs | --chat-template-kwargs | chat | request | text |  | sets additional params for the json template parser, must be |
-| no_reasoning_preserve | No Reasoning Preserve | --reasoning-preserve, --no-reasoning-preserve | chat | server | text | template default | preserve reasoning trace in the full history, not just the l |
 | no_skip_chat_parsing | No Skip Chat Parsing | --skip-chat-parsing, --no-skip-chat-parsing | chat | server | toggle | disabled | force a pure content parser, even if a Jinja template is spe |
 | reasoning | Reasoning | -rea, --reasoning | chat | request | enum |  | Use reasoning/thinking in the chat ('on', 'off', or 'auto',  |
 | reasoning_budget | Reasoning Budget | --reasoning-budget | chat | request | int | -1 | token budget for thinking: -1 for unrestricted, 0 for immedi |
 | reasoning_budget_message | Reasoning Budget Message | --reasoning-budget-message | chat | request | enum | none | message injected before the end-of-thinking tag when reasoni |
 | reasoning_effort | Reasoning Effort | --reasoning-effort | chat | request | text | default | reasoning effort level given to the chat template: 'default' |
 | reasoning_format | Reasoning Format | --reasoning-format | chat | request | enum | auto | controls whether thought tags are allowed and/or extracted f |
+| no_reasoning_preserve | Reasoning Preserve | --reasoning-preserve, --no-reasoning-preserve | chat | server | toggle | false | preserve reasoning trace in the full history, not just the l |
 | log_colors | Log Colors | --log-colors | logging | server | enum |  | Set colored logging ('on', 'off', or 'auto', default: 'auto' |
 | log_disable | Log Disable | --log-disable | logging | server | toggle |  | Log disable |
 | log_file | Log File | --log-file | logging | server | path |  | Log to file |
