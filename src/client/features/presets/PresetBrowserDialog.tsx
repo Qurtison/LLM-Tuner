@@ -311,14 +311,17 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
 
     useEffect(() => { setDraftVal(toInput(currentValue, def.control)); }, [currentValue, def.control]);
 
-    const commit = () => {
-        const next = parseInput(draftVal, def.control);
+    // Commit an explicit raw value: setState in the same tick is async, so
+    // parsing draftVal inside the change handler would commit the OLD value.
+    const commitValue = (raw: string | boolean) => {
+        const next = parseInput(raw, def.control);
         if (next === undefined) {
             if (field) onChange(undefined);
         } else {
             onChange(next);
         }
     };
+    const commit = () => commitValue(draftVal);
 
     const baseCls = 'rounded px-3 py-2 ' + (modified ? 'border-l-2 border-amber-500 bg-[#14171e]' : 'border-l-2 border-transparent');
     const focusCls = isFocused ? 'ring-1 ring-amber-500/40 ' : '';
@@ -361,19 +364,19 @@ function parseInput(raw: string | boolean, control: string): unknown {
     return s;
 }
 
-function renderControl(def: ParamDef, value: string | boolean, setValue: (v: string | boolean) => void, commit: () => void, disabled: boolean, _field: keyof LaunchConfig | null, models: ModelEntry[]) {
+function renderControl(def: ParamDef, value: string | boolean, setValue: (v: string | boolean) => void, commitValue: (raw: string | boolean) => void, disabled: boolean, _field: keyof LaunchConfig | null, models: ModelEntry[]) {
     const cls = 'rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-[12px] text-neutral-100 focus:border-amber-500 focus:outline-none disabled:opacity-50';
     const id = 'browser-edit-' + def.id;
     // Model path: real dropdown of scanned models, not a free-text path.
     if (_field === 'modelPath' && !disabled) {
-        return <ModelSelect value={String(value)} models={models} onChange={v => { setValue(v); commit(); }} className={cls + ' w-64 font-mono'} />;
+        return <ModelSelect value={String(value)} models={models} onChange={v => { setValue(v); commitValue(v); }} className={cls + ' w-64 font-mono'} />;
     }
     if (def.control === 'toggle') {
-        return <input id={id} type="checkbox" disabled={disabled} checked={Boolean(value)} onChange={e => { setValue(e.target.checked); commit(); }} className="h-4 w-4 accent-amber-500" />;
+        return <input id={id} type="checkbox" disabled={disabled} checked={Boolean(value)} onChange={e => { setValue(e.target.checked); commitValue(e.target.checked); }} className="h-4 w-4 accent-amber-500" />;
     }
     if (def.control === 'enum' && def.options) {
         return (
-            <select id={id} disabled={disabled} value={String(value)} onChange={e => { setValue(e.target.value); commit(); }} className={cls}>
+            <select id={id} disabled={disabled} value={String(value)} onChange={e => { setValue(e.target.value); commitValue(e.target.value); }} className={cls}>
                 {def.options.map(opt => <option key={opt.value} value={opt.value}>{opt.label || opt.value}</option>)}
             </select>
         );
@@ -388,8 +391,8 @@ function renderControl(def: ParamDef, value: string | boolean, setValue: (v: str
             disabled={disabled}
             value={String(value)}
             onChange={e => setValue(e.target.value)}
-            onBlur={commit}
-            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+            onBlur={() => commitValue(value)}
+            onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitValue(value); } }}
             className={cls + ' w-40 font-mono'}
         />
     );
