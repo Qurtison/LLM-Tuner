@@ -306,14 +306,17 @@ function paramScopeLabel(scope: ParamScope): string {
 function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: BrowserRow; models: ModelEntry[]; isFocused: boolean; onFocus: () => void; onChange: (value: unknown) => void }) {
     const { def, modified, currentValue, field } = row;
     const isArchive = def.scope === 'archive';
-    const disabled = isArchive && currentValue === undefined;
+    const disabled = (isArchive && currentValue === undefined) || field === null;
     const [draftVal, setDraftVal] = useState<string | boolean>(() => toInput(currentValue, def.control));
+    const latest = useRef(draftVal);
+    const touched = useRef(false);
 
     useEffect(() => { setDraftVal(toInput(currentValue, def.control)); }, [currentValue, def.control]);
+    useEffect(() => { latest.current = draftVal; }, [draftVal]);
 
     // Commit an explicit raw value: setState in the same tick is async, so
     // parsing draftVal inside the change handler would commit the OLD value.
-    const commitValue = (raw: string | boolean) => {
+    const commitRowValue = (raw: string | boolean) => {
         const next = parseInput(raw, def.control);
         if (next === undefined) {
             if (field) onChange(undefined);
@@ -321,15 +324,30 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
             onChange(next);
         }
     };
-    const commit = () => commitValue(draftVal);
+    const commitValue = (raw: string | boolean) => {
+        touched.current = true;
+        commitRowValue(raw);
+    };
+    // Typing then leaving the row (category switch, filter, Done) without
+    // blurring would drop the edit — commit it on the way out, but only if
+    // the user actually typed, or every browsed row would become an
+    // "override" of its own current value.
+    useEffect(() => () => {
+        if (touched.current) commitRowValue(latest.current);
+    }, []);
+    const trackValue = (v: string | boolean) => {
+        if (v !== toInput(currentValue, def.control)) touched.current = true;
+        setDraftVal(v);
+    };
 
     const baseCls = 'rounded px-3 py-2 ' + (modified ? 'border-l-2 border-amber-500 bg-[#14171e]' : 'border-l-2 border-transparent');
     const focusCls = isFocused ? 'ring-1 ring-amber-500/40 ' : '';
 
     return (
         <li
-            className={baseCls + focusCls + (isArchive ? ' opacity-55' : '')}
+            className={baseCls + focusCls + ((isArchive || field === null) ? ' opacity-55' : '')}
             onClick={onFocus}
+            title={field === null ? 'Not stored in presets yet — this param has no launch-config mapping.' : undefined}
         >
             <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">
@@ -341,7 +359,7 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
                     {def.defaultLabel !== undefined && <p className="mt-0.5 font-mono text-[10.5px] text-neutral-500">default {def.defaultLabel}</p>}
                     {def.default !== undefined && def.default !== '' && def.defaultLabel === undefined && <p className="mt-0.5 font-mono text-[10.5px] text-neutral-500">default {String(def.default)}</p>}
                 </div>
-                <div className="shrink-0">{renderControl(def, draftVal, setDraftVal, commit, disabled, field, models)}</div>
+                <div className="shrink-0">{renderControl(def, draftVal, trackValue, commitValue, disabled, field, models)}</div>
             </div>
         </li>
     );
