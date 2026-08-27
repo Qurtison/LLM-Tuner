@@ -87,4 +87,17 @@ describe('launch.js paramOverrides rendering', () => {
         expect(args).toContain('--ignore-eos');
         expect(args).not.toContain('--does-not-exist');
     });
+
+    it('promotes known bag ids (ctx_size/ngl) to fields so strict validation passes', async () => {
+        const { resolveLaunchCommand } = await import('../src/server/lib/launch.js');
+        const config = {
+            modelPath: '/models/m.gguf',
+            paramOverrides: { ctx_size: 262144, n_gpu_layers: '999' },
+        };
+        const { args } = resolveLaunchCommand(config, [{ id: 'default', label: 'default', path: '/bin/llama-server' }]);
+        expect(args[args.indexOf('-c') + 1]).toBe('262144');
+        expect(args[args.indexOf('-ngl') + 1]).toBe('999');
+        // promoted ids must not render twice
+        expect(args.filter(a => a === '262144').length).toBe(1);
+    });
 });

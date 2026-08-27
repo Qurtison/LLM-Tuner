@@ -66,7 +66,36 @@ function toNonEmptyString(v) {
     return s.length > 0 ? s : undefined;
 }
 
+// Legacy/mismatched presets may hold KNOWN params in the overrides bag
+// (e.g. ctx_size instead of ctx). Promote them to real fields before the
+// required-knob validation so `-c`/`-ngl` etc. render once, from fields.
+const BAG_ID_TO_FIELD = {
+    ctx_size: 'ctx', n_gpu_layers: 'ngl', flash_attn: 'fa',
+    cache_type_k: 'cacheK', cache_type_v: 'cacheV', temperature: 'temp',
+    port: 'port', jinja: 'jinja', load_mode: 'loadMode', verbosity: 'verbosity',
+    chat_template: 'chatTemplateFile', spec_type: 'specType',
+    reasoning_preserve: 'reasoningPreserve',
+};
+
+function promoteBagToFields(config) {
+    const bag = config.paramOverrides;
+    if (!bag || typeof bag !== 'object') return config;
+    const promoted = {};
+    for (const [id, field] of Object.entries(BAG_ID_TO_FIELD)) {
+        if (bag[id] === undefined || config[field] !== undefined) continue;
+        config[field] = bag[id];
+        promoted[id] = true;
+    }
+    if (Object.keys(promoted).length > 0) {
+        config.paramOverrides = { ...bag };
+        for (const id of Object.keys(promoted)) delete config.paramOverrides[id];
+        if (Object.keys(config.paramOverrides).length === 0) delete config.paramOverrides;
+    }
+    return config;
+}
+
 function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }) {
+    config = promoteBagToFields(config);
     // Validate the required knobs up front so a malformed config fails with a
     // clear message instead of spawning `llama-server -m undefined -c NaN`
     // (a blank ctx/ngl field reaches us as NaN -> JSON null).

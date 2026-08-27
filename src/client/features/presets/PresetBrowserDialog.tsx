@@ -22,7 +22,7 @@ import {
     type ParamScope,
 } from '../../../../shared/llama-params';
 import type { LaunchConfig, ModelEntry } from '../../../../shared/contracts';
-import { overridesFromConfig, paramForField } from './registry';
+import { fieldForParamId, overridesFromConfig } from './registry';
 
 const GROUP_LABELS: Record<ParamGroup, string> = {
     speed: 'Speed & threads',
@@ -65,11 +65,10 @@ function rowKey(def: ParamDef): string {
 }
 
 function fieldForDef(def: ParamDef, draft: LaunchConfig): { field: keyof LaunchConfig | null; value: unknown } {
-    for (const k of Object.keys(draft) as (keyof LaunchConfig)[]) {
-        const pf = paramForField(k);
-        if (pf && pf.id === def.id) return { field: k, value: draft[k] };
-    }
-    return { field: null, value: undefined };
+    // Map via the param registry, NOT draft keys — an unset-but-mapped
+    // param (e.g. ctx on a fresh preset) must still write its field.
+    const field = fieldForParamId(def.id);
+    return { field, value: field ? draft[field] : (draft.paramOverrides?.[def.id]) };
 }
 
 interface BrowserDialogProps {

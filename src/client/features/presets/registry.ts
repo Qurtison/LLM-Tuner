@@ -93,6 +93,18 @@ function deepEqual(a: unknown, b: unknown): boolean {
     return true;
 }
 
+// Reverse lookup: which LaunchConfig field backs a param id. Fixed
+// precedence (modelPath before model before specDraftModel, etc.).
+const PARAM_TO_FIELD = new Map<ParamId, keyof LaunchConfig>();
+for (const field of Object.keys(LAUNCH_FIELD_TO_PARAM) as (keyof LaunchConfig)[]) {
+    const id = LAUNCH_FIELD_TO_PARAM[field];
+    if (id !== undefined && !PARAM_TO_FIELD.has(id)) PARAM_TO_FIELD.set(id, field);
+}
+
+export function fieldForParamId(id: ParamId): keyof LaunchConfig | null {
+    return PARAM_TO_FIELD.get(id) ?? null;
+}
+
 export function paramForField(field: keyof LaunchConfig): ParamDef | undefined {
     const id = LAUNCH_FIELD_TO_PARAM[field];
     return id ? PARAM_BY_ID[id] : undefined;
