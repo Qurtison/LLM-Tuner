@@ -31,6 +31,7 @@ try {
 // Toggle params emit just the flag; everything else emits 'flag value'
 // (arrays join to comma lists). Unknown ids and empty values are skipped.
 function appendParamOverrideArgs(args, overrides) {
+    console.error('[launch] appendOverrides: registry=', PARAM_BY_ID ? 'loaded' : 'NULL', 'overrides=', JSON.stringify(overrides));
     if (!overrides || typeof overrides !== 'object') return;
     for (const id of Object.keys(overrides)) {
         const def = PARAM_BY_ID ? PARAM_BY_ID[id] : null;
