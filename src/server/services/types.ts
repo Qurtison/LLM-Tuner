@@ -17,6 +17,9 @@ export interface ServerCtx {
     config: DashboardConfig;
     state: ServerState;
     broadcast: (log?: string, error?: string) => void;
+    // Repo root; optional so existing constructions stay valid. Used by
+    // LlamaService for generated/launch.sh + last-launch.json locations.
+    appRoot?: string;
 }
 
 export interface TelemetryStats {

@@ -6,7 +6,6 @@ import { FATAL_LINE_RE, isFatalLogLine } from '../src/server/lib/fatallogs';
 // decision at the fatal branch in spawnLlamaProcess's handleLogs.
 const FATAL_INPUTS = [
   'llama_server: fatal error: something went wrong',
-  'failed to fit params to free device memory',
   'out of memory while loading',
   'SEGFAULT occurred in worker',
   'Out Of Memory allocating buffer',
@@ -23,6 +22,7 @@ const NON_FATAL_INPUTS = [
   'aborting speculative decode',
   'memory pressure detected',
   'llama_log: kv cache miss',
+  'failed to fit params to free device memory', // no longer fatal since 843b50a
   '',
 ];
 

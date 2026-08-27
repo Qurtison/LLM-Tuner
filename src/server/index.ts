@@ -116,7 +116,7 @@ const telemetry = new TelemetryService(
 );
 
 const llama = new LlamaService(
-    { config, state, broadcast },
+    { config, state, broadcast, appRoot: APP_ROOT },
     {
         onActivity: () => telemetry.markActivity(),
         takeSamples: () => telemetry.takeSamples(),
@@ -375,6 +375,9 @@ async function init(): Promise<void> {
     await spawnMonitor();
     // Reload the bench transcript tail (frozen restart behavior).
     void bench.restore();
+    // A+D: adopt a llama unit that survived the restart, or relaunch the
+    // persisted last model so a deploy/boot self-heals without user action.
+    await llama.restoreOnBoot();
     telemetry.start();
 }
 
@@ -384,7 +387,9 @@ async function shutdown(): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     telemetry.stop();
-    try { llama.stop(); } catch { /* already gone */ }
+    // dispose(): systemd mode detaches tracking without stopping the unit
+    // (the model must outlive the dashboard); native mode = the old stop().
+    try { llama.dispose(); } catch { /* already gone */ }
     try { bench.stop(); } catch { /* already gone */ }
     if (monitor) { try { monitor.kill('SIGTERM'); } catch { /* already gone */ } }
     // Give children the configured grace period, then SIGKILL stragglers.

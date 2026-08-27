@@ -1,11 +1,15 @@
 // Store flow: mapped-field edits and paramOverrides bag edits persist and
 // survive refresh; launch.js renders the bag to CLI flags.
-import { describe, it, expect, beforeAll } from 'bun:test';
+import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 
 const canned = {
     presets: [{ name: 'smoke', build: '', config: { ctx: 4096 } }],
     active: 'smoke',
 };
+
+// Bun runs test files in one process: this stub must not leak past this
+// file or every later fetch() in the suite gets canned responses.
+const realFetch = globalThis.fetch;
 
 beforeAll(() => {
     (globalThis as Record<string, unknown>).fetch = (async (input: string | URL) => {
@@ -13,6 +17,10 @@ beforeAll(() => {
         const body = url.includes('/api/presets') ? canned : {};
         return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
+});
+
+afterAll(() => {
+    (globalThis as Record<string, unknown>).fetch = realFetch;
 });
 
 describe('presetsStore dialog-edit flow', () => {

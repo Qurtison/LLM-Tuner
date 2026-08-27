@@ -251,7 +251,9 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
                 await fs.writeFile(scriptPath, script);
                 await fs.chmod(scriptPath, 0o755);
                 const unitPath = ctx.config.service.unitPath || path.join(process.env.HOME || '/home/james', '.config', 'systemd', 'user', ctx.config.service.unitName);
-                const installed = await unitMod.installUnit(unitPath, scriptPath, ctx.config.service.unitName, ctx.config.service.enableOnApply);
+                // In systemd mode the unit must be enabled so the model
+                // survives reboots (A+D); enableOnApply is ignored there.
+                const installed = await unitMod.installUnit(unitPath, scriptPath, ctx.config.service.unitName, true);
                 if (!installed.ok) return ctx.json({ ok: false, error: installed.output, command, warnings });
                 if (restart) {
                     const r = await unitMod.restart(ctx.config.service.unitName);

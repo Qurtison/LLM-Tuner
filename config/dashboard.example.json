@@ -52,10 +52,10 @@
     "temperature": 0.8
   },
   "service": {
-    "unitName": "llama-dashboard-server.service",
+    "unitName": "llm-llama-server.service",
     "unitPath": "",
-    "enableOnApply": false,
-    "manageViaSystemd": false
+    "enableOnApply": true,
+    "manageViaSystemd": true
   },
   "upgrade": {
     "repoDir": "",

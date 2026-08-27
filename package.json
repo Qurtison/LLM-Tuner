@@ -9,7 +9,7 @@
     "dev:client": "vite",
     "build": "vite build",
     "start": "bun src/server/index.ts",
-    "test": "bun test",
+    "test": "bun test \"$(pwd)/tests/\"",
     "typecheck": "tsc --noEmit",
     "lint": "tools/lint/node_modules/.bin/eslint --config tools/lint/eslint.config.mjs .",
     "lint:fix": "tools/lint/node_modules/.bin/eslint --config tools/lint/eslint.config.mjs . --fix"
