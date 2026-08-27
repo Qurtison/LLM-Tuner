@@ -13,6 +13,7 @@ export interface UsePresets {
     error: string;
     overrides: OverrideEntry[];
     setValue: <K extends keyof LaunchConfig>(field: K, value: LaunchConfig[K]) => void;
+    setParam: (id: string, value: unknown) => void;
     revert: () => void;
     refresh: () => Promise<void>;
     setActive: (name: string | null) => void;
@@ -37,6 +38,7 @@ export function usePresets(): UsePresets {
         error: snapshot.error,
         overrides: overridesFromConfig(snapshot.draft),
         setValue: (field, value) => presetsStore.setValue(field, value),
+        setParam: (id, value) => presetsStore.setParam(id, value),
         revert: () => presetsStore.revert(),
         refresh: () => presetsStore.refresh(),
         setActive: (name) => presetsStore.setActive(name),

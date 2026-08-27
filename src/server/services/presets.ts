@@ -9,6 +9,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LaunchConfig } from '../../../shared/contracts';
+import { PARAM_BY_ID } from '../../../shared/llama-params';
 
 export interface Preset {
     name: string;
@@ -140,6 +141,11 @@ export async function validatePreset(preset: Preset, modelDirectories: string[])
             if (!exists) {
                 warnings.push(key + ': file not found: ' + p);
             }
+        }
+    }
+    if (config.paramOverrides && typeof config.paramOverrides === 'object') {
+        for (const id of Object.keys(config.paramOverrides)) {
+            if (!PARAM_BY_ID[id]) warnings.push('paramOverrides: unknown param id: ' + id);
         }
     }
     return warnings;

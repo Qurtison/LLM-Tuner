@@ -77,7 +77,7 @@ interface BrowserDialogProps {
 }
 
 export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
-    const { draft, setValue } = usePresets();
+    const { draft, setValue, setParam } = usePresets();
     const { models } = useModels();
     const { open } = useSyncExternalStore(presetBrowser.subscribe, presetBrowser.get, presetBrowser.get);
     const [filter, setFilter] = useState<Filter>('all');
@@ -172,9 +172,10 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
             }
             if (event.key === 'Backspace' && focusedId) {
                 const row = currentGroupRows.find(r => r.def.id === focusedId);
-                if (row && row.field) {
+                if (row) {
                     event.preventDefault();
-                    setValue(row.field, undefined);
+                    if (row.field) setValue(row.field, undefined);
+                    else setParam(row.def.id, undefined);
                 }
                 return;
             }
@@ -276,7 +277,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
                                     models={models}
                                     isFocused={row.def.id === focusedId}
                                     onFocus={() => setFocusedId(row.def.id)}
-                                    onChange={v => row.field && setValue(row.field, v as never)}
+                                    onChange={v => (row.field ? setValue(row.field, v as never) : setParam(row.def.id, v))}
                                 />
                             ))}
                         </ul>
@@ -306,7 +307,7 @@ function paramScopeLabel(scope: ParamScope): string {
 function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: BrowserRow; models: ModelEntry[]; isFocused: boolean; onFocus: () => void; onChange: (value: unknown) => void }) {
     const { def, modified, currentValue, field } = row;
     const isArchive = def.scope === 'archive';
-    const disabled = (isArchive && currentValue === undefined) || field === null;
+    const disabled = isArchive && currentValue === undefined;
     const [draftVal, setDraftVal] = useState<string | boolean>(() => toInput(currentValue, def.control));
     const latest = useRef(draftVal);
     const touched = useRef(false);
@@ -345,9 +346,8 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
 
     return (
         <li
-            className={baseCls + focusCls + ((isArchive || field === null) ? ' opacity-55' : '')}
+            className={baseCls + focusCls + (isArchive ? ' opacity-55' : '')}
             onClick={onFocus}
-            title={field === null ? 'Not stored in presets yet — this param has no launch-config mapping.' : undefined}
         >
             <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0 flex-1">

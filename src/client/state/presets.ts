@@ -12,7 +12,7 @@ import { api } from '../api/client';
 import { getErrorMessage } from '../api/errors';
 import { loadJson, saveJson, removeJson } from '../lib/storage';
 import type { LaunchConfig, Preset, PresetsResponse, PresetSaveRequest } from '../../../shared/contracts';
-import { configWithOverrides, overridesFromConfig, paramForField } from '../features/presets/registry';
+import { configWithOverrides, overridesFromConfig, paramForField, paramDefById } from '../features/presets/registry';
 
 const ACTIVE_KEY = 'presets_active';
 // ponytail: no localStorage draft persistence — the server-saved preset is
@@ -125,8 +125,37 @@ class PresetsStore {
                 (draft as Record<string, unknown>)[field as string] = value;
             }
         }
+        // The field write wins over any bag entry for the same param.
+        const pid = paramForField(field)?.id;
+        if (pid && draft.paramOverrides && pid in draft.paramOverrides) {
+            const bag = { ...draft.paramOverrides };
+            delete bag[pid];
+            this.applyBag(draft, bag);
+        }
         this.value.set({ ...this.value.get(), draft });
         this.recomputeDirty();
+    }
+
+    // Set a registry param that has no dedicated LaunchConfig field.
+    setParam(id: string, value: unknown): void {
+        const draft = { ...this.value.get().draft };
+        const bag = { ...(draft.paramOverrides ?? {}) };
+        const def = paramDefById(id);
+        if (value === undefined || value === null || value === '') {
+            delete bag[id];
+        } else if (def && def.default !== undefined && JSON.stringify(value) === JSON.stringify(def.default)) {
+            delete bag[id];
+        } else {
+            bag[id] = value;
+        }
+        this.applyBag(draft, bag);
+        this.value.set({ ...this.value.get(), draft });
+        this.recomputeDirty();
+    }
+
+    private applyBag(draft: LaunchConfig, bag: Record<string, unknown>): void {
+        if (Object.keys(bag).length > 0) draft.paramOverrides = bag;
+        else delete draft.paramOverrides;
     }
 
     revert(): void {

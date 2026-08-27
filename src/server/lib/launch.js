@@ -17,6 +17,35 @@
 
 const { tokenizeCommand } = require('./tokenize');
 
+// Param registry (TS) for the paramOverrides bag. Bun requires .ts fine;
+// if unavailable the bag is ignored rather than breaking launches.
+let PARAM_BY_ID = null;
+try {
+    ({ PARAM_BY_ID } = require('../../../shared/llama-params.ts'));
+} catch {
+    PARAM_BY_ID = null;
+}
+
+// Render param-id overrides (LaunchConfig.paramOverrides) into CLI flags.
+// Toggle params emit just the flag; everything else emits 'flag value'
+// (arrays join to comma lists). Unknown ids and empty values are skipped.
+function appendParamOverrideArgs(args, overrides) {
+    if (!overrides || typeof overrides !== 'object') return;
+    for (const id of Object.keys(overrides)) {
+        const def = PARAM_BY_ID ? PARAM_BY_ID[id] : null;
+        const value = overrides[id];
+        if (!def || !Array.isArray(def.flags) || def.flags.length === 0) continue;
+        if (value === undefined || value === null || value === '') continue;
+        if (def.control === 'toggle') {
+            if (value === true || value === 'true') args.push(def.flags[0]);
+            continue;
+        }
+        const text = Array.isArray(value) ? value.map(String).join(',') : String(value);
+        if (text.trim() === '') continue;
+        args.push(def.flags[0], text);
+    }
+}
+
 // Coerce a UI/API value to a finite number, or undefined when it's missing,
 // empty, or not numeric. Number.isNaN() alone is NOT sufficient: it doesn't
 // coerce, so '' and 'abc' sail through it, and an empty string would emit a
@@ -124,6 +153,7 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }
     if (loadMode) args.push('-lm', loadMode);
     const verbosity = toFiniteNumber(config.verbosity);
     if (verbosity !== undefined) args.push('-lv', String(verbosity));
+    appendParamOverrideArgs(args, config.paramOverrides);
     const argString = toNonEmptyString(config.argString);
     if (argString) {
         const rawTokens = tokenizeCommand(argString.trim());
@@ -201,6 +231,7 @@ function resolveLaunchCommand(config, builds, { rpcPort = 50052, defaultPort = 8
 }
 
 module.exports = {
+    appendParamOverrideArgs,
     toFiniteNumber,
     toNonEmptyString,
     isValidBuild,

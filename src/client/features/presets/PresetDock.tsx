@@ -56,14 +56,14 @@ function formatValue(value: unknown): string {
     return String(value);
 }
 
-function toInputValue(field: keyof LaunchConfig, value: unknown, control: string): string | boolean {
+function toInputValue(field: keyof LaunchConfig | null, value: unknown, control: string): string | boolean {
     if (control === 'toggle') return Boolean(value);
     if (value === undefined || value === null) return '';
     if (Array.isArray(value)) return value.join(', ');
     return String(value);
 }
 
-function parseInput(field: keyof LaunchConfig, raw: string | boolean, control: string): unknown {
+function parseInput(field: keyof LaunchConfig | null, raw: string | boolean, control: string): unknown {
     if (control === 'toggle') return Boolean(raw);
     const s = String(raw);
     if (s === '') return undefined;
@@ -237,7 +237,7 @@ function NewPresetDialog({ onClose, onCreate }: { onClose: () => void; onCreate:
 }
 
 export default function PresetDock() {
-    const { presets, active, draft, isDirty, overrides, error, setValue, revert, save, saveAsNew, setActive } = usePresets();
+    const { presets, active, draft, isDirty, overrides, error, setValue, setParam, revert, save, saveAsNew, setActive } = usePresets();
     const [removing, setRemoving] = useState<Set<string>>(new Set());
     const [creating, setCreating] = useState(false);
 
@@ -263,15 +263,14 @@ export default function PresetDock() {
     const hasPresets = presets.length > 0;
     const { models } = useModels();
 
-    const animatedReset = (field: keyof LaunchConfig) => {
-        const key = field as string;
+    const animatedReset = (key: string, apply: () => void) => {
         setRemoving(prev => {
             const next = new Set(prev);
             next.add(key);
             return next;
         });
         window.setTimeout(() => {
-            setValue(field, undefined);
+            apply();
             setRemoving(prev => {
                 const next = new Set(prev);
                 next.delete(key);
@@ -344,11 +343,13 @@ export default function PresetDock() {
                                     <div className="flex flex-col">
                                         {list.map(o => (
                                             <OverrideRow
-                                                key={o.field as string}
+                                                key={o.field ? String(o.field) : 'p:' + o.paramId}
                                                 entry={o}
-                                                onChange={v => setValue(o.field, v as never)}
-                                                onReset={() => animatedReset(o.field)}
-                                                animating={removing.has(o.field as string)}
+                                                onChange={v => (o.field ? setValue(o.field, v as never) : setParam(o.paramId, v))}
+                                                onReset={() => (o.field
+                                                    ? animatedReset(String(o.field), () => setValue(o.field as keyof LaunchConfig, undefined))
+                                                    : animatedReset('p:' + o.paramId, () => setParam(o.paramId, undefined)))}
+                                                animating={removing.has(o.field ? String(o.field) : 'p:' + o.paramId)}
                                                 models={models}
                                             />
                                         ))}

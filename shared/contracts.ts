@@ -47,6 +47,10 @@ export interface LaunchConfig {
     deviceB?: string;
     transport?: string;
     label?: string;
+    // Registry params with no dedicated LaunchConfig field, keyed by param
+    // id (shared/llama-params.ts). Rendered to CLI flags by the launch
+    // resolver; dedicated fields above always win for the same param.
+    paramOverrides?: Record<string, unknown>;
 }
 
 export interface SseStatePayload {

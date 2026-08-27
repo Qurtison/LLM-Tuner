@@ -59,10 +59,11 @@ const LAUNCH_FIELD_TO_PARAM: Record<keyof LaunchConfig, ParamId | undefined> = {
     deviceB: undefined,
     transport: undefined,
     label: undefined,
+    paramOverrides: undefined,
 };
 
 export interface OverrideEntry {
-    field: keyof LaunchConfig;
+    field: keyof LaunchConfig | null;
     paramId: ParamId;
     def: ParamDef;
     value: unknown;
@@ -100,24 +101,55 @@ export function paramForField(field: keyof LaunchConfig): ParamDef | undefined {
 export function overridesFromConfig(config: LaunchConfig | null | undefined): OverrideEntry[] {
     if (!config) return [];
     const out: OverrideEntry[] = [];
+    const emitted = new Set<ParamId>();
     for (const field of Object.keys(LAUNCH_FIELD_TO_PARAM) as (keyof LaunchConfig)[]) {
         const value = config[field];
         if (isUnset(value)) continue;
         const def = paramForField(field);
         if (!def) continue;
         if (def.default !== undefined && deepEqual(value, def.default)) continue;
+        emitted.add(def.id);
         out.push({ field, paramId: def.id, def, value });
+    }
+    // Registry params with no dedicated field — the paramOverrides bag.
+    const bag = config.paramOverrides;
+    if (bag) {
+        for (const id of Object.keys(bag)) {
+            if (emitted.has(id)) continue;
+            const value = bag[id];
+            if (isUnset(value)) continue;
+            const def = PARAM_BY_ID[id];
+            if (!def) continue;
+            if (def.default !== undefined && deepEqual(value, def.default)) continue;
+            out.push({ field: null, paramId: id, def, value });
+        }
     }
     return out;
 }
 
 export function configWithOverrides(overrides: Record<keyof LaunchConfig, unknown>): LaunchConfig {
     const out: LaunchConfig = {};
+    const bag = overrides.paramOverrides;
     for (const [field, value] of Object.entries(overrides)) {
+        if (field === 'paramOverrides') continue;
         if (isUnset(value)) continue;
         const def = paramForField(field as keyof LaunchConfig);
         if (def && def.default !== undefined && deepEqual(value, def.default)) continue;
         (out as Record<string, unknown>)[field] = value;
     }
+    if (bag && typeof bag === 'object') {
+        const clean: Record<string, unknown> = {};
+        for (const [id, value] of Object.entries(bag)) {
+            if (isUnset(value)) continue;
+            const def: ParamDef | undefined = PARAM_BY_ID[id];
+            if (def && def.default !== undefined && deepEqual(value, def.default)) continue;
+            clean[id] = value;
+        }
+        if (Object.keys(clean).length > 0) out.paramOverrides = clean;
+    }
     return out;
+}
+
+export function paramDefById(id: ParamId): ParamDef | undefined {
+    return PARAM_BY_ID[id];
 }
