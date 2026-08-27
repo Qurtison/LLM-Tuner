@@ -1,78 +1,31 @@
-// App shell: three-slot layout — left sidebar (model loading), center
-// (bench + history), right sidebar (monitor). Each sidebar swaps into the
-// center via its arrow button; the displaced view becomes the sidebar.
-// App remains the single SSE owner. Panels come from features/index.ts.
-import { useCallback, useEffect, useState } from 'react';
+// App shell: a stack of registered panels. Layout (order, collapsed,
+// hidden) is per-user, persisted in localStorage. Users open the
+// "Panels" menu in the header to add/remove panels and drag the
+// "⋮⋮" handle to reorder. ⌘K opens the preset browser overlay.
+import { useCallback, useEffect } from 'react';
 import { useSse } from './hooks/useSse';
 import { useServer, applySseFrame, setSseConnected, setServerConfig } from './state/server';
+import { presetBrowser } from './state/presetBrowser';
 import { api } from './api/client';
-import { loadJson, saveJson } from './lib/storage';
 import type { ConfigResponse } from '../../shared/contracts';
-import {
-    InteractivePanel,
-    ChatPanel,
-    MonitorPanel,
-    LiveRequestsPanel,
-    HistoryPanel,
-    BenchPanel,
-    OverviewPanel,
-    FileBrowserPanel,
-    PresetsPanel,
-    UpgradePanel,
-    LogsPanel,
-} from './features';
+import { ChatPanel } from './features';
+import { MonitorPanel, LiveRequestsPanel, HistoryPanel, BenchPanel, OverviewPanel, FileBrowserPanel, UpgradePanel, LogsPanel, PresetDock, PresetBrowserDialog } from './features';
+import LaunchBar from './features/interactive/LaunchBar';
+import RpcWorkerPanel from './features/interactive/RpcWorkerPanel';
+import { PanelCanvas, PanelVisibilityMenu, registerPanel } from './components/panels';
 
-type Side = 'left' | 'center' | 'right';
-type View = 'model' | 'bench' | 'monitor';
-type Slots = Record<Side, View>;
-
-const SIDES: Side[] = ['left', 'center', 'right'];
-const VIEWS: View[] = ['model', 'bench', 'monitor'];
-const DEFAULT_SLOTS: Slots = { left: 'model', center: 'bench', right: 'monitor' };
-const TITLES: Record<View, string> = { model: 'Model', bench: 'Bench + History', monitor: 'Monitor' };
-// Where each view lives by default; used to point the collapse arrow home.
-const HOME: Record<View, 'left' | 'center' | 'right'> = { model: 'left', bench: 'center', monitor: 'right' };
-
-function loadSlots(): Slots {
-    const raw = loadJson<unknown>('layout_slots', null);
-    if (raw && typeof raw === 'object'
-        && SIDES.every(side => VIEWS.includes((raw as Slots)[side]))
-        && new Set(SIDES.map(side => (raw as Slots)[side])).size === SIDES.length) {
-        return raw as Slots;
-    }
-    return DEFAULT_SLOTS;
-}
-
-function swapWithCenter(slots: Slots, side: 'left' | 'right'): Slots {
-    return { ...slots, [side]: slots.center, center: slots[side] };
-}
-
-function ViewContent({ view }: { view: View }) {
-    if (view === 'model') return <><InteractivePanel /><ChatPanel /></>;
-    if (view === 'monitor') return <><OverviewPanel /><PresetsPanel /><UpgradePanel /><MonitorPanel /><LogsPanel /><LiveRequestsPanel /><FileBrowserPanel /></>;
-    return <><BenchPanel /><HistoryPanel /></>;
-}
-
-function SlotHeader({ view, side, onMove }: { view: View; side: Side; onMove: () => void }) {
-    const btn = 'rounded bg-neutral-800 px-2 py-1 text-sm leading-none text-neutral-300 hover:bg-neutral-700';
-    let button: React.ReactNode = null;
-    if (side === 'left') {
-        button = <button type="button" onClick={onMove} title="Expand to main area" aria-label={'Expand ' + TITLES[view] + ' to the main area'} className={'ml-auto ' + btn}>→</button>;
-    } else if (side === 'right') {
-        button = <button type="button" onClick={onMove} title="Expand to main area" aria-label={'Expand ' + TITLES[view] + ' to the main area'} className={'ml-auto ' + btn}>←</button>;
-    } else if (view !== 'bench') {
-        // Center holds a displaced view: arrow points back toward its home side.
-        const home = HOME[view];
-        button = <button type="button" onClick={onMove} title="Return to sidebar" aria-label={'Return ' + TITLES[view] + ' to its sidebar'} className={'ml-auto ' + btn}>{home === 'left' ? '←' : '→'}</button>;
-    }
-    return (
-        <div className="flex items-center gap-2 border-b border-neutral-800 pb-2">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300">{TITLES[view]}</h2>
-            <span className="text-[10px] uppercase tracking-wide text-neutral-600">{side === 'center' ? 'main' : 'sidebar'}</span>
-            {button}
-        </div>
-    );
-}
+registerPanel('chat', 'Chat', () => <ChatPanel />);
+registerPanel('preset-dock', 'Preset Inspector', () => <PresetDock />);
+registerPanel('launch-bar', 'Launch Bar', () => <LaunchBar />);
+registerPanel('rpc-worker', 'RPC Worker', () => <RpcWorkerPanel />);
+registerPanel('overview', 'Overview', () => <OverviewPanel />);
+registerPanel('monitor', 'Monitor', () => <MonitorPanel />);
+registerPanel('logs', 'Logs', () => <LogsPanel />);
+registerPanel('live-requests', 'Live Requests', () => <LiveRequestsPanel />);
+registerPanel('history', 'History', () => <HistoryPanel />);
+registerPanel('bench', 'Bench', () => <BenchPanel />);
+registerPanel('upgrade', 'Upgrade', () => <UpgradePanel />);
+registerPanel('files', 'File Browser', () => <FileBrowserPanel />);
 
 function EngineStatusBanner() {
     const { state, connected } = useServer();
@@ -98,19 +51,25 @@ function EngineStatusBanner() {
     );
 }
 
+function PresetBrowserMount() {
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            const isK = event.key === 'k' || event.key === 'K';
+            const cmd = event.metaKey || event.ctrlKey;
+            if (cmd && isK) { event.preventDefault(); presetBrowser.setOpen(true); }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+    return <PresetBrowserDialog onClose={() => presetBrowser.setOpen(false)} />;
+}
+
 export default function App() {
-    const [slots, setSlots] = useState<Slots>(loadSlots);
     const { config } = useServer();
     const onMessage = useCallback((data: string) => { applySseFrame(data); }, []);
     const { connected } = useSse('/api/status', onMessage);
     useEffect(() => { setSseConnected(connected); }, [connected]);
-    useEffect(() => {
-        api<ConfigResponse>('/api/config').then(setServerConfig).catch(() => {});
-    }, []);
-    useEffect(() => { saveJson('layout_slots', slots); }, [slots]);
-
-    const expandSide = (side: 'left' | 'right') => setSlots(old => swapWithCenter(old, side));
-    const collapseCenter = () => setSlots(old => swapWithCenter(old, HOME[old.center] === 'right' ? 'right' : 'left'));
+    useEffect(() => { api<ConfigResponse>('/api/config').then(setServerConfig).catch(() => {}); }, []);
 
     return (
         <div className="min-h-screen bg-neutral-950 text-slate-100">
@@ -126,37 +85,17 @@ export default function App() {
                             </>
                         )}
                         <span className={connected ? 'text-emerald-500' : 'text-amber-500'}>{connected ? 'connected' : 'connecting'}</span>
+                        <PanelVisibilityMenu />
                     </div>
                 </nav>
             </header>
             <section className="border-b border-neutral-800 bg-neutral-900 px-4 py-2" aria-live="polite">
                 <EngineStatusBanner />
             </section>
-            <main className="grid gap-4 px-4 py-4 lg:grid-cols-[26rem_minmax(0,1fr)_26rem] lg:items-start">
-                {/* Keyed by view, not slot: React keeps each panel mounted (charts,
-                    buffers, form state intact) and only its grid position changes. */}
-                {VIEWS.map(view => {
-                    const side = SIDES.find(s => slots[s] === view) as Side;
-                    const onMove = side === 'center' ? collapseCenter : () => expandSide(side);
-                    const sidebar = side !== 'center';
-                    // Explicit row+column: DOM order differs from visual order after a
-                    // swap, and grid auto-placement would push later DOM items to row 2.
-                    const placement = side === 'left' ? 'lg:col-start-1 lg:row-start-1' : side === 'center' ? 'lg:col-start-2 lg:row-start-1' : 'lg:col-start-3 lg:row-start-1';
-                    return (
-                        <section
-                            key={view}
-                            aria-label={TITLES[view] + (sidebar ? ' sidebar' : ' main area')}
-                            className={
-                                'min-w-0 space-y-4 ' + placement
-                                + (sidebar ? ' lg:sticky lg:top-4 lg:max-h-[calc(100dvh-2rem)] lg:overflow-y-auto lg:pr-1' : '')
-                            }
-                        >
-                            <SlotHeader view={view} side={side} onMove={onMove} />
-                            <ViewContent view={view} />
-                        </section>
-                    );
-                })}
+            <main className="px-2 py-4">
+                <PanelCanvas />
             </main>
+            <PresetBrowserMount />
         </div>
     );
 }

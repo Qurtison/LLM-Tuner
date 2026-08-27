@@ -2,21 +2,11 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig, type Plugin } from 'vite';
 
+const favicon = '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 32 32\'%3E%3Crect width=\'32\' height=\'32\' rx=\'6\' fill=\'%23171717\'/%3E%3Ctext x=\'16\' y=\'22\' font-family=\'monospace\' font-size=\'16\' font-weight=\'bold\' fill=\'%23a5b4fc\' text-anchor=\'middle\'%3EMC%3C/text%3E%3C/svg%3E" />';
+
 function clientHtml(): Plugin {
-  const favicon = '<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' viewBox=\'0 0 32 32\'%3E%3Crect width=\'32\' height=\'32\' rx=\'6\' fill=\'%23171717\'/%3E%3Ctext x=\'16\' y=\'22\' font-family=\'monospace\' font-size=\'16\' font-weight=\'bold\' fill=\'%23a5b4fc\' text-anchor=\'middle\'%3EMC%3C/text%3E%3C/svg%3E" />';
-  const devHtml = '<!doctype html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" />' + favicon + '</head><body><div id="root"></div><script type="module" src="/src/client/main.tsx"></script></body></html>';
   return {
     name: 'client-html',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        if (req.url === '/' || req.url?.startsWith('/?')) {
-          res.setHeader('Content-Type', 'text/html');
-          res.end(devHtml);
-          return;
-        }
-        next();
-      });
-    },
     generateBundle(_, bundle) {
       const js = Object.keys(bundle).find((file) => file.endsWith('.js'));
       const css = Object.keys(bundle).find((file) => file.endsWith('.css'));

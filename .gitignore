@@ -9,3 +9,6 @@ dist/
 # runtime state (repo root only; src/client/features/presets/ and
 # src/client/features/logs/ are source code)
 /presets/
+
+# local llama.cpp checkout for param --help parsing (built binary, ~5GB with build/)
+/llama.cpp/

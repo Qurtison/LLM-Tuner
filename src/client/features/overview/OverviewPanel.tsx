@@ -1,6 +1,6 @@
 // Overview panel (gaps G4/G6/G7): server paths, unit status, GPU summary
 // (progress-derived prefill/gen + live telemetry cards). Read-only here —
-// presets/unit actions live in their own panels.
+// preset settings live in the PresetDock and the ⌘K preset browser.
 import { useEffect, useState } from 'react';
 import { api } from '../../api/client';
 import { useTelemetryLatest } from '../../hooks/useTelemetry';
