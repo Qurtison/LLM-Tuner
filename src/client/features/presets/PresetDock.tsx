@@ -106,6 +106,7 @@ function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) 
 
     const commit = () => {
         const next = parseInput(entry.field, draft, control);
+        console.debug('[pdbg] dock-commit', entry.paramId, 'control=' + control, 'draft=' + JSON.stringify(draft), 'parsed=' + JSON.stringify(next), 'type=' + typeof next);
         if (next === undefined) onReset();
         else onChange(next);
         setEditing(false);
@@ -142,6 +143,7 @@ function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) 
         }
         const inputType = control === 'int' || control === 'float' ? 'number' : 'text';
         const step = control === 'float' ? 'any' : undefined;
+        if (inputType === 'number') console.debug('[pdbg] dock-input', entry.paramId, 'control=' + control, 'type=' + inputType, 'step=' + String(step));
         return (
             <input
                 ref={inputRef as React.RefObject<HTMLInputElement>}
