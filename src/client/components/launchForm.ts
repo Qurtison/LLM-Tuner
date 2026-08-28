@@ -99,8 +99,11 @@ export function useLaunchForm(): {
         try {
             const data = await api<PreviewCommandResponse>('/api/preview-command', { method: 'POST', body: JSON.stringify(request()) });
             if (data.error) throw new Error(data.error);
+            // Preview is read-only: it must NOT write form.rawCommand —
+            // a non-empty rawCommand makes the server launch the literal
+            // string and silently ignore every structured field (preset
+            // diffs, paramOverrides) edited after the preview.
             setPreview(data.command);
-            set('rawCommand', data.command);
         } catch (err) {
             setActionError(err instanceof Error ? err.message : 'Command preview failed.');
         } finally { setPreviewBusy(false); }
