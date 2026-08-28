@@ -114,7 +114,6 @@ class PresetsStore {
     }
 
     setValue<K extends keyof LaunchConfig>(field: K, value: LaunchConfig[K]): void {
-        console.log('[pdbg] setValue', String(field), 'value=' + JSON.stringify(value), 'typeof=' + typeof value);
         const draft = { ...this.value.get().draft };
         if (value === undefined || value === null || value === '') {
             delete (draft as Record<string, unknown>)[field as string];
@@ -142,7 +141,6 @@ class PresetsStore {
         const draft = { ...this.value.get().draft };
         const bag = { ...(draft.paramOverrides ?? {}) };
         const def = paramDefById(id);
-        console.log('[pdbg] setParam', id, 'value=' + JSON.stringify(value), 'typeof=' + typeof value, 'defControl=' + (def ? def.control : 'NO-DEF'), 'default=' + JSON.stringify(def ? def.default : null));
         if (value === undefined || value === null || value === '') {
             delete bag[id];
         } else if (def && def.default !== undefined && JSON.stringify(value) === JSON.stringify(def.default)) {
@@ -150,7 +148,6 @@ class PresetsStore {
         } else {
             bag[id] = value;
         }
-        console.log('[pdbg] setParam-result', id, bag[id] !== undefined ? 'kept=' + JSON.stringify(bag[id]) : 'deleted');
         this.applyBag(draft, bag);
         this.value.set({ ...this.value.get(), draft });
         this.recomputeDirty();

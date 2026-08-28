@@ -165,3 +165,11 @@ export function configWithOverrides(overrides: Record<keyof LaunchConfig, unknow
 export function paramDefById(id: ParamId): ParamDef | undefined {
     return PARAM_BY_ID[id];
 }
+
+// Int fields must receive integers: reject (never truncate) decimals and
+// non-numeric text, so a typo can't silently save 0 or a string flag value.
+// '' is valid here — empty input means "reset", handled by the caller.
+export function intInputValid(raw: string): boolean {
+    if (raw.trim() === '') return true;
+    return Number.isInteger(Number(raw));
+}

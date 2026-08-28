@@ -22,7 +22,7 @@ import {
     type ParamScope,
 } from '../../../../shared/llama-params';
 import type { LaunchConfig, ModelEntry } from '../../../../shared/contracts';
-import { fieldForParamId, overridesFromConfig } from './registry';
+import { fieldForParamId, overridesFromConfig, intInputValid } from './registry';
 
 const GROUP_LABELS: Record<ParamGroup, string> = {
     speed: 'Speed & threads',
@@ -311,14 +311,19 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     const latest = useRef(draftVal);
     const touched = useRef(false);
 
-    useEffect(() => { console.log('[pdbg] sync-reset', def.id, 'currentValue=' + JSON.stringify(currentValue), 'control=' + def.control); setDraftVal(toInput(currentValue, def.control)); }, [currentValue, def.control]);
+    useEffect(() => { setDraftVal(toInput(currentValue, def.control)); }, [currentValue, def.control]);
     useEffect(() => { latest.current = draftVal; }, [draftVal]);
 
     // Commit an explicit raw value: setState in the same tick is async, so
     // parsing draftVal inside the change handler would commit the OLD value.
     const commitRowValue = (raw: string | boolean) => {
+        const s = String(raw);
+        if (def.control === 'int' && !intInputValid(s)) {
+            // decimal/garbage in an int field: revert the input, save nothing
+            setDraftVal(toInput(currentValue, def.control));
+            return;
+        }
         const next = parseInput(raw, def.control);
-        console.log('[pdbg] commit', def.id, 'control=' + def.control, 'raw=' + JSON.stringify(raw), 'parsed=' + JSON.stringify(next), 'type=' + typeof next, 'field=' + String(field));
         if (next === undefined) {
             if (field) onChange(undefined);
         } else {
@@ -334,11 +339,9 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     // the user actually typed, or every browsed row would become an
     // "override" of its own current value.
     useEffect(() => () => {
-        console.log('[pdbg] unmount', def.id, 'touched=' + touched.current, 'latest=' + JSON.stringify(latest.current));
         if (touched.current) commitRowValue(latest.current);
     }, []);
     const trackValue = (v: string | boolean) => {
-        console.log('[pdbg] keystroke', def.id, 'control=' + def.control, 'raw=' + JSON.stringify(v));
         if (v !== toInput(currentValue, def.control)) touched.current = true;
         setDraftVal(v);
     };
@@ -403,7 +406,6 @@ function renderControl(def: ParamDef, value: string | boolean, setValue: (v: str
     }
     const type = def.control === 'int' || def.control === 'float' ? 'number' : 'text';
     const step = def.control === 'float' ? 'any' : undefined;
-    if (type === 'number') console.log('[pdbg] input-render', def.id, 'control=' + def.control, 'type=' + type, 'step=' + String(step), 'disabled=' + disabled);
     return (
         <input
             id={id}

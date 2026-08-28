@@ -19,6 +19,7 @@ import { GROUP_ORDER, type ParamGroup } from '../../../../shared/llama-params';
 import type { LaunchConfig, Preset, ModelEntry } from '../../../../shared/contracts';
 import { ModelSelect } from './ModelSelect';
 import type { OverrideEntry } from './registry';
+import { intInputValid } from './registry';
 
 const GROUP_LABELS: Record<ParamGroup, string> = {
     speed: 'Speed & threads',
@@ -105,8 +106,12 @@ function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) 
     }, [editing]);
 
     const commit = () => {
+        if (control === 'int' && !intInputValid(String(draft))) {
+            // decimal/garbage in an int field: revert the input, save nothing
+            setDraft(toInputValue(entry.field, entry.value, control));
+            return;
+        }
         const next = parseInput(entry.field, draft, control);
-        console.log('[pdbg] dock-commit', entry.paramId, 'control=' + control, 'draft=' + JSON.stringify(draft), 'parsed=' + JSON.stringify(next), 'type=' + typeof next);
         if (next === undefined) onReset();
         else onChange(next);
         setEditing(false);
@@ -143,7 +148,6 @@ function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) 
         }
         const inputType = control === 'int' || control === 'float' ? 'number' : 'text';
         const step = control === 'float' ? 'any' : undefined;
-        if (inputType === 'number') console.log('[pdbg] dock-input', entry.paramId, 'control=' + control, 'type=' + inputType, 'step=' + String(step));
         return (
             <input
                 ref={inputRef as React.RefObject<HTMLInputElement>}

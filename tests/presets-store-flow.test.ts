@@ -125,3 +125,18 @@ describe('launch.js paramOverrides rendering', () => {
         expect(args.filter(a => a === '262144').length).toBe(1);
     });
 });
+
+describe('intInputValid (int fields reject decimals, no silent truncation)', () => {
+    it('accepts integers and empty, rejects decimals and garbage', async () => {
+        const { intInputValid } = await import('../src/client/features/presets/registry');
+        expect(intInputValid('')).toBe(true);
+        expect(intInputValid('  ')).toBe(true);
+        expect(intInputValid('0')).toBe(true);
+        expect(intInputValid('-1')).toBe(true);
+        expect(intInputValid('40')).toBe(true);
+        expect(intInputValid('0.05')).toBe(false);
+        expect(intInputValid('1.0')).toBe(true);
+        expect(intInputValid('1.5')).toBe(false);
+        expect(intInputValid('abc')).toBe(false);
+    });
+});
