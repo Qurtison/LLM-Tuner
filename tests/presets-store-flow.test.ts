@@ -139,4 +139,15 @@ describe('intInputValid (int fields reject decimals, no silent truncation)', () 
         expect(intInputValid('1.5')).toBe(false);
         expect(intInputValid('abc')).toBe(false);
     });
+
+    it('toInput shows the effective default for unset numeric rows', async () => {
+        const { toInput } = await import('../src/client/features/presets/PresetBrowserDialog');
+        const { PARAM_BY_ID } = await import('../shared/llama-params');
+        expect(toInput(undefined, 'float', PARAM_BY_ID['top_p'])).toBe('0.95');
+        expect(toInput(undefined, 'float', PARAM_BY_ID['min_p'])).toBe('0.05');
+        expect(toInput(undefined, 'int', PARAM_BY_ID['top_k'])).toBe('40');
+        expect(toInput(0.8, 'float', PARAM_BY_ID['top_p'])).toBe('0.8');
+        expect(toInput(undefined, 'text')).toBe('');
+        expect(toInput('x', 'text')).toBe('x');
+    });
 });

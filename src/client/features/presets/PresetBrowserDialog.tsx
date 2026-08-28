@@ -307,11 +307,11 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     const { def, modified, currentValue, field } = row;
     const isArchive = def.scope === 'archive';
     const disabled = isArchive && currentValue === undefined;
-    const [draftVal, setDraftVal] = useState<string | boolean>(() => toInput(currentValue, def.control));
+    const [draftVal, setDraftVal] = useState<string | boolean>(() => toInput(currentValue, def.control, def));
     const latest = useRef(draftVal);
     const touched = useRef(false);
 
-    useEffect(() => { setDraftVal(toInput(currentValue, def.control)); }, [currentValue, def.control]);
+    useEffect(() => { setDraftVal(toInput(currentValue, def.control, def)); }, [currentValue, def.control]);
     useEffect(() => { latest.current = draftVal; }, [draftVal]);
 
     // Commit an explicit raw value: setState in the same tick is async, so
@@ -342,7 +342,7 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
         if (touched.current) commitRowValue(latest.current);
     }, []);
     const trackValue = (v: string | boolean) => {
-        if (v !== toInput(currentValue, def.control)) touched.current = true;
+        if (v !== toInput(currentValue, def.control, def)) touched.current = true;
         setDraftVal(v);
     };
 
@@ -370,9 +370,15 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     );
 }
 
-function toInput(value: unknown, control: string): string | boolean {
+export function toInput(value: unknown, control: string, def?: ParamDef): string | boolean {
     if (control === 'toggle') return Boolean(value);
-    if (value === undefined || value === null) return '';
+    if (value === undefined || value === null) {
+        // No override: show the effective default so a numeric row never
+        // reads as empty. Typing the default back commits as a no-op and
+        // the box keeps showing the value instead of clearing.
+        if ((control === 'int' || control === 'float') && def && def.default !== undefined) return String(def.default);
+        return '';
+    }
     if (Array.isArray(value)) return value.join(', ');
     return String(value);
 }
