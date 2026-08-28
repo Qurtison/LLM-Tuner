@@ -132,7 +132,7 @@ export function PanelShell({ id, title, children, onDragStart, onResizeStart }: 
             <header className="flex items-center gap-2 border-b border-neutral-800 px-3 py-2">
                 <span onPointerDown={onDragStart} className="cursor-grab touch-none select-none text-neutral-600 hover:text-neutral-300" aria-label={'Drag ' + title} title="Drag to move">⋮⋮</span>
                 <h2 className="text-xs font-bold uppercase tracking-wider text-neutral-300">{title}</h2>
-                <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="ml-auto rounded px-2 py-0.5 text-[11px] text-neutral-500 hover:text-neutral-200">{collapsed ? '▾' : '▴'}</button>
+                <button type="button" onClick={onToggle} aria-expanded={!collapsed} aria-label={collapsed ? 'Expand ' + title : 'Minimize ' + title} className="ml-auto rounded px-2 py-0.5 text-[11px] text-neutral-500 hover:text-neutral-200">{collapsed ? '▴' : '▾'}</button>
             </header>
             {collapsed
                 ? <div className="flex-1" onPointerDown={onDragStart} />
@@ -230,7 +230,7 @@ export function PanelCanvas() {
                         <div
                             key={id}
                             className="absolute"
-                            style={{ left: g.x, top: g.y, width: g.w, height: g.h, zIndex: drag?.id === id ? 30 : undefined }}
+                            style={{ left: g.x, top: g.y, width: g.w, height: state.collapsed[id] ? 'auto' : g.h, zIndex: drag?.id === id ? 30 : undefined }}
                         >
                             <PanelShell
                                 id={id}
