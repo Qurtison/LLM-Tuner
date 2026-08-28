@@ -1,37 +1,56 @@
-const { spawn } = require('child_process');
-const fs = require('fs');
-const http = require('http');
-const os = require('os');
-const path = require('path');
+import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
-const repoRoot = path.resolve(__dirname, '../..');
+export interface TestServer {
+    baseUrl: string;
+    url: (p: string) => string;
+    port: number;
+    tempDir: string;
+    readonly output: string;
+    child: ChildProcess;
+    stop: () => Promise<void>;
+}
+
+export interface TestServerOptions {
+    models?: string[];
+    config?: Record<string, unknown>;
+    entry?: string;
+}
+
+const repoRoot = path.resolve(import.meta.dir, '..', '..');
 const fixturesRoot = path.join(repoRoot, 'tests', 'fixtures');
 
-function randomPort() {
+function randomPort(): number {
     return 20000 + Math.floor(Math.random() * 20001);
 }
 
-function merge(base, extra) {
-    const result = { ...base };
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+    return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function merge(base: Record<string, unknown>, extra: Record<string, unknown> | undefined): Record<string, unknown> {
+    const result: Record<string, unknown> = { ...base };
     for (const [key, value] of Object.entries(extra || {})) {
-        result[key] = value && typeof value === 'object' && !Array.isArray(value) && result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])
-            ? merge(result[key], value)
-            : value;
+        const prev = result[key];
+        result[key] = isPlainObject(value) && isPlainObject(prev) ? merge(prev, value) : value;
     }
     return result;
 }
 
-function request(url) {
+function request(url: string): Promise<number> {
     return new Promise((resolve, reject) => {
         const req = http.get(url, res => {
             res.resume();
-            resolve(res.statusCode);
+            resolve(res.statusCode ?? 0);
         });
         req.on('error', reject);
     });
 }
 
-async function startTestServer(opts = {}) {
+export async function startTestServer(opts: TestServerOptions = {}): Promise<TestServer> {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dash-'));
     const modelsDir = path.join(tempDir, 'models');
     const logsDir = path.join(tempDir, 'logs');
@@ -56,6 +75,9 @@ async function startTestServer(opts = {}) {
         processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 1500 },
         worker: { sshHost: '', rpcTarget: '', workDirectory: '', startCommand: 'echo up', stopCommand: 'echo down', statusCommand: 'echo', logsCommand: 'echo no logs', transportPresets: [] }
     }, opts.config || {});
+    // ponytail: merge() is untyped; the defaults above pin the shape the
+    // test server actually reads.
+    const cfg = config as { server: { port: number }; telemetry: { port: number } };
     fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(config));
     let output = '';
     // Entry under test: the Bun server. (The legacy server4.js entry and its
@@ -64,26 +86,33 @@ async function startTestServer(opts = {}) {
     const entry = opts.entry || path.join(repoRoot, 'src', 'server', 'index.ts');
     const child = spawn(process.execPath, [entry], {
         cwd: repoRoot,
-        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(config.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
+        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(cfg.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });
-    const append = chunk => { output = (output + chunk).slice(-1024 * 1024); };
-    child.stdout.on('data', append);
-    child.stderr.on('data', append);
-    const baseUrl = 'http://127.0.0.1:' + config.server.port;
-    const handle = { baseUrl, url: p => baseUrl + p, port: config.server.port, tempDir, get output() { return output; }, child, stop: null };
-    handle.stop = () => stopTestServer(handle);
+    const append = (chunk: Buffer | string): void => { output = (output + chunk).slice(-1024 * 1024); };
+    child.stdout?.on('data', append);
+    child.stderr?.on('data', append);
+    const baseUrl = 'http://127.0.0.1:' + cfg.server.port;
+    const handle: TestServer = {
+        baseUrl,
+        url: p => baseUrl + p,
+        port: cfg.server.port,
+        tempDir,
+        get output() { return output; },
+        child,
+        stop: () => stopTestServer(handle),
+    };
     const until = Date.now() + 15000;
     while (Date.now() < until) {
-        try { if (await request(handle.url('/api/config')) === 200) return handle; } catch {}
+        try { if (await request(handle.url('/api/config')) === 200) return handle; } catch { /* not ready yet */ }
         await Bun.sleep(100);
     }
     await handle.stop();
     throw new Error('Dashboard readiness timed out:\n' + output.slice(-4096));
 }
 
-function stopTestServer(handle) {
+export function stopTestServer(handle: TestServer): Promise<void> {
     return new Promise(resolve => {
         if (handle.child.exitCode !== null || handle.child.signalCode) return resolve();
         const timer = setTimeout(() => {
@@ -93,5 +122,3 @@ function stopTestServer(handle) {
         handle.child.kill('SIGTERM');
     });
 }
-
-module.exports = { startTestServer, stopTestServer };

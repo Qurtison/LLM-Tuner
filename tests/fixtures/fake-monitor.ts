@@ -1,3 +1,4 @@
+export {}; // module marker: keep top-level consts out of the global scope (typecheck)
 const port = Number(process.env.FAKE_MONITOR_PORT || 0);
 
 if (process.env.FAKE_MONITOR_PIDFILE) Bun.write(process.env.FAKE_MONITOR_PIDFILE, String(process.pid));

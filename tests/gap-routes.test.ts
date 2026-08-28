@@ -1,17 +1,18 @@
 // Gap-closing route tests: presets (G1), files (G5), unit (G2 disabled
 // path), apply, server-paths (G7). Unit tests use manageViaSystemd=false
 // so systemctl is never invoked.
-const { afterAll, beforeAll, describe, expect, it } = require('bun:test');
-const fs = require('fs');
-const path = require('path');
-const { startTestServer, stopTestServer } = require('./helpers/test-server');
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import * as path from 'node:path';
+import { startTestServer, stopTestServer, type TestServer } from './helpers/test-server';
 
-let server;
+let server: TestServer;
 
-async function json(url, options) {
+async function json(url: string, options?: RequestInit): Promise<{ response: Response; body: any }> {
+    // ponytail: API bodies are asserted field-by-field; any keeps the helper
+    // generic (matches the pre-TS require() version).
     return fetch(url, options).then(async response => ({ response, body: await response.json().catch(() => null) }));
 }
-async function post(route, body) {
+async function post(route: string, body: unknown) {
     return json(server.url(route), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
 
@@ -32,7 +33,7 @@ describe('gap routes', () => {
         expect(created.response.status).toBe(200);
         expect(created.body.ok).toBe(true);
         const list = await json(server.url('/api/presets'));
-        expect(list.body.presets.some(p => p.name === 'test-preset')).toBe(true);
+        expect(list.body.presets.some((p: { name: string }) => p.name === 'test-preset')).toBe(true);
         const activate = await post('/api/presets/test-preset/activate', {});
         expect(activate.body.active).toBe('test-preset');
         const got = await json(server.url('/api/presets/test-preset'));
@@ -42,16 +43,16 @@ describe('gap routes', () => {
         const del = await fetch(server.url('/api/presets/test-preset'), { method: 'DELETE' });
         expect(del.status).toBe(200);
         const list2 = await json(server.url('/api/presets'));
-        expect(list2.body.presets.some(p => p.name === 'test-preset')).toBe(false);
+        expect(list2.body.presets.some((p: { name: string }) => p.name === 'test-preset')).toBe(false);
     });
 
     it('files tree + delete', async () => {
         const list = await json(server.url('/api/files'));
-        expect(list.body.entries.some(e => e.name === 'fake.gguf' && !e.isDir)).toBe(true);
+        expect(list.body.entries.some((e: { name: string; isDir: boolean }) => e.name === 'fake.gguf' && !e.isDir)).toBe(true);
         const del = await post('/api/files/delete', { path: 'fake.gguf' });
         expect(del.body.ok).toBe(true);
         const list2 = await json(server.url('/api/files'));
-        expect(list2.body.entries.some(e => e.name === 'fake.gguf')).toBe(false);
+        expect(list2.body.entries.some((e: { name: string }) => e.name === 'fake.gguf')).toBe(false);
         // traversal guard
         const bad = await json(server.url('/api/files?path=..%2F..%2Fetc'));
         expect(bad.response.status).toBe(400);

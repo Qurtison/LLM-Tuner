@@ -1,24 +1,24 @@
-const { afterEach, describe, expect, it } = require('bun:test');
-const { spawn, spawnSync } = require('child_process');
-const { startTestServer, stopTestServer } = require('./helpers/test-server');
+import { afterEach, describe, expect, it } from 'bun:test';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { startTestServer, stopTestServer, type TestServer } from './helpers/test-server';
 
-function port() { return 20000 + Math.floor(Math.random() * 20001); }
+function port(): number { return 20000 + Math.floor(Math.random() * 20001); }
 
-function startDummy(target) {
+function startDummy(target: number): ChildProcess {
     const child = spawn(process.execPath, ['-e', `Bun.serve({ port: ${target}, hostname: '127.0.0.1', fetch: () => new Response('dummy') });`], { stdio: 'ignore' });
     return child;
 }
 
-async function ready(target) {
+async function ready(target: number): Promise<void> {
     const end = Date.now() + 5000;
     while (Date.now() < end) {
-        try { if (await (await fetch('http://127.0.0.1:' + target + '/')).text() === 'dummy') return; } catch {}
+        try { if (await (await fetch('http://127.0.0.1:' + target + '/')).text() === 'dummy') return; } catch { /* not up yet */ }
         await Bun.sleep(50);
     }
     throw new Error('Dummy listener did not start');
 }
 
-async function eventuallyFails(url) {
+async function eventuallyFails(url: string): Promise<void> {
     const end = Date.now() + 15000;
     while (Date.now() < end) {
         try { await fetch(url); } catch { return; }
@@ -28,8 +28,8 @@ async function eventuallyFails(url) {
 }
 
 describe('startup port cleanup', () => {
-    let dashboard;
-    let dummy;
+    let dashboard: TestServer | null = null;
+    let dummy: ChildProcess | null = null;
     afterEach(async () => {
         if (dashboard) await stopTestServer(dashboard);
         dashboard = null;

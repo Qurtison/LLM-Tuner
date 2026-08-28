@@ -1,40 +1,35 @@
 /*
- * ponytail: verbatim extraction for Phase 1 tests; convert to TS in Phase 3.
- *
- * Extracted verbatim from server4.js launch-resolution helpers (lines 374-556):
- *  - toFiniteNumber / toNonEmptyString (pure coercion helpers, also used by
- *    routes; duplicated here verbatim so this module has no server4.js dep)
+ * Launch-resolution helpers (extracted from the legacy server):
+ *  - toFiniteNumber / toNonEmptyString (pure coercion helpers)
  *  - buildLlamaArgs
  *  - resolveLaunchCommand
  *  - getLlamaServerBinary / isValidBuild / hostFromRpcTarget
  *
- * Requires tokenize.js for tokenizeCommand (verbatim move).
- * Note: getLlamaServerBinary takes the filtered builds list as an arg now;
- * server4.js owns the config-backed build list (Phase 2) and passes it in.
- * rpcPort/defaultPort opts flow in from server config (Phase 2).
+ * tokenizeCommand comes from ./tokenize. getLlamaServerBinary takes the
+ * filtered builds list as an arg; the server owns the config-backed build
+ * list and passes it in. rpcPort/defaultPort opts flow in from server config.
  */
-'use strict';
+import { tokenizeCommand } from './tokenize';
+import { PARAM_BY_ID, type ParamDef } from '../../../shared/llama-params';
+import type { BuildEntry, LaunchConfig } from '../../../shared/contracts';
 
-const { tokenizeCommand } = require('./tokenize');
-
-// Param registry (TS) for the paramOverrides bag. Bun requires .ts fine;
-// if unavailable the bag is ignored rather than breaking launches.
-let PARAM_BY_ID = null;
-try {
-    ({ PARAM_BY_ID } = require('../../../shared/llama-params.ts'));
-} catch (e) {
-    console.error('[launch] param registry load failed:', e && e.message);
-    PARAM_BY_ID = null;
-}
+// The resolver treats the launch config as untrusted input: every field is
+// coerced (toFiniteNumber/toNonEmptyString) before use. Keys are typed
+// `unknown` (not LaunchConfig's own types) because user JSON and tests feed
+// numbers where the frozen contract says string (e.g. tensorSplit).
+// (The index signature covers config fields the resolver reads that are not
+// in the frozen contract, e.g. topK/topP/minP from raw launch bodies.)
+export type LaunchInput = { [K in keyof LaunchConfig]?: unknown } & Record<string, unknown>;
 
 // Render param-id overrides (LaunchConfig.paramOverrides) into CLI flags.
 // Toggle params emit just the flag; everything else emits 'flag value'
 // (arrays join to comma lists). Unknown ids and empty values are skipped.
-function appendParamOverrideArgs(args, overrides) {
+function appendParamOverrideArgs(args: string[], overrides: unknown): void {
     if (!overrides || typeof overrides !== 'object') return;
-    for (const id of Object.keys(overrides)) {
-        const def = PARAM_BY_ID ? PARAM_BY_ID[id] : null;
-        const value = overrides[id];
+    const bag = overrides as Record<string, unknown>;
+    for (const id of Object.keys(bag)) {
+        const def: ParamDef | undefined = PARAM_BY_ID[id];
+        const value = bag[id];
         if (!def || !Array.isArray(def.flags) || def.flags.length === 0) continue;
         if (value === undefined || value === null || value === '') continue;
         if (def.control === 'toggle') {
@@ -51,7 +46,7 @@ function appendParamOverrideArgs(args, overrides) {
 // empty, or not numeric. Number.isNaN() alone is NOT sufficient: it doesn't
 // coerce, so '' and 'abc' sail through it, and an empty string would emit a
 // flag with no value (e.g. `--top-k` "").
-function toFiniteNumber(v) {
+export function toFiniteNumber(v: unknown): number | undefined {
     if (v === null || v === undefined) return undefined;
     if (typeof v === 'boolean') return undefined;
     if (typeof v === 'string' && v.trim() === '') return undefined;
@@ -61,7 +56,7 @@ function toFiniteNumber(v) {
 
 // Coerce to a non-empty trimmed string, or undefined. Preserves "0" (unlike
 // `v || undefined`, which would drop a legitimate zero).
-function toNonEmptyString(v) {
+export function toNonEmptyString(v: unknown): string | undefined {
     if (v === null || v === undefined) return undefined;
     const s = String(v).trim();
     return s.length > 0 ? s : undefined;
@@ -70,7 +65,7 @@ function toNonEmptyString(v) {
 // Legacy/mismatched presets may hold KNOWN params in the overrides bag
 // (e.g. ctx_size instead of ctx). Promote them to real fields before the
 // required-knob validation so `-c`/`-ngl` etc. render once, from fields.
-const BAG_ID_TO_FIELD = {
+const BAG_ID_TO_FIELD: Record<string, string> = {
     ctx_size: 'ctx', n_gpu_layers: 'ngl', flash_attn: 'fa',
     cache_type_k: 'cacheK', cache_type_v: 'cacheV', temperature: 'temp',
     port: 'port', jinja: 'jinja', load_mode: 'loadMode', verbosity: 'verbosity',
@@ -78,45 +73,45 @@ const BAG_ID_TO_FIELD = {
     reasoning_preserve: 'reasoningPreserve',
 };
 
-function promoteBagToFields(config) {
+function promoteBagToFields(config: LaunchInput): LaunchInput {
     const bag = config.paramOverrides;
     if (!bag || typeof bag !== 'object') return config;
-    const promoted = {};
+    const overrides = bag as Record<string, unknown>;
+    const promoted: string[] = [];
     for (const [id, field] of Object.entries(BAG_ID_TO_FIELD)) {
-        if (bag[id] === undefined || config[field] !== undefined) continue;
-        config[field] = bag[id];
-        promoted[id] = true;
+        if (overrides[id] === undefined || config[field] !== undefined) continue;
+        config[field] = overrides[id];
+        promoted.push(id);
     }
-    if (Object.keys(promoted).length > 0) {
-        config.paramOverrides = { ...bag };
-        for (const id of Object.keys(promoted)) delete config.paramOverrides[id];
-        if (Object.keys(config.paramOverrides).length === 0) delete config.paramOverrides;
+    if (promoted.length > 0) {
+        const next = { ...overrides };
+        for (const id of promoted) delete next[id];
+        if (Object.keys(next).length > 0) config.paramOverrides = next;
+        else delete config.paramOverrides;
     }
     return config;
 }
 
 // Flags that llama.cpp accepts multiple times on purpose.
-const REPEATABLE_FLAGS = new Set(['-lora', '--lora', '--lora-scaled', '--header', '-H',
+const REPEATABLE_FLAGS = new Set<string>(['-lora', '--lora', '--lora-scaled', '--header', '-H',
     // -m never dedupes: raw argString remap depends on the base -m surviving.
     '-m', '--model']);
 
 // Alias map: every known flag -> its registry param id, so `-sm` and
 // `--split-mode` dedupe to the same slot. Unknown flags dedupe literally.
-let FLAG_TO_PARAM_ID = null;
-function flagToParamId(flag) {
+let FLAG_TO_PARAM_ID: Map<string, string> | null = null;
+function flagToParamId(flag: string): string | undefined {
     if (FLAG_TO_PARAM_ID === null) {
         FLAG_TO_PARAM_ID = new Map();
-        if (PARAM_BY_ID) {
-            for (const def of Object.values(PARAM_BY_ID)) {
-                if (!Array.isArray(def.flags)) continue;
-                for (const f of def.flags) FLAG_TO_PARAM_ID.set(f, def.id);
-            }
+        for (const def of Object.values(PARAM_BY_ID)) {
+            if (!Array.isArray(def.flags)) continue;
+            for (const f of def.flags) FLAG_TO_PARAM_ID.set(f, def.id);
         }
     }
     return FLAG_TO_PARAM_ID.get(flag);
 }
 
-function looksLikeFlag(token) {
+function looksLikeFlag(token: unknown): boolean {
     if (typeof token !== 'string' || !token.startsWith('-') || token === '-') return false;
     return !/^-\d+(\.\d+)?$/.test(token); // negative numbers are values
 }
@@ -125,15 +120,15 @@ function looksLikeFlag(token) {
 // LAST occurrence wins, matching llama-server arg parsing. Value flags
 // keep their value token; repeatable flags (-lora, --header, ...) keep
 // every occurrence.
-function dedupeFlags(args) {
-    const lastIndexOf = new Map();
+function dedupeFlags(args: string[]): string[] {
+    const lastIndexOf = new Map<string, number>();
     for (let i = 0; i < args.length; i++) {
         if (!looksLikeFlag(args[i])) continue;
         if (REPEATABLE_FLAGS.has(args[i])) continue;
         const key = flagToParamId(args[i]) ?? args[i];
         lastIndexOf.set(key, i);
     }
-    const out = [];
+    const out: string[] = [];
     let skipValue = false;
     for (let i = 0; i < args.length; i++) {
         const token = args[i];
@@ -156,7 +151,7 @@ function dedupeFlags(args) {
     return out;
 }
 
-function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }) {
+export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, defaultPort = 8080 }: { mapModelPath: (p: string) => string; deviceArgs: string[]; defaultPort?: number }): string[] {
     config = promoteBagToFields(config);
     // Validate the required knobs up front so a malformed config fails with a
     // clear message instead of spawning `llama-server -m undefined -c NaN`
@@ -179,7 +174,7 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }
         throw new Error('port must be an integer between 1 and 65535');
     }
 
-    const args = ['-m', mapModelPath(modelPath),
+    const args: string[] = ['-m', mapModelPath(modelPath),
         '-c', String(ctx), '-ngl', String(ngl),
         '--host', '0.0.0.0', '--port', String(port), '--metrics'];
 
@@ -199,7 +194,7 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }
         }
         const specDraftModel = toNonEmptyString(config.specDraftModel);
         if (specDraftModel) args.push('--spec-draft-model', specDraftModel);
-        const ngramFlagStems = { 'ngram-simple': 'ngram-simple', 'ngram-map-k': 'ngram-map-k', 'ngram-map-k4v': 'ngram-map-k4v' };
+        const ngramFlagStems: Record<string, string> = { 'ngram-simple': 'ngram-simple', 'ngram-map-k': 'ngram-map-k', 'ngram-map-k4v': 'ngram-map-k4v' };
         for (const type of specType.split(',').map(s => s.trim())) {
             const stem = ngramFlagStems[type];
             if (!stem) continue;
@@ -260,11 +255,13 @@ function buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort = 8080 }
     return dedupeFlags(args);
 }
 
-// A build entry is usable only if it carries a non-empty binary path --
-// dashboard.config.json is user-editable, and a half-deleted entry must not
-// corrupt the build list (see getLlamaServerBinary below).
-function isValidBuild(b) {
-    return b && typeof b.path === 'string' && b.path.trim().length > 0;
+// Structural view of a build entry: only the path matters for validity
+// (dashboard.config.json is user-editable, and a half-deleted entry must not
+// corrupt the build list).
+export type BuildLike = { id?: unknown; path?: unknown };
+
+export function isValidBuild(b: BuildLike | null | undefined): boolean {
+    return !!b && typeof b.path === 'string' && b.path.trim().length > 0;
 }
 
 // Resolves a build id to its binary path, falling back to the first
@@ -272,7 +269,7 @@ function isValidBuild(b) {
 // restored launch config from before builds existed (no `build` field at
 // all), or a stale id left over after dashboard.config.json was edited to
 // remove a build. `builds` is the filtered list to resolve against.
-function getLlamaServerBinary(builds, buildId) {
+export function getLlamaServerBinary(builds: BuildEntry[], buildId?: string): string {
     if (!builds || builds.length === 0) {
         throw new Error('No valid llama-server builds configured');
     }
@@ -283,7 +280,7 @@ function getLlamaServerBinary(builds, buildId) {
 // Extract the bare hostname from an RPC/SSH target like "user@host:22" --
 // the RPC port (50052) is appended separately, so a user-supplied :port must
 // not survive ("host:22:50052" is not a valid RPC endpoint).
-function hostFromRpcTarget(target) {
+export function hostFromRpcTarget(target: string): string {
     const s = String(target || '').trim();
     const withoutUser = s.split('@').pop() || s;
     return withoutUser.split(':')[0];
@@ -297,19 +294,19 @@ function hostFromRpcTarget(target) {
 // The master always launches natively (no Docker) -- a local device split
 // (GPU A + GPU B) and an RPC worker are both optional add-ons on top of that,
 // not separate launch mechanisms. They're mutually exclusive in practice:
-// enabling RPC in the GUI forces GPU B back to "None" (script.js
-// applyRpcToggleUI), so at most one of localSplit/config.rpcTarget is ever
-// true below -- this only supports a 2-way split (this machine vs. one other
-// target), not a 3-way local-A + local-B + worker split.
-function resolveLaunchCommand(config, builds, { rpcPort = 50052, defaultPort = 8080 } = {}) {
-    const command = getLlamaServerBinary(builds, config.build);
-    const mapModelPath = (p) => p; // raw host path, no container mount to remap into
-    const deviceArgs = [];
+// enabling RPC in the GUI forces GPU B back to "None", so at most one of
+// localSplit/config.rpcTarget is ever true below -- this only supports a
+// 2-way split (this machine vs. one other target), not a 3-way local-A +
+// local-B + worker split.
+export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], { rpcPort = 50052, defaultPort = 8080 }: { rpcPort?: number; defaultPort?: number } = {}): { command: string; args: string[] } {
+    const command = getLlamaServerBinary(builds, config.build as string | undefined);
+    const mapModelPath = (p: string): string => p; // raw host path, no container mount to remap into
+    const deviceArgs: string[] = [];
     const localSplit = !!(config.deviceA && config.deviceB && config.deviceA !== config.deviceB);
     const rpcTarget = toNonEmptyString(config.rpcTarget);
     if (localSplit || rpcTarget) {
         deviceArgs.push('--split-mode', 'layer');
-        if (localSplit) deviceArgs.push('-dev', config.deviceA + ',' + config.deviceB);
+        if (localSplit) deviceArgs.push('-dev', String(config.deviceA) + ',' + String(config.deviceB));
         if (rpcTarget) deviceArgs.push('--rpc', hostFromRpcTarget(rpcTarget) + ':' + rpcPort);
         const tensorSplit = toFiniteNumber(config.tensorSplit);
         if (tensorSplit !== undefined && tensorSplit >= 0 && tensorSplit < 100) {
@@ -320,14 +317,3 @@ function resolveLaunchCommand(config, builds, { rpcPort = 50052, defaultPort = 8
     const args = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort });
     return { command, args };
 }
-
-module.exports = {
-    appendParamOverrideArgs,
-    toFiniteNumber,
-    toNonEmptyString,
-    isValidBuild,
-    getLlamaServerBinary,
-    hostFromRpcTarget,
-    buildLlamaArgs,
-    resolveLaunchCommand,
-};

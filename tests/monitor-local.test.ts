@@ -9,7 +9,7 @@ const hasPython = process.platform !== 'win32' && Boolean(Bun.which('python3'));
 const run = hasPython ? test : test.skip;
 
 run('monitor._is_same_host marks shared-host worker targets', async () => {
-    const cases = [
+    const cases: [string, boolean][] = [
         ['localhost', true],
         ['127.0.0.1', true],
         ['::1', true],

@@ -1,6 +1,7 @@
 import { test, expect } from 'bun:test';
 import { overridesFromConfig, configWithOverrides, paramForField } from '../src/client/features/presets/registry';
-import { PARAM_BY_ID } from '../shared/llama-params.ts';
+import { PARAM_BY_ID } from '../shared/llama-params';
+import type { LaunchConfig } from '../shared/contracts';
 
 test('paramForField: ngl maps to n_gpu_layers', () => {
     const def = paramForField('ngl');
@@ -23,7 +24,8 @@ test('overridesFromConfig: empty config yields no overrides', () => {
 test('overridesFromConfig: value equal to default is dropped (invariant)', () => {
     const def = PARAM_BY_ID['ctx_size'];
     expect(def?.default).toBeDefined();
-    const config = { ctx: def.default };
+    // ponytail: registry defaults are runtime-typed unknown; ctx_size's is a number.
+    const config: LaunchConfig = { ctx: def.default as number };
     expect(overridesFromConfig(config)).toEqual([]);
 });
 

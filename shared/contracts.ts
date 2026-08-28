@@ -6,7 +6,7 @@
 
 export type ServerState = 'stopped' | 'loading' | 'ready' | 'starting' | 'stopping';
 
-export interface LaunchConfig {
+export type LaunchConfig = {
     modelPath?: string;
     model?: string;
     ctx?: number;
@@ -51,7 +51,7 @@ export interface LaunchConfig {
     // id (shared/llama-params.ts). Rendered to CLI flags by the launch
     // resolver; dedicated fields above always win for the same param.
     paramOverrides?: Record<string, unknown>;
-}
+};
 
 export interface SseStatePayload {
     state: ServerState;

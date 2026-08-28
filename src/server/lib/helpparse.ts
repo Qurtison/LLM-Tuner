@@ -1,21 +1,25 @@
 /*
- * ponytail: verbatim extraction for Phase 1 tests; convert to TS in Phase 3.
- *
- * Extracted verbatim from server4.js `parseHelpFlags` (lines 328-368) and
- * the HELP_DESC_COLUMN constant (line 328). Splits `llama-server --help`
- * output into {flags, description, section, insertText, primaryFlag} entries.
+ * Splits `llama-server --help` output into {flags, description, section,
+ * insertText, primaryFlag} entries.
  */
-'use strict';
 
 // Flag-reference parsing: description column is column-aligned at a fixed
 // indent (verified against real output: 40 chars) rather than "first
 // big gap after the flag names", which breaks on short/long alias pairs like
 // "-c,    --ctx-size N".
-const HELP_DESC_COLUMN = 40;
+export const HELP_DESC_COLUMN = 40;
 
-function parseHelpFlags(helpText) {
+export interface HelpFlagEntry {
+    flags: string;
+    description: string;
+    section: string;
+    insertText: string;
+    primaryFlag: string;
+}
+
+export function parseHelpFlags(helpText: string): HelpFlagEntry[] {
     const lines = helpText.split('\n');
-    const entries = [];
+    const entries: HelpFlagEntry[] = [];
     let currentSection = 'general';
     for (const rawLine of lines) {
         const line = rawLine.replace(/\r$/, '');
@@ -26,7 +30,8 @@ function parseHelpFlags(helpText) {
         if (!line.trim()) continue;
         if (!/^\s/.test(line)) {
             const candidateFlagPart = line.slice(0, HELP_DESC_COLUMN);
-            let flagPart, descPart;
+            let flagPart: string;
+            let descPart: string;
             if (candidateFlagPart.trimEnd().length < HELP_DESC_COLUMN) {
                 flagPart = candidateFlagPart.trim();
                 descPart = line.slice(HELP_DESC_COLUMN).trim();
@@ -34,7 +39,7 @@ function parseHelpFlags(helpText) {
                 flagPart = line.trim();
                 descPart = '';
             }
-            entries.push({ flags: flagPart, description: descPart, section: currentSection });
+            entries.push({ flags: flagPart, description: descPart, section: currentSection, insertText: '', primaryFlag: '' });
         } else if (entries.length > 0) {
             const last = entries[entries.length - 1];
             last.description = (last.description ? last.description + ' ' : '') + line.trim();
@@ -49,5 +54,3 @@ function parseHelpFlags(helpText) {
     }
     return entries;
 }
-
-module.exports = { HELP_DESC_COLUMN, parseHelpFlags };

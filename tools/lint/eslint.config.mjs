@@ -58,17 +58,6 @@ export default tseslint.config(
     },
   },
   {
-    files: ["src/server/**/*.js", "tests/**/*.js"],
-    languageOptions: {
-      ecmaVersion: 2022,
-      sourceType: "commonjs",
-      globals: { ...globals.node, Bun: "readonly" },
-    },
-    rules: {
-      "@typescript-eslint/no-require-imports": "off",
-    },
-  },
-  {
     files: ["**/*.{ts,tsx}"],
     rules: {
       "@typescript-eslint/no-unused-vars": [

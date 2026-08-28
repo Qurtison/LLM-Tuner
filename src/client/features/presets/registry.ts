@@ -139,7 +139,7 @@ export function overridesFromConfig(config: LaunchConfig | null | undefined): Ov
     return out;
 }
 
-export function configWithOverrides(overrides: Record<keyof LaunchConfig, unknown>): LaunchConfig {
+export function configWithOverrides(overrides: Partial<Record<keyof LaunchConfig, unknown>>): LaunchConfig {
     const out: LaunchConfig = {};
     const bag = overrides.paramOverrides;
     for (const [field, value] of Object.entries(overrides)) {

@@ -1,34 +1,38 @@
-const { afterAll, beforeAll, describe, expect, it } = require('bun:test');
-const fs = require('fs');
-const http = require('http');
-const path = require('path');
-const { startTestServer, stopTestServer } = require('./helpers/test-server');
+// Route smoke tests for the Bun server: root/config/models/builds, SSE
+// status stream, CSV log rows + read models, bench lifecycle, launch
+// lifecycle, live master-log SSE, flags/devices, worker/telemetry/errors.
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import * as path from 'node:path';
+import { startTestServer, stopTestServer, type TestServer } from './helpers/test-server';
 
-let server;
+let server: TestServer;
 
-function json(url, options) {
+function json(url: string, options?: RequestInit): Promise<{ response: Response; body: any }> {
+    // ponytail: API bodies are asserted field-by-field; any keeps the helper
+    // generic (matches the pre-TS require() version).
     return fetch(url, options).then(async response => ({ response, body: await response.json() }));
 }
 
-async function poll(fn, timeout = 10000) {
+async function poll<T>(fn: () => Promise<T | null | undefined>, timeout = 10000): Promise<T> {
     const end = Date.now() + timeout;
-    let value;
     while (Date.now() < end) {
-        value = await fn();
+        const value = await fn();
         if (value) return value;
         await Bun.sleep(100);
     }
     throw new Error('Timed out polling');
 }
 
-function sse(url, predicate) {
+function sse(url: string, predicate: (payload: any) => boolean): Promise<{ response: http.IncomingMessage; payload: any }> {
     return new Promise((resolve, reject) => {
         const req = http.request(url, response => {
             let buffer = '';
             response.on('data', chunk => {
                 buffer += chunk;
                 const lines = buffer.split('\n');
-                buffer = lines.pop();
+                buffer = lines.pop() ?? '';
                 for (const line of lines) {
                     if (!line.startsWith('data: ')) continue;
                     const payload = JSON.parse(line.slice(6));
@@ -40,12 +44,12 @@ function sse(url, predicate) {
             });
         });
         req.setTimeout(10000, () => { req.destroy(); reject(new Error('SSE timeout')); });
-        req.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+        req.on('error', error => { if ((error as { code?: string }).code !== 'ECONNRESET') reject(error); });
         req.end();
     });
 }
 
-async function post(route, body) {
+async function post(route: string, body: unknown) {
     return json(server.url(route), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
 
@@ -70,7 +74,7 @@ describe('server4 route smoke', () => {
         expect(models.response.status).toBe(200);
         expect(models.body).toEqual(expect.any(Array));
         expect(models.body).toContainEqual(expect.objectContaining({ name: 'fake.gguf', source: 'local', path: path.join(server.tempDir, 'models', 'fake.gguf') }));
-        expect(models.body.filter(model => model.source === 'huggingface')).toHaveLength(0);
+        expect(models.body.filter((model: { source: string }) => model.source === 'huggingface')).toHaveLength(0);
         const builds = await json(server.url('/api/builds'));
         expect(builds.response.status).toBe(200);
         expect(builds.body).toEqual({ builds: [{ id: 'fake', label: 'Fake', path: expect.any(String) }] });
@@ -95,7 +99,7 @@ describe('server4 route smoke', () => {
         expect(text).toContain('fake.gguf');
         expect(text).toContain('"a,b ""q"""');
         const recent = await json(server.url('/api/logs/recent'));
-        const row = recent.body.rows.find(item => item.model === 'fake.gguf');
+        const row = recent.body.rows.find((item: { model: string }) => item.model === 'fake.gguf');
         expect(row).toEqual(expect.objectContaining({ promptTps: 12.5, genTokens: 200, aborted: false }));
         const summary = await json(server.url('/api/logs/summary'));
         expect(summary.body.count).toBeGreaterThanOrEqual(1);
@@ -117,7 +121,7 @@ describe('server4 route smoke', () => {
         expect(start.response.status).toBe(200);
         expect(start.body).toEqual({ ok: true, command: expect.stringContaining('fake-llama-bench') });
         const finished = await poll(async () => { const status = await json(server.url('/api/bench/status')); return status.body.running ? null : status.body; });
-        expect(finished.output.some(line => /exited with code 0/.test(line))).toBe(true);
+        expect(finished.output.some((line: string) => /exited with code 0/.test(line))).toBe(true);
         const restored = await post('/api/bench/restore', {});
         expect(restored.body.ok).toBe(true);
         expect(restored.body.output.length).toBeGreaterThan(0);
@@ -154,16 +158,16 @@ describe('server4 route smoke', () => {
         // The ring still holds the previous test's transcript, so the connect
         // backfill replays old lines. Only the SECOND load/model-loaded cycle
         // belongs to this test's launch -- count cycles, not lines.
-        const received = [];
+        const received: string[] = [];
         let loadCycles = 0;
-        const liveDone = new Promise((resolve, reject) => {
+        const liveDone = new Promise<void>((resolve, reject) => {
             const req = http.request(server.url('/api/master/logs/stream'), response => {
-                contentType = response.headers['content-type'];
+                contentType = response.headers['content-type'] as string;
                 let buffer = '';
                 response.on('data', chunk => {
                     buffer += chunk;
                     const lines = buffer.split('\n');
-                    buffer = lines.pop();
+                    buffer = lines.pop() ?? '';
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
                         const text = line.slice(6);
@@ -177,7 +181,7 @@ describe('server4 route smoke', () => {
                 });
             });
             req.setTimeout(10000, () => { req.destroy(); reject(new Error('live log stream timeout')); });
-            req.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+            req.on('error', error => { if ((error as { code?: string }).code !== 'ECONNRESET') reject(error); });
             req.end();
         });
         expect((await post('/api/start', body)).body).toEqual({ status: 'launching' });
@@ -194,7 +198,7 @@ describe('server4 route smoke', () => {
                 });
             });
             req.setTimeout(5000, () => { req.destroy(); reject(new Error('log tail timeout')); });
-            req.on('error', error => { if (error.code !== 'ECONNRESET') reject(error); });
+            req.on('error', error => { if ((error as { code?: string }).code !== 'ECONNRESET') reject(error); });
             req.end();
         });
         expect(tail).toContain('llama_server: model loaded');
@@ -207,7 +211,7 @@ describe('server4 route smoke', () => {
         const flags = await json(server.url('/api/flags'));
         expect(flags.response.status).toBe(200);
         expect(flags.body.flags.length).toBeGreaterThan(0);
-        expect(flags.body.flags.some(item => item.flags.includes('--ctx-size'))).toBe(true);
+        expect(flags.body.flags.some((item: { flags: string }) => item.flags.includes('--ctx-size'))).toBe(true);
         const devices = await json(server.url('/api/devices'));
         expect(devices.body).toEqual({ devices: [{ id: '0', description: 'Fake GPU 0', totalMib: 16384, freeMib: 12000 }, { id: '1', description: 'CPU', totalMib: 8192, freeMib: 4000 }] });
     });
@@ -230,7 +234,7 @@ describe('server4 route smoke', () => {
         // Frozen: oversized body is refused and the server stays alive.
         // Legacy entry resets the socket (no status); the Bun entry answers
         // 413 -- same protection, documentable deviation (see migration notes).
-        let oversized;
+        let oversized: Response | null;
         try {
             oversized = await fetch(server.url('/api/log'), { method: 'POST', body: 'x'.repeat(11 * 1024 * 1024) });
         } catch {

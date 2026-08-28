@@ -1,5 +1,6 @@
 // Mini llama-server HTTP endpoints for /api/llama/* proxy tests. Launched by
 // fake-llama-server.sh with FAKE_PORT once the fake model is "loaded".
+export {}; // module marker: keep top-level consts out of the global scope (typecheck)
 const port = Number(process.env.FAKE_PORT || 0);
 Bun.serve({
     port,

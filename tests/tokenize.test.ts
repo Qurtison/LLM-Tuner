@@ -3,7 +3,7 @@
 import { test, expect } from 'bun:test';
 import { tokenizeCommand, extractLastFlagValue } from '../src/server/lib/tokenize';
 
-const CASES = [
+const CASES: [string, string[]][] = [
   // ponytail: empty string and whitespace-only yield NO empty tokens.
   ['', []],
   ['   ', []],

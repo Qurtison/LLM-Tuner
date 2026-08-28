@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseHelpFlags, HELP_DESC_COLUMN } from '../src/server/lib/helpparse';
+import { parseHelpFlags, HELP_DESC_COLUMN, type HelpFlagEntry } from '../src/server/lib/helpparse';
 
 const fixture = readFileSync(new URL('./fixtures/llama_help_sample.txt', import.meta.url), 'utf-8');
 
@@ -17,7 +17,7 @@ test('parseHelpFlags: parses fixture flag entries', () => {
 
 test('parseHelpFlags: sections derived from --- header lines', () => {
   const entries = parseHelpFlags(fixture);
-  const byFlag = (f) => entries.find(e => e.flags.startsWith(f));
+  const byFlag = (f: string): HelpFlagEntry => entries.find(e => e.flags.startsWith(f))!;
   expect(byFlag('-m FNAME').section).toBe('general');
   expect(byFlag('--host').section).toBe('Server options');
   expect(byFlag('--port').section).toBe('Server options');
@@ -28,14 +28,14 @@ test('parseHelpFlags: sections derived from --- header lines', () => {
 
 test('parseHelpFlags: primaryFlag is the long form (or short when no long)', () => {
   const entries = parseHelpFlags(fixture);
-  const m = entries.find(e => e.flags.startsWith('-m FNAME'));
+  const m = entries.find(e => e.flags.startsWith('-m FNAME'))!;
   expect(m.primaryFlag).toBe('--model');
   expect(m.insertText).toBe('--model ');
 });
 
 test('parseHelpFlags: continuation line appends to previous description', () => {
   const entries = parseHelpFlags(fixture);
-  const pref = entries.find(e => e.flags.startsWith('--prefill-assistant'));
+  const pref = entries.find(e => e.flags.startsWith('--prefill-assistant'))!;
   // the indented continuation line joined into the description (current behavior)
   expect(pref.description).toContain('detailed continuation for the prefill flag line');
 });
@@ -68,6 +68,6 @@ test('parseHelpFlags: overflowing flag line gets empty description until continu
   // exceeds HELP_DESC_COLUMN so descPart starts empty; the following indented
   // continuation line is appended into description.
   const entries = parseHelpFlags(fixture);
-  const pref = entries.find(e => e.flags.startsWith('--prefill-assistant'));
+  const pref = entries.find(e => e.flags.startsWith('--prefill-assistant'))!;
   expect(pref.description).not.toBe('');
 });
