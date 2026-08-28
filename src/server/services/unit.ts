@@ -137,8 +137,19 @@ export async function logs(unitName: string, lines = 200): Promise<string> {
 
 // Spawn a long-lived journalctl -f follower; caller owns the process and
 // must terminate it when the stream ends.
-export function logFollowProcess(unitName: string, lines = 200) {
-    return spawn('journalctl', ['--user', '-u', unitName, '-o', 'cat', '--no-pager', '-q', '-n', String(lines), '-f'], {
+//
+// `since` is an ISO-8601 timestamp; when set, the follow starts at that
+// moment and the historical `-n` replay is skipped. This is the fresh-launch
+// path: replaying the previous run's log lines on a new follow triggers the
+// fatal-log detector (`out of memory` etc.) and kills the unit within a few
+// ms of start. The boot/adopt paths pass `since = null` to keep their
+// history catch-up.
+export function logFollowProcess(unitName: string, lines = 200, since: string | null = null) {
+    const args: string[] = ['--user', '-u', unitName, '-o', 'cat', '--no-pager', '-q'];
+    if (since) args.push('--since=' + since);
+    else args.push('-n', String(lines));
+    args.push('-f');
+    return spawn('journalctl', args, {
         stdio: ['ignore', 'pipe', 'pipe'],
     });
 }

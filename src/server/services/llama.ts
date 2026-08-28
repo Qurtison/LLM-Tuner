@@ -372,7 +372,12 @@ export class LlamaService {
         persistLastLaunch(this.appRoot(), { config, command, args, at: Date.now() });
         this.ensureUnitFile();
         this.systemdRunning = true;
-        this.startJournalFollow();
+        // Skip journal history replay on fresh launches: replays include the
+        // previous failed run (e.g. "out of memory"), which the fatal-log
+        // detector then matches against the new process and SIGINTs it
+        // within ~5ms of start. The boot/adopt paths keep the history
+        // catch-up so a surviving unit recovers its state.
+        this.startJournalFollow(new Date().toISOString());
         void unitMod.start(this.unitName()).then(r => {
             if (!r.ok) this.ctx.broadcast('', 'Launch failed: ' + r.output.slice(-300));
         });
@@ -381,9 +386,9 @@ export class LlamaService {
     // journalctl -f on the unit: history catch-up (-n 200) + live lines,
     // fed straight into handleLine so loading/ready/progress/timing
     // behavior is identical to the native pipe.
-    private startJournalFollow(): void {
+    private startJournalFollow(since: string | null = null): void {
         if (this.journal) return;
-        const proc = unitMod.logFollowProcess(this.unitName(), 200);
+        const proc = unitMod.logFollowProcess(this.unitName(), 200, since);
         this.journal = proc;
         let buffer = '';
         const feed = (chunk: Buffer): void => {
