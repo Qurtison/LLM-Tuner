@@ -15,8 +15,6 @@ export function gpuLabel(stats: Stats | null, fallback: string): string {
     return BAD_GPU_NAMES.has(name) ? fallback : name;
 }
 
-// Alias for OverviewPanel
-export const gpuTitle = gpuLabel;
 
 export function vramParts(stats: Stats | null): { used: number | null; free: number | null; total: number | null } {
     const used = stat(stats, 'vram_used');

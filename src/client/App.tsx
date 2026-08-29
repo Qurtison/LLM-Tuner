@@ -4,6 +4,9 @@
 // "⋮⋮" handle to reorder. ⌘K opens the preset browser overlay.
 import { useCallback, useEffect, useState } from 'react';
 import { useSse } from './hooks/useSse';
+import { useTelemetryLatest } from './hooks/useTelemetry';
+import { fmtWithUnit } from './lib/format';
+import { gpuLabel, stat as gpuStat } from './lib/gpu';
 import { useServer, applySseFrame, setSseConnected, setServerConfig, onSseLine } from './state/server';
 import { presetBrowser } from './state/presetBrowser';
 import { api } from './api/client';
@@ -112,6 +115,64 @@ function ActivityBar() {
     );
 }
 
+// Always-visible GPU row under the ActivityBar: GPU 1 (master) on the left,
+// GPU 2 (worker) on the right. Moved out of the Overview panel.
+type GpuStats = Record<string, unknown>;
+
+function GpuBar({ pct }: { pct: number }) {
+    return <div className="h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500" style={{ width: Math.min(Math.max(pct, 0), 100) + '%' }} /></div>;
+}
+
+function GpuRowCard({ title, stats, isWorker }: { title: string; stats: GpuStats | null; isWorker: boolean }) {
+    const util = gpuStat(stats, 'gpu_util');
+    const temp = gpuStat(stats, 'gpu_temp');
+    const pwr = gpuStat(stats, 'gpu_pwr');
+    const used = gpuStat(stats, 'vram_used');
+    const total = gpuStat(stats, 'vram_total');
+    const reasons = Array.isArray(stats?.throttle_reasons) ? (stats.throttle_reasons as unknown[]).filter((reason): reason is string => typeof reason === 'string') : [];
+    const vramPct = used !== null && total !== null && total > 0 ? used / total * 100 : null;
+    const row = (label: string, value: string) => (
+        <div className="flex items-baseline justify-between gap-2 text-xs"><span className="text-neutral-500">{label}</span><span className="truncate font-mono text-neutral-300">{value}</span></div>
+    );
+    return (
+        <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+                <h3 className="truncate text-xs font-semibold text-neutral-200">{title}</h3>
+                {isWorker && <span className="shrink-0 rounded bg-neutral-800 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-neutral-500">worker</span>}
+            </div>
+            {!stats ? <p className="text-xs text-neutral-600">No data</p> : (
+                <div className="space-y-2">
+                    {row('Temp', fmtWithUnit(temp, '°C'))}
+                    <div>
+                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">Util</span><span className="font-mono text-neutral-300">{fmtWithUnit(util, '%')}</span></div>
+                        <GpuBar pct={util ?? 0} />
+                    </div>
+                    {row('Power', fmtWithUnit(pwr, 'W'))}
+                    <div>
+                        <div className="mb-1 flex justify-between text-xs"><span className="text-neutral-500">VRAM</span><span className="font-mono text-neutral-300">{fmtWithUnit(used, 'MiB', 0)} / {fmtWithUnit(total, 'MiB', 0)}</span></div>
+                        {vramPct !== null && <GpuBar pct={vramPct} />}
+                    </div>
+                    {reasons.length > 0 && <p className="text-[10px] text-amber-400">Throttling: {reasons.join(', ')}</p>}
+                </div>
+            )}
+        </div>
+    );
+}
+
+function GpuRow() {
+    const { latest } = useTelemetryLatest(5000);
+    const master = latest?.stats && typeof latest.stats.master === 'object' && latest.stats.master !== null ? latest.stats.master as GpuStats : null;
+    const worker = latest?.stats && typeof latest.stats.worker === 'object' && latest.stats.worker !== null && !(latest.stats.worker as GpuStats).nvidia_smi_error && !(latest.stats.worker as GpuStats).amdgpu_top_error ? latest.stats.worker as GpuStats : null;
+    return (
+        <section className="border-b border-neutral-800 px-4 py-3" aria-label="GPU stats">
+            <div className="grid gap-3 sm:grid-cols-2">
+                <GpuRowCard title={gpuLabel(master, 'GPU 1')} stats={master} isWorker={false} />
+                <GpuRowCard title={gpuLabel(worker, 'GPU 2')} stats={worker} isWorker={true} />
+            </div>
+        </section>
+    );
+}
+
 function PresetBrowserMount() {
     useEffect(() => {
         const onKey = (event: KeyboardEvent) => {
@@ -152,6 +213,7 @@ export default function App() {
                 </nav>
             </header>
             <ActivityBar />
+            <GpuRow />
             <main className="px-2 py-4">
                 <PanelCanvas />
             </main>
