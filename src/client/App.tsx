@@ -65,8 +65,8 @@ function EngineStatusChip() {
 
 // Always-visible activity strip (where the old engine banner lived): live
 // prefill progress + generation tokens, plus the context usage moved out of
-// the Monitor panel. Stays up for the whole request (prefill + generation);
-// clears when the completion frame resets progress.
+// the Monitor panel. Never hides — segments fall back to idle markers when
+// no request is in flight.
 function ActivityBar() {
     const { progress } = useServer();
     const [context, setContext] = useState<{ used: number; limit: number } | null>(null);
@@ -78,30 +78,35 @@ function ActivityBar() {
     }), []);
     const prefill = progress?.prefill ?? null;
     const gen = progress?.gen ?? null;
-    if (prefill === null) return null;
-    const pct = Math.min(Math.max(prefill.progress * 100, 0), 100);
+    const pct = prefill ? Math.min(Math.max(prefill.progress * 100, 0), 100) : 0;
     const ctxPct = context ? Math.min(context.used / context.limit * 100, 100) : null;
     return (
         <section className="border-b border-neutral-800 bg-neutral-900 px-4 py-2" aria-live="polite">
             <div className="flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
                 <span className="flex items-center gap-2">
                     <span className="text-neutral-500">Prefill</span>
-                    <span className="h-1.5 w-40 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-500" style={{ width: pct + '%' }} /></span>
-                    <span className="font-mono text-neutral-300">{pct.toFixed(0)}% · {prefill.tokens.toLocaleString()} tok · {prefill.tps} t/s</span>
+                    {prefill
+                        ? <>
+                            <span className="h-1.5 w-40 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-500" style={{ width: pct + '%' }} /></span>
+                            <span className="font-mono text-neutral-300">{pct.toFixed(0)}% · {prefill.tokens.toLocaleString()} tok · {prefill.tps} t/s</span>
+                        </>
+                        : <span className="font-mono text-neutral-600">idle</span>}
                 </span>
-                {gen && (
-                    <span className="flex items-center gap-2">
-                        <span className="text-neutral-500">Gen</span>
-                        <span className="font-mono text-neutral-300">{gen.tokens.toLocaleString()} tok · {gen.tps} t/s</span>
-                    </span>
-                )}
-                {context && (
-                    <span className="flex items-center gap-2">
-                        <span className="text-neutral-500">Context</span>
-                        <span className="h-1.5 w-24 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-400" style={{ width: (ctxPct ?? 0) + '%' }} /></span>
-                        <span className="font-mono text-neutral-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()} · {(ctxPct ?? 0).toFixed(0)}%</span>
-                    </span>
-                )}
+                <span className="flex items-center gap-2">
+                    <span className="text-neutral-500">Gen</span>
+                    {gen
+                        ? <span className="font-mono text-neutral-300">{gen.tokens.toLocaleString()} tok · {gen.tps} t/s</span>
+                        : <span className="font-mono text-neutral-600">idle</span>}
+                </span>
+                <span className="flex items-center gap-2">
+                    <span className="text-neutral-500">Context</span>
+                    {context
+                        ? <>
+                            <span className="h-1.5 w-24 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-400" style={{ width: (ctxPct ?? 0) + '%' }} /></span>
+                            <span className="font-mono text-neutral-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()} · {(ctxPct ?? 0).toFixed(0)}%</span>
+                        </>
+                        : <span className="font-mono text-neutral-600">—</span>}
+                </span>
             </div>
         </section>
     );
