@@ -9,7 +9,7 @@ export class Value<T> {
     private value: T;
     private listeners = new Set<Listener>();
     constructor(initial: T) { this.value = initial; }
-    get(): T { return this.value; }
+    get = (): T => this.value; // arrow: survives being detached (useSyncExternalStore(store.get))
     set(next: T): void { if (next === this.value) return; this.value = next; this.listeners.forEach(l => l()); }
     update(fn: (current: T) => T): void { this.set(fn(this.value)); }
     subscribe = (l: Listener): (() => void) => { this.listeners.add(l); return () => this.listeners.delete(l); };
