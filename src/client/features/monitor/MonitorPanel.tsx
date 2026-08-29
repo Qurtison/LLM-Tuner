@@ -40,7 +40,7 @@ const METRIC_LOCK_KEY = 'monitor_metric_lock';
 const METRIC_BLOCK_ORDER_KEY = 'monitor_block_order';
 // Every monitor block is a draggable row: the section header, stat blocks,
 // metric rows, charts. Titles are the drag handles.
-const DEFAULT_BLOCK_ORDER = ['header', 'context', 'thermal', 'power', 'vram', ...miniMetrics.map(metric => metric.key), 'omni', 'requests'];
+const DEFAULT_BLOCK_ORDER = ['header', 'thermal', 'power', 'vram', ...miniMetrics.map(metric => metric.key), 'omni', 'requests'];
 const throttleLabels: Record<string, string> = { hw_thermal_slowdown: 'HW Thermal', sw_thermal_slowdown: 'SW Thermal', sw_power_cap: 'SW Power Cap', hw_power_brake_slowdown: 'HW Power Brake' };
 const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
 
@@ -152,7 +152,6 @@ export default function MonitorPanel() {
             return next;
         });
     };
-    const [context, setContext] = useState<{ used: number; limit: number } | null>(null);
     const [selectedRunId, setSelectedRunId] = useState('');
     const omniCanvas = useRef<HTMLCanvasElement>(null);
     const requestCanvas = useRef<HTMLCanvasElement>(null);
@@ -163,12 +162,9 @@ export default function MonitorPanel() {
 
     useEffect(() => { pointsRef.current = points; }, [points]);
     useEffect(() => { if (config?.telemetry.pollMs) setRate(config.telemetry.pollMs); }, [config]);
+    // Context usage now lives in the top ActivityBar (App.tsx).
     useEffect(() => onSseLine(line => {
         if (line.startsWith('PREFILL_PROGRESS:') || line.startsWith('GEN_PROGRESS:')) setError('');
-        if (!line.startsWith('CTX_LIVE:')) return;
-        const [, rawUsed, rawLimit] = line.split(':');
-        const used = Number.parseInt(rawUsed, 10); const limit = Number.parseInt(rawLimit, 10);
-        if (Number.isFinite(used) && Number.isFinite(limit) && limit > 0) setContext({ used, limit });
     }), []);
     useEffect(() => { if (!selectedRunId && completions[0]) setSelectedRunId(completions[0].runId); }, [completions, selectedRunId]);
     useEffect(() => {
@@ -265,8 +261,6 @@ export default function MonitorPanel() {
         switch (key) {
             case 'header':
                 return <div className="flex flex-wrap items-center gap-3"><h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300"><DragTitle text="Telemetry" {...handle()} /></h2><label className="ml-auto text-xs text-neutral-400">Rate <select value={rate} onChange={event => { void setPollingRate(Number(event.target.value)); }} className="ml-1 rounded border border-neutral-700 bg-neutral-900 px-2 py-1"><option value={500}>Fast (0.5s)</option><option value={1000}>Normal (1s)</option><option value={2000}>Slow (2s)</option></select></label><label className="text-xs text-neutral-400"><input checked={smooth} onChange={event => toggleSmooth(event.target.checked)} type="checkbox" className="mr-1 accent-indigo-500" />smooth</label><button type="button" onClick={() => setMetricLocked(value => !value)} aria-pressed={metricLocked} title={metricLocked ? 'Block order locked -- unlock to drag titles' : 'Lock the current block order'} className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-neutral-300 hover:bg-neutral-800">{metricLocked ? 'Unlock order' : 'Lock order'}</button></div>;
-            case 'context':
-                return <div className="max-w-sm rounded border border-neutral-800 bg-neutral-900 p-3"><p className="text-xs text-neutral-400"><DragTitle text="Context usage" {...handle()} /></p>{context ? <><p className="font-mono text-sm text-indigo-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()}</p><div className="mt-2 h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500" style={{ width: Math.min(context.used / context.limit * 100, 100) + '%' }} /></div><p className="mt-1 text-xs text-neutral-500">{(context.used / context.limit * 100).toFixed(1)}% used</p></> : <p className="font-mono text-sm text-neutral-500">unknown</p>}</div>;
             case 'thermal':
                 return <div className={'rounded border p-3 ' + (thermalActive ? 'animate-pulse border-red-500/50 bg-red-900/30' : 'border-neutral-800 bg-neutral-900')}><p className="text-xs text-neutral-400"><DragTitle text="Thermal throttle" {...handle()} /></p><div className="mt-2 flex flex-wrap gap-1">{Object.entries(throttleLabels).filter(([reason]) => thermalReasons.has(reason)).map(([reason, label]) => <span key={reason} title={activeReasons.has(reason) ? activeReasons.get(reason)?.join(' + ') + ': ' + label : label + ' (not currently active)'} className={'rounded border px-1.5 py-0.5 text-[9px] font-semibold ' + (activeReasons.has(reason) ? 'border-red-500/50 bg-red-900/40 text-red-300' : 'border-neutral-700/50 bg-neutral-800/40 text-neutral-600')}>{label}</span>)}</div></div>;
             case 'power':
@@ -276,7 +270,7 @@ export default function MonitorPanel() {
             case 'omni':
                 return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex items-center"><div><h3 className="text-sm text-neutral-200"><DragTitle text="Live hardware" {...handle()} /></h3><p className="text-xs text-neutral-500">Missing values remain gaps.</p></div><button ref={restoreFocus} type="button" onClick={() => setExpanded(true)} className="ml-auto rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-700" aria-label="Expand live hardware chart">Expand</button></div><div className="h-64"><canvas ref={omniCanvas} /></div></div>;
             case 'requests':
-                return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><div><h3 className="text-sm text-neutral-200"><DragTitle text="Completed request samples" {...handle()} /></h3><p className="text-xs text-neutral-500">{progress?.prefill ? 'PREFILL ' + progress.prefill.progress.toFixed(1) + '%' : progress?.gen ? 'GEN ' + progress.gen.tokens + ' tokens' : 'Idle'}</p></div><label className="ml-auto text-xs text-neutral-400">Request <select value={selectedCompletion?.runId ?? ''} onChange={event => setSelectedRunId(event.target.value)} className="ml-1 max-w-48 rounded border border-neutral-700 bg-neutral-950 px-2 py-1">{completions.length === 0 && <option value="">No completed requests</option>}{completions.map((completion: CompletionEvent) => <option key={completion.runId} value={completion.runId}>{new Date(completion.timestamp).toLocaleTimeString()} · {completion.model || completion.runId}</option>)}</select></label></div><div className="h-56"><canvas ref={requestCanvas} /></div></div>;
+                return <div className="rounded border border-neutral-800 bg-neutral-900 p-3"><div className="mb-2 flex flex-wrap items-center gap-2"><div><h3 className="text-sm text-neutral-200"><DragTitle text="Completed request samples" {...handle()} /></h3><p className="text-xs text-neutral-500">{progress?.prefill ? 'PREFILL ' + (progress.prefill.progress * 100).toFixed(1) + '%' : progress?.gen ? 'GEN ' + progress.gen.tokens + ' tokens' : 'Idle'}</p></div><label className="ml-auto text-xs text-neutral-400">Request <select value={selectedCompletion?.runId ?? ''} onChange={event => setSelectedRunId(event.target.value)} className="ml-1 max-w-48 rounded border border-neutral-700 bg-neutral-950 px-2 py-1">{completions.length === 0 && <option value="">No completed requests</option>}{completions.map((completion: CompletionEvent) => <option key={completion.runId} value={completion.runId}>{new Date(completion.timestamp).toLocaleTimeString()} · {completion.model || completion.runId}</option>)}</select></label></div><div className="h-56"><canvas ref={requestCanvas} /></div></div>;
             default: {
                 const metric = metricByKey.get(key);
                 if (!metric) return null;

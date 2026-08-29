@@ -6,7 +6,6 @@ import { api } from '../../api/client';
 import { useTelemetryLatest } from '../../hooks/useTelemetry';
 import { fmtWithUnit } from '../../lib/format';
 import { gpuTitle, stat as gpuStat } from '../../lib/gpu';
-import { useServer } from '../../state/server';
 import type { ServerPathsResponse, UnitStatus } from '../../../../shared/contracts';
 
 type GpuStats = Record<string, unknown>;
@@ -53,7 +52,6 @@ function GpuCard({ title, stats, isWorker }: { title: string; stats: GpuStats | 
 }
 
 export default function OverviewPanel() {
-    const { progress } = useServer();
     const [paths, setPaths] = useState<ServerPathsResponse | null>(null);
     const [unit, setUnit] = useState<UnitStatus | null>(null);
     const { latest } = useTelemetryLatest(5000);
@@ -68,9 +66,6 @@ export default function OverviewPanel() {
 
     const master = latest?.stats && typeof latest.stats.master === 'object' && latest.stats.master !== null ? latest.stats.master as GpuStats : null;
     const worker = latest?.stats && typeof latest.stats.worker === 'object' && latest.stats.worker !== null && !(latest.stats.worker as GpuStats).nvidia_smi_error && !(latest.stats.worker as GpuStats).amdgpu_top_error ? latest.stats.worker as GpuStats : null;
-    const prefill = progress?.prefill ?? null;
-    const gen = progress?.gen ?? null;
-    const prefillPct = prefill ? Math.min(Math.max(prefill.progress * 100, 0), 100) : null;
 
     const pathRows = paths ? [
         { label: 'Models', value: paths.modelsDir },
@@ -98,24 +93,6 @@ export default function OverviewPanel() {
                         <Stat label="Since" value={unit.since ?? '—'} />
                         <Stat label="Restarts" value={String(unit.restarts)} />
                     </> : <p className="text-xs text-neutral-500">Loading…</p>}
-                </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
-                    <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300">Prefill</h2>
-                    {prefill ? <div className="mt-2 space-y-1.5">
-                        <div className="flex justify-between text-xs"><span className="text-neutral-500">Progress</span><span className="font-mono text-neutral-300">{prefillPct !== null ? prefillPct.toFixed(0) + '%' : '—'}</span></div>
-                        <Bar pct={prefillPct ?? 0} />
-                        <div className="flex justify-between text-xs"><span className="text-neutral-500">Tokens</span><span className="font-mono text-neutral-300">{prefill.tokens.toLocaleString()}</span></div>
-                        <div className="flex justify-between text-xs"><span className="text-neutral-500">Speed</span><span className="font-mono text-neutral-300">{prefill.tps} t/s</span></div>
-                    </div> : <p className="mt-2 text-xs text-neutral-600">Idle</p>}
-                </div>
-                <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
-                    <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-300">Generation</h2>
-                    {gen ? <div className="mt-2 space-y-1.5">
-                        <div className="flex justify-between text-xs"><span className="text-neutral-500">Tokens</span><span className="font-mono text-neutral-300">{gen.tokens.toLocaleString()}</span></div>
-                        <div className="flex justify-between text-xs"><span className="text-neutral-500">Speed</span><span className="font-mono text-neutral-300">{gen.tps} t/s</span></div>
-                    </div> : <p className="mt-2 text-xs text-neutral-600">Idle</p>}
                 </div>
             </div>
             <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
