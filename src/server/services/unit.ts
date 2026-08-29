@@ -9,6 +9,20 @@ import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
+// The unit file and the launch script it ExecStarts must never share a path:
+// writeUnitFile would silently overwrite the script (service.unitPath used to
+// collide exactly that way). When service.unitPath is configured the unit file
+// goes there and the script lives beside it as <unitPath>.sh; otherwise the
+// defaults are <appRoot>/generated/launch.sh and ~/.config/systemd/user/<unit>.
+export function unitFilePathFor(service: { unitName: string; unitPath: string }): string {
+    return path.resolve(service.unitPath || path.join(process.env.HOME || '/home/james', '.config', 'systemd', 'user', service.unitName));
+}
+
+export function scriptPathFor(service: { unitName: string; unitPath: string }, appRoot: string): string {
+    if (service.unitPath) return path.resolve(service.unitPath + '.sh');
+    return path.resolve(path.join(appRoot, 'generated', 'launch.sh'));
+}
+
 export interface UnitStatus {
     activeState: string;
     subState: string;

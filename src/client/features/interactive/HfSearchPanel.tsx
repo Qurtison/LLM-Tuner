@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
 import { useServer } from '../../state/server';
-import { pickHfModel } from './HfModelPick';
+import { useModels } from '../../hooks/useModels';
+import { launchFormStore } from '../../components/launchForm';
 import { MarkdownMessage } from '../../lib/markdown';
-export { sanitizeMarkdownHtml } from '../../lib/sanitize';
-export { MarkdownMessage, ReasoningDisclosure } from '../../lib/markdown';
 
 type HfModel = { id: string; downloads?: number; likes?: number; lastModified?: string };
 type HfError = { error: string };
@@ -14,6 +13,7 @@ function modified(value: string | undefined): string { return value ? new Date(v
 
 export default function HfSearchPanel() {
     const { state } = useServer();
+    const { models } = useModels();
     const [open, setOpen] = useState(false);
     const [term, setTerm] = useState('');
     const [results, setResults] = useState<HfModel[]>([]);
@@ -26,6 +26,9 @@ export default function HfSearchPanel() {
     const openerRef = useRef<HTMLButtonElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const dialogRef = useRef<HTMLDivElement>(null);
+    const readmeAbort = useRef<AbortController | null>(null);
+
+    useEffect(() => () => readmeAbort.current?.abort(), []);
 
     useEffect(() => {
         if (!open) return;
@@ -59,14 +62,31 @@ export default function HfSearchPanel() {
     }, [open, term]);
 
     const select = async (model: HfModel) => {
+        readmeAbort.current?.abort();
+        const controller = new AbortController();
+        readmeAbort.current = controller;
         setSelected(model); setReadme(''); setReadmeError(''); setReadmeLoading(true);
         try {
-            const response = await fetch('/api/hf/readme?repo=' + encodeURIComponent(model.id), { headers: { Accept: 'text/markdown' } });
+            const response = await fetch('/api/hf/readme?repo=' + encodeURIComponent(model.id), { headers: { Accept: 'text/markdown' }, signal: controller.signal });
             const text = await response.text();
             if (!response.ok) { let message = text; try { message = (JSON.parse(text) as HfError).error; } catch {} throw new Error(message || 'README fetch failed.'); }
             setReadme(text);
-        } catch (err) { setReadmeError(err instanceof Error ? err.message : 'README fetch failed.'); }
-        finally { setReadmeLoading(false); }
+        } catch (err) {
+            if ((err as Error).name === 'AbortError') return; // superseded by a newer selection
+            setReadmeError(err instanceof Error ? err.message : 'README fetch failed.');
+        }
+        finally { if (!controller.signal.aborted) setReadmeLoading(false); }
+    };
+
+    // 3.5: "Use this model" used to dispatch an event nobody heard. Map the
+    // HF repo to a locally downloaded model and write it into the shared
+    // launch form the Start button reads.
+    const pick = (model: HfModel) => {
+        const needle = (model.id.split('/').pop() || model.id).replace(/\.gguf$/i, '').toLowerCase();
+        const local = models.find(m => m.path.toLowerCase().includes(needle) || m.name.toLowerCase().includes(needle));
+        if (!local) { setError('Not downloaded locally — pull this repo into your models dir first.'); return; }
+        launchFormStore.update(form => ({ ...form, modelPath: local.path }));
+        setOpen(false);
     };
 
     return <>
@@ -79,7 +99,7 @@ export default function HfSearchPanel() {
                 {error && <p role="alert" className="text-sm text-red-400">Search failed: {error}</p>}
                 {!loading && !error && term.trim() && results.length === 0 && <p className="text-sm text-neutral-500">No GGUF models found.</p>}
                 {!term.trim() && <p className="text-sm text-neutral-500">Enter model name to search.</p>}
-                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><div className="space-y-2">{results.map(model => <button type="button" key={model.id} onClick={() => void select(model)} className="block w-full rounded-lg border border-neutral-700 bg-neutral-800 p-3 text-left hover:border-indigo-500"><span className="block break-all text-sm font-semibold text-indigo-300">{model.id}</span><span className="mt-1 block text-xs text-neutral-400">Downloads: {number(model.downloads)} · Likes: {number(model.likes)} · Modified: {modified(model.lastModified)}</span></button>)}</div>{selected && <section className="min-w-0 rounded-lg border border-neutral-700 bg-neutral-950 p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="break-all text-sm font-semibold text-indigo-300">{selected.id}</h2><button type="button" onClick={() => { pickHfModel(selected.id); setOpen(false); }} className="rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500">Use this model</button></div>{readmeLoading && <p className="text-sm text-neutral-400">Loading README…</p>}{readmeError && <p role="alert" className="text-sm text-red-400">README failed: {readmeError}</p>}{readme && <MarkdownMessage markdown={readme} />}</section>}</div>
+                <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"><div className="space-y-2">{results.map(model => <button type="button" key={model.id} onClick={() => void select(model)} className="block w-full rounded-lg border border-neutral-700 bg-neutral-800 p-3 text-left hover:border-indigo-500"><span className="block break-all text-sm font-semibold text-indigo-300">{model.id}</span><span className="mt-1 block text-xs text-neutral-400">Downloads: {number(model.downloads)} · Likes: {number(model.likes)} · Modified: {modified(model.lastModified)}</span></button>)}</div>{selected && <section className="min-w-0 rounded-lg border border-neutral-700 bg-neutral-950 p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-2"><h2 className="break-all text-sm font-semibold text-indigo-300">{selected.id}</h2><button type="button" onClick={() => pick(selected)} className="rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500">Use this model</button></div>{readmeLoading && <p className="text-sm text-neutral-400">Loading README…</p>}{readmeError && <p role="alert" className="text-sm text-red-400">README failed: {readmeError}</p>}{readme && <MarkdownMessage markdown={readme} />}</section>}</div>
             </div>
         </div>}
     </>;

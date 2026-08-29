@@ -35,17 +35,17 @@ test('launch script is an exec of the shell-quoted command and is executable', (
 });
 
 test('last-launch persists, round-trips, and rejects missing/corrupt files', async () => {
-    const root = path.join(tmp, 'app');
-    fs.mkdirSync(root, { recursive: true });
-    expect(await loadLastLaunch(root)).toBeNull();
-    persistLastLaunch(root, { config: { model: 'x', port: 8080 }, command: '/opt/llama-server', args: ['-m', 'x'], at: 123 });
-    const back = await loadLastLaunch(root);
+    const dir = path.join(tmp, 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    expect(await loadLastLaunch(dir)).toBeNull();
+    persistLastLaunch(dir, { config: { model: 'x', port: 8080 }, command: '/opt/llama-server', args: ['-m', 'x'], at: 123 });
+    const back = await loadLastLaunch(dir);
     if (!back) throw new Error('last launch did not persist');
     expect(back.config.model).toBe('x');
     expect(back.command).toBe('/opt/llama-server');
     expect(back.args).toEqual(['-m', 'x']);
-    fs.writeFileSync(path.join(root, 'generated', 'last-launch.json'), '{not json');
-    expect(await loadLastLaunch(root)).toBeNull();
+    fs.writeFileSync(path.join(dir, 'last-launch.json'), '{not json');
+    expect(await loadLastLaunch(dir)).toBeNull();
 });
 
 test('probeLlama maps /health to ready/loading/down', async () => {

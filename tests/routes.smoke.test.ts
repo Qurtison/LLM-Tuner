@@ -155,13 +155,12 @@ describe('server4 route smoke', () => {
     it('streams master logs live over SSE and backfills the tail', async () => {
         const body = { modelPath: path.join(server.tempDir, 'models', 'fake.gguf'), build: 'fake', ctx: 4096, ngl: 1 };
         let contentType = '';
-        // The ring still holds the previous test's transcript, so the connect
-        // backfill replays old lines. Only the SECOND load/model-loaded cycle
-        // belongs to this test's launch -- count cycles, not lines.
-        const received: string[] = [];
-        let loadCycles = 0;
+        // lines=0 disables the backfill entirely, so every line received here
+        // is provably LIVE -- no dependence on what the ring held before this
+        // test ran (a launch clears the ring, so transcript counting flakes).
+        let receivedCount = 0;
         const liveDone = new Promise<void>((resolve, reject) => {
-            const req = http.request(server.url('/api/master/logs/stream'), response => {
+            const req = http.request(server.url('/api/master/logs/stream?lines=0'), response => {
                 contentType = response.headers['content-type'] as string;
                 let buffer = '';
                 response.on('data', chunk => {
@@ -171,16 +170,15 @@ describe('server4 route smoke', () => {
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
                         const text = line.slice(6);
-                        received.push(text);
-                        if (text.includes('load_model: loading model')) loadCycles += 1;
-                        if (text.includes('model loaded') && loadCycles >= 2) {
+                        receivedCount += 1;
+                        if (text.includes('llama_server: model loaded')) {
                             req.destroy();
                             resolve();
                         }
                     }
                 });
             });
-            req.setTimeout(10000, () => { req.destroy(); reject(new Error('live log stream timeout')); });
+            req.setTimeout(14000, () => { req.destroy(); reject(new Error('live log stream timeout')); });
             req.on('error', error => { if ((error as { code?: string }).code !== 'ECONNRESET') reject(error); });
             req.end();
         });

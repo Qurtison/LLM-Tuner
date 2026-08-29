@@ -15,27 +15,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { usePresets } from '../../hooks/usePresets';
 import { useModels } from '../../hooks/useModels';
 import { presetBrowser } from '../../state/presetBrowser';
-import { GROUP_ORDER, type ParamGroup } from '../../../../shared/llama-params';
+import { GROUP_ORDER, LLAMA_PARAMS, type ParamGroup } from '../../../../shared/llama-params';
 import type { LaunchConfig, Preset, ModelEntry } from '../../../../shared/contracts';
 import { ModelSelect } from './ModelSelect';
 import type { OverrideEntry } from './registry';
-import { intInputValid } from './registry';
-
-const GROUP_LABELS: Record<ParamGroup, string> = {
-    speed: 'Speed & threads',
-    memory: 'Memory & VRAM',
-    context: 'Context & caching',
-    sampling: 'Output & sampling',
-    model: 'Model & source',
-    devices: 'Devices & GPUs',
-    speculative: 'Speculative decoding',
-    server: 'Server & network',
-    agents: 'Agents & tools',
-    multimodal: 'Multimodal & embeddings',
-    chat: 'Chat & reasoning',
-    logging: 'Logging & debug',
-    archive: 'Archive',
-};
+import { GROUP_LABELS, numericInputValid } from './registry';
 
 const SCOPE_RESTART_HINT = 'N settings apply on next server start';
 
@@ -106,8 +90,9 @@ function OverrideRow({ entry, onChange, onReset, animating, models }: RowProps) 
     }, [editing]);
 
     const commit = () => {
-        if (control === 'int' && !intInputValid(String(draft))) {
-            // decimal/garbage in an int field: revert the input, save nothing
+        if ((control === 'int' || control === 'float') && !numericInputValid(control, String(draft))) {
+            // decimal/garbage in an int field, non-numeric in a float field:
+            // revert the input, save nothing
             setDraft(toInputValue(entry.field, entry.value, control));
             return;
         }
@@ -379,7 +364,7 @@ export default function PresetDock() {
                     onClick={() => presetBrowser.setOpen(true)}
                     className="flex w-full items-center justify-between rounded border border-neutral-700 bg-neutral-900 px-3 py-2 text-[12px] text-neutral-200 hover:border-neutral-500"
                 >
-                    <span>Browse all 248 settings</span>
+                    <span>Browse all {LLAMA_PARAMS.length} settings</span>
                     <span className="font-mono text-[10.5px] text-neutral-500">⌘K</span>
                 </button>
             </footer>

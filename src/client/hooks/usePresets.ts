@@ -19,7 +19,6 @@ export interface UsePresets {
     setActive: (name: string | null) => void;
     save: () => Promise<{ ok: boolean; warnings: string[] }>;
     saveAsNew: (name: string) => Promise<{ ok: boolean; warnings: string[]; error?: string }>;
-    remove: (name: string) => Promise<boolean>;
 }
 
 export function usePresets(): UsePresets {
@@ -44,6 +43,5 @@ export function usePresets(): UsePresets {
         setActive: (name) => presetsStore.setActive(name),
         save: () => presetsStore.save(),
         saveAsNew: (name) => presetsStore.saveAsNew(name),
-        remove: (name) => presetsStore.remove(name),
     };
 }

@@ -10,6 +10,7 @@
  */
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { loadJson, saveJson } from '../lib/storage';
+import { Value } from '../state/value';
 
 const STORAGE_KEY = 'panel_layout_v2';
 
@@ -34,27 +35,10 @@ export interface PanelState {
 
 type Listener = () => void;
 
-class Value<T> {
-    private value: T;
-    private listeners = new Set<Listener>();
-    constructor(initial: T) { this.value = initial; }
-    get(): T { return this.value; }
-    set(next: T): void { if (next === this.value) return; this.value = next; this.listeners.forEach(l => l()); }
-    subscribe = (l: Listener): (() => void) => { this.listeners.add(l); return () => this.listeners.delete(l); };
-}
-
 const registry = new Map<PanelId, { render: () => ReactNode; label: string }>();
 
 export function registerPanel(id: PanelId, label: string, render: () => ReactNode): void {
     registry.set(id, { render, label });
-}
-
-export function getPanelLabel(id: PanelId): string {
-    return registry.get(id)?.label ?? id;
-}
-
-export function listPanels(): PanelId[] {
-    return [...registry.keys()];
 }
 
 function defaultState(): PanelState {

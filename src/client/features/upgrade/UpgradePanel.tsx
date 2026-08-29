@@ -11,6 +11,7 @@ export default function UpgradePanel() {
     const [enabled, setEnabled] = useState(true);
     const [error, setError] = useState('');
     const boxRef = useRef<HTMLPreElement>(null);
+    const esRef = useRef<EventSource | null>(null);
 
     const checkStatus = async () => {
         try {
@@ -19,7 +20,7 @@ export default function UpgradePanel() {
         } catch { /* server absent -> panel stays inert */ }
     };
 
-    useEffect(() => { void checkStatus(); }, []);
+    useEffect(() => { void checkStatus(); return () => esRef.current?.close(); }, []);
 
     useEffect(() => {
         const el = boxRef.current;
@@ -31,6 +32,7 @@ export default function UpgradePanel() {
         setLogs([]);
         setRunning(true);
         const es = new EventSource('/api/upgrade/stream');
+        esRef.current = es;
         es.onmessage = (event) => {
             const line = event.data;
             if (line.startsWith('UPGRADE_DONE')) {
@@ -47,12 +49,14 @@ export default function UpgradePanel() {
             setLogs(prev => [...prev, line].slice(-3000));
         };
         es.onerror = () => {
-            // EventSource auto-reconnects; only surface a real failure when
-            // the stream never opened (server refused the upgrade).
-            setRunning(false);
-            setError('Upgrade stream failed (is upgrade enabled in server config?)');
-            es.close();
-            setEnabled(false);
+            // A transient drop auto-reconnects; only treat it as fatal when
+            // the connection never delivered anything (server refused the
+            // upgrade). readyState CONNECTING = still retrying.
+            if (es.readyState === EventSource.CLOSED) {
+                setRunning(false);
+                setError('Upgrade stream failed (is upgrade enabled in server config?)');
+                setEnabled(false);
+            }
         };
     };
 

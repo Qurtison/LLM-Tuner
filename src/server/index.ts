@@ -12,7 +12,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { loadConfig, ConfigError, type DashboardConfig } from './config';
-import type { TelemetrySample } from '../../shared/contracts';
+import { SseLogPrefixes, type TelemetrySample } from '../../shared/contracts';
 import { LlamaService } from './services/llama';
 import { BenchService } from './services/bench';
 import { TelemetryService } from './services/telemetry';
@@ -123,7 +123,7 @@ const llama = new LlamaService(
         logCompletedRequest: (timing, samples, completedAt, opts) =>
             logCompletedRequest({ config, state, broadcast }, {
                 fetchStats: () => telemetry.fetchStats(),
-                finalLoadTime: () => state.finalLoadTime as number,
+                finalLoadTime: () => state.finalLoadTime,
                 rememberSamples: (runId, s) => telemetry.rememberSamples(runId, s as TelemetrySample[]),
             }, timing, samples, completedAt, opts),
     }
@@ -140,7 +140,7 @@ const bench = new BenchService(
         benchBinFor: (build) => launchLib.getLlamaServerBinary(config.llama.builds, build as string | undefined).replace(/llama-server$/, 'llama-bench'),
         takeSamples: () => telemetry.takeSamples(),
         liveSamples: () => telemetry.liveSamples(),
-        onBenchLine: (line) => broadcast('BENCH:' + line),
+        onBenchLine: (line) => broadcast(SseLogPrefixes.BENCH + ':' + line),
         onBenchDone: (tag) => broadcast(tag),
         llamaRunning: () => llama.running,
     }
@@ -304,7 +304,8 @@ async function handleRequest(req: Request): Promise<Response> {
 
         // New: /api/llama/* proxies chat + slots + any llama-server endpoint.
         if (url.pathname.startsWith('/api/llama/')) {
-            return await proxyLlama(req, url.pathname.slice('/api/llama'.length) || '/');
+            // Keep the query string: /api/llama/slots?id_slot=0 etc.
+            return await proxyLlama(req, (url.pathname.slice('/api/llama'.length) || '/') + url.search);
         }
 
         // Frozen /api/* routes.
@@ -323,7 +324,10 @@ async function handleRequest(req: Request): Promise<Response> {
             );
         }
         if (url.pathname.startsWith('/assets/')) {
-            const file = await serveFile(safeJoin(DIST_DIR, url.pathname.slice(1))!, 'max-age=31536000, immutable');
+            // safeJoin returns null on traversal; an honest 404 beats relying
+            // on serveFile's catch to hide the non-null assertion.
+            const asset = safeJoin(DIST_DIR, url.pathname.slice(1));
+            const file = asset ? await serveFile(asset, 'max-age=31536000, immutable') : null;
             if (file) return file;
             return json({ error: 'Not found' }, 404);
         }

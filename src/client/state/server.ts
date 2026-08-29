@@ -9,15 +9,7 @@ import { useSyncExternalStore } from 'react';
 import { loadJson, saveJson } from '../lib/storage';
 import type { ConfigResponse, SseStatePayload, CompletionEvent } from '../../../shared/contracts';
 import { SseLogPrefixes } from '../../../shared/contracts';
-
-class Value<T> {
-    private value: T;
-    private listeners = new Set<() => void>();
-    constructor(initial: T) { this.value = initial; }
-    get(): T { return this.value; }
-    set(next: T): void { if (next === this.value) return; this.value = next; this.listeners.forEach(l => l()); }
-    subscribe = (l: () => void): (() => void) => { this.listeners.add(l); return () => this.listeners.delete(l); };
-}
+import { Value } from './value';
 
 // Benches/monitor/chat subscribe to raw SSE log lines (BENCH:, BENCH_DONE:
 // etc.) without the shell needing to know about them.

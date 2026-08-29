@@ -4,12 +4,17 @@
  * pull pieces off this so they can compose into one Start request.
  * Launch requests are built on top of the PresetDock draft (unsaved
  * edits included); form fields override the draft per request.
+ *
+ * The form lives in ONE module-level store: LaunchBar and RpcWorkerPanel
+ * used to hold independent useState copies, so RPC settings chosen in the
+ * panel never reached Start and Start clobbered preset devices.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { api } from '../api/client';
 import { useServer } from '../state/server';
 import { usePresets } from '../hooks/usePresets';
 import { useDevices } from '../hooks/useDevices';
+import { Value } from '../state/value';
 import { fieldClass } from './Field';
 import type { BuildEntry, LaunchConfig, ModelEntry, PreviewCommandResponse } from '../../../shared/contracts';
 
@@ -25,6 +30,10 @@ export interface LaunchForm {
 }
 
 const baseForm: LaunchForm = { modelPath: '', build: '', deviceA: '', deviceB: '', rpcTarget: '', workerSsh: '', transport: 'WiFi', rawCommand: '' };
+
+// Shared across panels; exported so non-panel pickers (HF search) can write
+// into the same form the LaunchBar Start button reads.
+export const launchFormStore = new Value<LaunchForm>(baseForm);
 
 export function useLaunchForm(): {
     form: LaunchForm;
@@ -44,7 +53,7 @@ export function useLaunchForm(): {
 } {
     const { state, config } = useServer();
     const { draft } = usePresets();
-    const [form, setForm] = useState<LaunchForm>(baseForm);
+    const form = useSyncExternalStore(launchFormStore.subscribe, launchFormStore.get, launchFormStore.get);
     const [models, setModels] = useState<ModelEntry[]>([]);
     const [builds, setBuilds] = useState<BuildEntry[]>([]);
     const { devices, error: devicesError } = useDevices(form.build || '');
@@ -61,7 +70,7 @@ export function useLaunchForm(): {
                 if (dead) return;
                 setModels(ms);
                 setBuilds(bs.builds || []);
-                setForm(old => {
+                launchFormStore.update(old => {
                     const next: LaunchForm = { ...old };
                     if (!next.build) next.build = bs.builds[0]?.id || '';
                     // modelPath intentionally NOT defaulted here: the active
@@ -79,19 +88,20 @@ export function useLaunchForm(): {
         return () => { dead = true; };
     }, [config]);
 
-    const set = <K extends keyof LaunchForm>(k: K, v: LaunchForm[K]) => setForm(old => ({ ...old, [k]: v }));
+    const set = <K extends keyof LaunchForm>(k: K, v: LaunchForm[K]) => launchFormStore.update(old => ({ ...old, [k]: v }));
 
     const presetBase: LaunchConfig = useMemo(() => draft ?? {}, [draft]);
     const request = (): LaunchConfig => ({
         ...presetBase,
         modelPath: form.modelPath || presetBase.modelPath,
         build: form.build || presetBase.build || '',
-        deviceA: form.deviceA,
-        deviceB: form.deviceB,
-        devices: [form.deviceA, form.deviceB].filter(Boolean).join(','),
+        // Untouched form fields fall back to the preset instead of wiping it.
+        deviceA: form.deviceA || presetBase.deviceA || '',
+        deviceB: form.deviceB || presetBase.deviceB || '',
+        devices: [form.deviceA || presetBase.deviceA, form.deviceB || presetBase.deviceB].filter(Boolean).join(','),
         rpcTarget: form.rpcTarget ? (form.workerSsh || presetBase.rpcTarget || '') : '',
         transport: form.transport,
-        rawCommand: form.rawCommand,
+        rawCommand: form.rawCommand || presetBase.rawCommand || '',
     });
 
     async function previewCommand() {

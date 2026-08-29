@@ -2,14 +2,13 @@
   "name": "dashboard",
   "version": "1.0.0",
   "description": "Cluster Command Center dashboard (Bun API + SSE + Vite/React frontend).",
-  "main": "ecosystem.config.js",
   "scripts": {
     "dev": "bun --hot src/server/index.ts & vite",
     "dev:server": "bun --hot src/server/index.ts",
     "dev:client": "vite",
     "build": "vite build",
     "start": "bun src/server/index.ts",
-    "test": "bun test \"$(pwd)/tests/\"",
+    "test": "bun test --timeout 15000 \"$(pwd)/tests/\"",
     "typecheck": "tsc --noEmit",
     "lint": "tools/lint/node_modules/.bin/eslint --config tools/lint/eslint.config.mjs .",
     "lint:fix": "tools/lint/node_modules/.bin/eslint --config tools/lint/eslint.config.mjs . --fix"

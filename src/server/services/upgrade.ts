@@ -3,6 +3,7 @@
 // --ff-only merge -> cmake --build in the existing configured build dir.
 // Streams progress line-by-line; a caller supplies an emit callback.
 import { spawn } from 'node:child_process';
+import * as os from 'node:os';
 
 export class UpgradeError extends Error {}
 
@@ -12,10 +13,11 @@ async function run(cmd: string[], cwd: string, emit: (line: string) => void, tim
         let out = '';
         const onData = (buf: Buffer) => {
             out += buf.toString();
-            for (const line of out.split(/\r?\n/)) {
+            const lines = out.split(/\r?\n/);
+            out = lines.pop() || ''; // hold the trailing partial back (emitting it made every wrapped line land twice)
+            for (const line of lines) {
                 if (line.trim()) emit(line);
             }
-            out = out.slice(out.lastIndexOf('\n') + 1);
         };
         proc.stdout?.on('data', onData);
         proc.stderr?.on('data', onData);
@@ -23,6 +25,7 @@ async function run(cmd: string[], cwd: string, emit: (line: string) => void, tim
         proc.on('error', err => { clearTimeout(timer); reject(new UpgradeError(err.message)); });
         proc.on('close', code => {
             clearTimeout(timer);
+            if (out.trim()) emit(out.trim());
             resolve(code ?? 1);
         });
     });
@@ -33,8 +36,6 @@ export async function runUpgrade(repoDir: string, buildDir: string, emit: (line:
     let code = await run(['git', 'fetch', 'origin'], repoDir, emit);
     if (code !== 0) throw new UpgradeError('git fetch failed (exit ' + code + ')');
 
-    const status = await run(['git', 'status', '--porcelain'], repoDir, emit);
-    // status is not a real exit signal; re-check via a dedicated command below
     const porcelain = await new Promise<string>(resolve => {
         const proc = spawn('git', ['status', '--porcelain'], { cwd: repoDir, stdio: ['ignore', 'pipe', 'ignore'] });
         let text = '';
@@ -77,7 +78,7 @@ export async function runUpgrade(repoDir: string, buildDir: string, emit: (line:
     else emit('Updated ' + before + ' -> ' + after);
 
     emit('== building in ' + buildDir + ' ==');
-    code = await run(['cmake', '--build', buildDir, '-j', String(Math.max(1, (require('node:os') as typeof import('node:os')).cpus().length - 1))], buildDir, emit);
+    code = await run(['cmake', '--build', buildDir, '-j', String(Math.max(1, os.cpus().length - 1))], buildDir, emit);
     if (code !== 0) throw new UpgradeError('cmake --build failed (exit ' + code + ')');
 
     emit('== verifying binary ==');

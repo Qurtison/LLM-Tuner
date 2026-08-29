@@ -1,8 +1,7 @@
-import { marked } from 'marked';
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../../api/client';
 import { getChatErrorMessage } from '../../api/errors';
-import { sanitizeMarkdownHtml } from '../../lib/sanitize';
+import { MarkdownMessage } from '../../lib/markdown';
 import { useServer } from '../../state/server';
 
 type Role = 'user' | 'assistant';
@@ -204,7 +203,7 @@ export default function ChatPanel() {
                     <header className="mb-2 flex items-center justify-between gap-3 text-xs"><span className={message.role === 'user' ? 'text-neutral-300' : 'text-indigo-400'}>{message.role === 'user' ? 'User' : 'Assistant'}</span><div className="flex items-center gap-3"><time className="text-neutral-500">{message.timestamp}</time>{message.role === 'assistant' && <button type="button" onClick={() => setRawMessages(current => ({ ...current, [key]: !raw }))} className="text-neutral-500 hover:text-neutral-300">{raw ? 'View Rendered' : 'View Raw'}</button>}</div></header>
                     <p className="mb-2 text-[10px] text-neutral-500" aria-label="Message metadata timeline">{metadata}</p>
                     {message.reasoning && <details className="mb-3 rounded border border-neutral-800 bg-neutral-900 px-3 py-2 text-xs text-neutral-400"><summary className="cursor-pointer">Reasoning trace · ~{estimateTokens(message.reasoning)} tokens</summary><pre className="mt-2 whitespace-pre-wrap font-mono">{message.reasoning}</pre></details>}
-                    <div ref={element => { if (element) contentRefs.current.set(key, element); else contentRefs.current.delete(key); }} className={collapsed ? 'max-h-80 overflow-hidden' : ''}>{raw ? <pre className="overflow-x-auto rounded border border-neutral-800 bg-neutral-950 p-3 text-xs whitespace-pre-wrap break-words text-neutral-300">{content}</pre> : message.role === 'assistant' ? <div className="prose prose-invert max-w-none break-words text-sm" dangerouslySetInnerHTML={{ __html: sanitizeMarkdownHtml(marked.parse(content) as string) }} /> : <p className="whitespace-pre-wrap break-words text-sm text-neutral-100">{content}</p>}</div>
+                    <div ref={element => { if (element) contentRefs.current.set(key, element); else contentRefs.current.delete(key); }} className={collapsed ? 'max-h-80 overflow-hidden' : ''}>{raw ? <pre className="overflow-x-auto rounded border border-neutral-800 bg-neutral-950 p-3 text-xs whitespace-pre-wrap break-words text-neutral-300">{content}</pre> : message.role === 'assistant' ? <MarkdownMessage markdown={content} /> : <p className="whitespace-pre-wrap break-words text-sm text-neutral-100">{content}</p>}</div>
                     {collapsed && <button type="button" onClick={() => setCollapsedMessages(current => ({ ...current, [key]: false }))} className="mt-1.5 block text-[11px] font-medium text-indigo-400 hover:text-indigo-300">Show more ▾</button>}
                     {!collapsed && Object.prototype.hasOwnProperty.call(collapsedMessages, key) && <button type="button" onClick={() => setCollapsedMessages(current => ({ ...current, [key]: true }))} className="mt-1.5 block text-[11px] font-medium text-indigo-400 hover:text-indigo-300">Show less ▴</button>}
                 </article>;

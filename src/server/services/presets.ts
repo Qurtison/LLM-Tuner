@@ -8,15 +8,10 @@
 // /api/start can consume a preset directly.
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { LaunchConfig } from '../../../shared/contracts';
+import type { LaunchConfig, Preset } from '../../../shared/contracts';
 import { PARAM_BY_ID } from '../../../shared/llama-params';
 
-export interface Preset {
-    name: string;
-    build: string;
-    label?: string;
-    config: LaunchConfig;
-}
+export type { Preset };
 
 // Same alphabet as the old dashboard's _NAME_RE: preset names become file
 // names, so anything outside this is a path-traversal vector.

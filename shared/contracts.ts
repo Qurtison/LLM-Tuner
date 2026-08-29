@@ -195,11 +195,11 @@ export interface RecentRequestRow {
     runId: string;
     model: string;
     transport: string;
-    promptTps: number;
-    genTps: number;
-    promptTokens: number;
-    genTokens: number;
-    wallTime: number;
+    promptTps: number | null;
+    genTps: number | null;
+    promptTokens: number | null;
+    genTokens: number | null;
+    wallTime: number | null;
     draftAcceptRate: number | null;
     draftAccepted: number | null;
     draftGenerated: number | null;
@@ -379,38 +379,6 @@ export interface ConfigResponse {
         providers: string[];
     };
 }
-
-export const ROUTES: Record<string, 'GET' | 'POST'> = {
-    '/api/status': 'GET',
-    '/api/models': 'GET',
-    '/api/log': 'POST',
-    '/api/logs/csv': 'GET',
-    '/api/logs/samples': 'GET',
-    '/api/logs/active-samples': 'GET',
-    '/api/logs/recent': 'GET',
-    '/api/logs/summary': 'GET',
-    '/api/builds': 'GET',
-    '/api/bench/start': 'POST',
-    '/api/bench/status': 'GET',
-    '/api/bench/stop': 'POST',
-    '/api/bench/clear': 'POST',
-    '/api/bench/restore': 'POST',
-    '/api/bench/dequeue': 'POST',
-    '/api/bench/note': 'POST',
-    '/api/flags': 'GET',
-    '/api/devices': 'GET',
-    '/api/preview-command': 'POST',
-    '/api/start': 'POST',
-    '/api/stop': 'POST',
-    '/api/worker/start': 'POST',
-    '/api/worker/stop': 'POST',
-    '/api/worker/status': 'POST',
-    '/api/worker/logs': 'POST',
-    '/api/master/logs': 'GET',
-    '/api/master/logs/stream': 'GET',
-    '/api/telemetry/rate': 'POST',
-    '/api/telemetry/latest': 'GET'
-};
 
 // --- Gap-closing additions (docs/gap-analysis.md) ---
 

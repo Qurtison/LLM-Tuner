@@ -1,14 +1,16 @@
 import type { DashboardConfig } from '../config';
-import type { LaunchConfig } from '../../../shared/contracts';
+import type { LaunchConfig, ServerState as ServerStateValue } from '../../../shared/contracts';
 
+// The state *value* union lives in shared/contracts.ts (single source of
+// truth, same type the SSE payload and client parse); this interface is the
+// server's shared mutable state object.
 export interface ServerState {
-    serverState: 'stopped' | 'loading' | 'ready' | 'starting' | 'stopping';
+    serverState: ServerStateValue;
     currentModel: string;
     isRpc: boolean;
     loadStartTime: number;
-    // string after the first successful load (toFixed) — frozen quirk of
-    // the original server; CSV/load-time consumers expect the raw value.
-    finalLoadTime: number | string;
+    // Seconds to one decimal; 0 until the first successful load completes.
+    finalLoadTime: number;
     currentLaunchCommand: string;
     currentLaunchConfig: LaunchConfig | null;
 }

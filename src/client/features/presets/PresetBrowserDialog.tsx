@@ -22,23 +22,7 @@ import {
     type ParamScope,
 } from '../../../../shared/llama-params';
 import type { LaunchConfig, ModelEntry } from '../../../../shared/contracts';
-import { fieldForParamId, overridesFromConfig, intInputValid } from './registry';
-
-const GROUP_LABELS: Record<ParamGroup, string> = {
-    speed: 'Speed & threads',
-    memory: 'Memory & VRAM',
-    context: 'Context & caching',
-    sampling: 'Output & sampling',
-    model: 'Model & source',
-    devices: 'Devices & GPUs',
-    speculative: 'Speculative decoding',
-    server: 'Server & network',
-    agents: 'Agents & tools',
-    multimodal: 'Multimodal & embeddings',
-    chat: 'Chat & reasoning',
-    logging: 'Logging & debug',
-    archive: 'Archive',
-};
+import { fieldForParamId, overridesFromConfig, numericInputValid, GROUP_LABELS } from './registry';
 
 type Filter = 'all' | 'modified' | 'archive';
 
@@ -150,6 +134,11 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
         if (!open) return;
         const onKey = (event: KeyboardEvent) => {
             if (event.key === 'Escape') { event.preventDefault(); onClose(); return; }
+            // Typing in the search box (or any input) must behave natively:
+            // Backspace here used to reset the focused row instead of editing
+            // text, and preventDefault ate the character.
+            const target = event.target as HTMLElement | null;
+            if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable)) return;
             if (event.key === 'Tab') {
                 event.preventDefault();
                 const idx = visibleGroups.indexOf(activeGroup);
@@ -212,7 +201,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
                         type="text"
                         value={query}
                         onChange={e => setQuery(e.target.value)}
-                        placeholder="search 248 settings, flags and env vars"
+                        placeholder={`search ${LLAMA_PARAMS.length} settings, flags and env vars`}
                         className="flex-1 rounded border border-neutral-700 bg-neutral-900 px-3 py-1.5 font-mono text-xs text-neutral-100 placeholder:text-neutral-600 focus:border-amber-500 focus:outline-none"
                     />
                     <div className="flex rounded border border-neutral-700 text-[11px]">
@@ -220,7 +209,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
                             <button
                                 key={f}
                                 type="button"
-                                onClick={() => { setFilter(f); if (f === 'archive') setActiveGroup('archive'); }}
+                                onClick={() => { setFilter(f); if (f === 'archive') setActiveGroup('archive'); else if (activeGroup === 'archive') setActiveGroup('sampling'); }}
                                 className={'px-2.5 py-1 ' + (filter === f ? 'bg-amber-500 text-neutral-950' : 'text-neutral-400 hover:text-neutral-200')}
                             >
                                 {f === 'all' ? 'All' : f === 'modified' ? `Modified ${modifiedIds.size}` : `Archive ${groupsWithCounts.get('archive')?.total ?? 0}`}
@@ -318,8 +307,9 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     // parsing draftVal inside the change handler would commit the OLD value.
     const commitRowValue = (raw: string | boolean) => {
         const s = String(raw);
-        if (def.control === 'int' && !intInputValid(s)) {
-            // decimal/garbage in an int field: revert the input, save nothing
+        if ((def.control === 'int' || def.control === 'float') && !numericInputValid(def.control, s)) {
+            // decimal/garbage in an int field, non-numeric in a float field:
+            // revert the input, save nothing
             setDraftVal(toInput(currentValue, def.control));
             return;
         }

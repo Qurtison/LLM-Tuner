@@ -1,5 +1,5 @@
 // Feature panel registry. App shell renders the registered panels via
-// PanelGrid; each panel is self-contained. Slice map: docs/p5-slices.md.
+// PanelCanvas; each panel is self-contained. Slice map: docs/p5-slices.md.
 export { default as ChatPanel } from './interactive/ChatPanel';
 export { default as MonitorPanel } from './monitor/MonitorPanel';
 export { default as LiveRequestsPanel } from './monitor/LiveRequestsPanel';

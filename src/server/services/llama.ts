@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { LaunchConfig } from '../../../shared/contracts';
+import { SseLogPrefixes } from '../../../shared/contracts';
 import type { ServerCtx } from './types';
 import * as launch from '../lib/launch';
 import * as tokenize from '../lib/tokenize';
@@ -13,9 +14,12 @@ import type { UnitStatus } from './unit';
 
 const MASTER_LOG_BUFFER_SIZE = 500;
 
-// --- D: persisted last launch (generated/last-launch.json) ---
+// --- D: persisted last launch (<logsDirectory>/last-launch.json) ---
 // Lets a dashboard restart adopt (systemd mode) or relaunch (native mode)
-// the model without user action.
+// the model without user action. Lives under the CONFIGURED logs directory,
+// not appRoot: tests and alternate configs then never adopt each other's
+// state (a repo-level generated/last-launch.json used to leak a test launch
+// into every later boot and flake the smoke suite).
 export interface LastLaunch {
     config: LaunchConfig;
     command: string;
@@ -23,18 +27,18 @@ export interface LastLaunch {
     at: number;
 }
 
-export async function loadLastLaunch(appRoot: string): Promise<LastLaunch | null> {
+export async function loadLastLaunch(dir: string): Promise<LastLaunch | null> {
     try {
-        const raw = await fs.readFile(path.join(appRoot, 'generated', 'last-launch.json'), 'utf8');
+        const raw = await fs.readFile(path.join(dir, 'last-launch.json'), 'utf8');
         const data = JSON.parse(raw) as Partial<LastLaunch> | null;
         if (!data || typeof data !== 'object' || !data.config || typeof data.command !== 'string' || !Array.isArray(data.args)) return null;
         return { config: data.config, command: data.command, args: data.args, at: typeof data.at === 'number' ? data.at : 0 };
     } catch { return null; }
 }
 
-export function persistLastLaunch(appRoot: string, record: LastLaunch): void {
+export function persistLastLaunch(dir: string, record: LastLaunch): void {
     try {
-        const p = path.join(appRoot, 'generated', 'last-launch.json');
+        const p = path.join(dir, 'last-launch.json');
         mkdirSync(path.dirname(p), { recursive: true });
         writeFileSync(p, JSON.stringify(record, null, 2));
     } catch (err) {
@@ -114,6 +118,10 @@ export class LlamaService {
     private journal: ChildProcess | null = null;
     private pollTimer: ReturnType<typeof setInterval> | null = null;
     private systemdRunning = false;
+    // Set while a deliberate stop is in flight: the 2s poller must not
+    // readopt a unit that is merely on its way down (the stop->re-adopt race
+    // that made the UI show the model relaunching itself after /api/stop).
+    private stopRequested = false;
     private logBuffer: string[] = [];
     private lineListeners = new Set<(line: string) => void>();
     private progress: LiveProgress = {};
@@ -137,7 +145,7 @@ export class LlamaService {
     // the dashboard restart (deploy), or relaunch the persisted last launch
     // (fresh boot / was stopped) so a restart self-heals without action.
     async restoreOnBoot(): Promise<void> {
-        const last = await loadLastLaunch(this.appRoot());
+        const last = await loadLastLaunch(this.lastLaunchDir());
         if (this.mode === 'systemd') {
             let st: UnitStatus;
             try { st = await unitMod.status(this.unitName()); } catch { return; }
@@ -252,9 +260,13 @@ export class LlamaService {
         const launchConfig = this.resolveLaunch(config);
         const { command, args } = launchConfig;
         this.setLaunchState(launchConfig.config, command, args);
+        if (this.mode !== 'systemd') {
+            // Native mode has no unit file to re-read on boot; persist here so
+            // restoreOnBoot's native relaunch branch is actually reachable.
+            persistLastLaunch(this.lastLaunchDir(), { config: launchConfig.config, command, args, at: Date.now() });
+        }
         this.ctx.broadcast();
-        console.log('LAUNCHING:', this.ctx.state.currentLaunchCommand);
-        this.ctx.broadcast('', 'LAUNCH CMD: ' + this.ctx.state.currentLaunchCommand);
+        this.ctx.broadcast('', SseLogPrefixes.LAUNCH_CMD + this.ctx.state.currentLaunchCommand);
         try {
             if (this.mode === 'systemd') this.systemdLaunch(command, args, launchConfig.config);
             else this.spawn(command, args);
@@ -293,7 +305,15 @@ export class LlamaService {
             // the native close handler); the route has already transitioned
             // stopping -> stopped (frozen).
             this.systemdRunning = false;
-            void unitMod.stop(this.unitName());
+            this.stopRequested = true;
+            void unitMod.stop(this.unitName()).then(r => {
+                if (!r.ok) {
+                    // Stop failed: the unit is likely still up. Re-arm the
+                    // poller's readopt so state matches reality, and say so.
+                    this.stopRequested = false;
+                    this.ctx.broadcast('', 'Failed to stop llama unit: ' + r.output.slice(-200));
+                }
+            });
             return;
         }
         const proc = this.proc;
@@ -343,15 +363,20 @@ export class LlamaService {
         return this.ctx.appRoot ?? process.cwd();
     }
 
-    // Same convention as /api/apply (routes.ts): service.unitPath doubles as
-    // the launch-script location; defaults under <appRoot>/generated and
-    // the user's systemd dir.
+    // The directory last-launch state is read from/written to: config-driven
+    // so tests and alternate configs never adopt each other's launches.
+    private lastLaunchDir(): string {
+        return this.ctx.config.paths.logsDirectory;
+    }
+
+    // Distinct paths by design (see unit.scriptPathFor): the unit file and
+    // the launch script it ExecStarts must never share a path.
     private scriptPath(): string {
-        return path.resolve(this.ctx.config.service.unitPath || path.join(this.appRoot(), 'generated', 'launch.sh'));
+        return unitMod.scriptPathFor(this.ctx.config.service, this.appRoot());
     }
 
     private unitFilePath(): string {
-        return path.resolve(this.ctx.config.service.unitPath || path.join(process.env.HOME || '/home/james', '.config', 'systemd', 'user', this.unitName()));
+        return unitMod.unitFilePathFor(this.ctx.config.service);
     }
 
     private ensureUnitFile(): void {
@@ -369,9 +394,10 @@ export class LlamaService {
     // poller / start-promise as a 'Launch failed' broadcast.
     private systemdLaunch(command: string, args: string[], config: LaunchConfig): void {
         writeLaunchScriptFile(this.scriptPath(), command, args);
-        persistLastLaunch(this.appRoot(), { config, command, args, at: Date.now() });
+        persistLastLaunch(this.lastLaunchDir(), { config, command, args, at: Date.now() });
         this.ensureUnitFile();
         this.systemdRunning = true;
+        this.stopRequested = false;
         // Skip journal history replay on fresh launches: replays include the
         // previous failed run (e.g. "out of memory"), which the fatal-log
         // detector then matches against the new process and SIGINTs it
@@ -397,7 +423,6 @@ export class LlamaService {
             buffer = lines.pop() || '';
             if (buffer.length > 1_000_000) buffer = buffer.slice(-4096);
             for (const line of lines) {
-                process.stdout.write(line + '\n');
                 this.handleLine(line);
             }
         };
@@ -432,6 +457,12 @@ export class LlamaService {
         const st = await unitMod.status(this.unitName());
         const up = st.activeState === 'active' || st.activeState === 'activating';
         if (!this.systemdRunning) {
+            if (this.stopRequested) {
+                // Deliberate stop in flight: wait for the unit to actually go
+                // inactive, then re-arm so a later unit/start reads back.
+                if (!up) this.stopRequested = false;
+                return;
+            }
             if (up) await this.readoptAfterSystemdRestart();
             return;
         }
@@ -443,7 +474,7 @@ export class LlamaService {
     // identity, restore it from the persisted last launch and go starting;
     // the journal follow catches loading/ready transitions.
     private async readoptAfterSystemdRestart(): Promise<void> {
-        const last = await loadLastLaunch(this.appRoot());
+        const last = await loadLastLaunch(this.lastLaunchDir());
         if (last) {
             this.ctx.state.currentModel = last.config.model || last.config.modelPath || '';
             this.ctx.state.isRpc = !!last.config.rpcTarget;
@@ -451,6 +482,7 @@ export class LlamaService {
             this.ctx.state.currentLaunchCommand = formatCommand(last.command, last.args);
         }
         this.systemdRunning = true;
+        this.stopRequested = false;
         this.startJournalFollow();
         this.ctx.state.serverState = 'starting';
         this.ctx.state.loadStartTime = Date.now();
@@ -472,7 +504,10 @@ export class LlamaService {
     // Fatal-log kill, mode-aware: native kills the child, systemd stops the
     // unit (a plain kill would let Restart=always loop on a bad launch).
     private killProcess(): void {
-        if (this.mode === 'systemd') void unitMod.stop(this.unitName());
+        if (this.mode === 'systemd') {
+            this.stopRequested = true;
+            void unitMod.stop(this.unitName());
+        }
         else this.proc?.kill();
     }
 
@@ -492,7 +527,6 @@ export class LlamaService {
                 const result = await reader.read();
                 if (result.done) break;
                 const text = decoder.decode(result.value, { stream: true });
-                process.stdout.write(text);
                 logLineBuffer += text;
                 const lines = logLineBuffer.split(/\r\n|\r|\n/);
                 logLineBuffer = lines.pop() || '';
@@ -526,10 +560,9 @@ export class LlamaService {
             this.ctx.state.serverState = 'loading';
             this.ctx.broadcast();
         } else if (line.includes('llama_server: model loaded')) {
-            console.log('MODEL LOADED! READY!');
             this.ctx.state.serverState = 'ready';
             if (this.ctx.state.loadStartTime > 0) {
-                this.ctx.state.finalLoadTime = ((Date.now() - this.ctx.state.loadStartTime) / 1000).toFixed(1);
+                this.ctx.state.finalLoadTime = Math.round(((Date.now() - this.ctx.state.loadStartTime) / 1000) * 10) / 10;
                 this.ctx.state.loadStartTime = 0;
             }
             this.ctx.broadcast();
@@ -548,7 +581,7 @@ export class LlamaService {
                     prefillProgress: parseFloat(progress[1]),
                     prefillTokens: parseInt(tokenCount, 10) || undefined,
                 };
-                this.ctx.broadcast('PREFILL_PROGRESS:' + progress[1] + ':' + rate + ':' + tokenCount);
+                this.ctx.broadcast(SseLogPrefixes.PREFILL_PROGRESS + ':' + progress[1] + ':' + rate + ':' + tokenCount);
                 this.onActivity?.();
             }
         } else if (line.includes('print_timing:')) {
@@ -556,7 +589,7 @@ export class LlamaService {
             const rollingRate = line.match(/tg_3s\s*=\s*(\d+\.?\d*)\s*t\/s/) || line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
             if (generated && rollingRate) {
                 this.progress = { genTps: parseFloat(rollingRate[1]) || undefined, genTokens: parseInt(generated[1], 10) || undefined };
-                this.ctx.broadcast('GEN_PROGRESS:' + rollingRate[1] + ':' + generated[1] + ':' + generated[1]);
+                this.ctx.broadcast(SseLogPrefixes.GEN_PROGRESS + ':' + rollingRate[1] + ':' + generated[1]);
                 this.onActivity?.();
             }
             const idTask = line.match(/id\s+(\d+)\s*\|\s*task\s+(\d+)/);
@@ -567,6 +600,9 @@ export class LlamaService {
                     const m = segment.match(/=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens[^)]*?([\d.]+)\s*tokens per second/);
                     if (m) {
                         const old = this.taskTimings.get(taskId) || {};
+                        // Cap: aborted/killed tasks never reach the 'total
+                        // time' branch that deletes their entry.
+                        if (this.taskTimings.size >= 256) this.taskTimings.delete(this.taskTimings.keys().next().value as string);
                         this.taskTimings.set(taskId, segment.startsWith('prompt') ? { ...old, promptMs: parseFloat(m[1]), promptTokens: parseInt(m[2], 10), promptTps: parseFloat(m[3]) } : { ...old, genMs: parseFloat(m[1]), genTokens: parseInt(m[2], 10), genTps: parseFloat(m[3]) });
                     }
                 } else if (segment.startsWith('total time')) {
@@ -624,6 +660,7 @@ export class LlamaService {
 
     private reset(): void {
         this.proc = null;
+        this.taskTimings.clear();
         this.ctx.state.serverState = 'stopped';
         this.ctx.state.currentModel = '';
         this.ctx.state.isRpc = false;

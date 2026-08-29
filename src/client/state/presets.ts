@@ -12,7 +12,8 @@ import { api } from '../api/client';
 import { getErrorMessage } from '../api/errors';
 import { loadJson, saveJson, removeJson } from '../lib/storage';
 import type { LaunchConfig, Preset, PresetsResponse, PresetSaveRequest } from '../../../shared/contracts';
-import { configWithOverrides, overridesFromConfig, paramForField, paramDefById } from '../features/presets/registry';
+import { configWithOverrides, paramForField, paramDefById } from '../features/presets/registry';
+import { Value } from './value';
 
 const ACTIVE_KEY = 'presets_active';
 // ponytail: no localStorage draft persistence — the server-saved preset is
@@ -30,15 +31,6 @@ export interface PresetsSnapshot {
 }
 
 type Listener = () => void;
-
-class Value<T> {
-    private value: T;
-    private listeners = new Set<Listener>();
-    constructor(initial: T) { this.value = initial; }
-    get(): T { return this.value; }
-    set(next: T): void { if (next === this.value) return; this.value = next; this.listeners.forEach(l => l()); }
-    subscribe = (l: Listener): (() => void) => { this.listeners.add(l); return () => this.listeners.delete(l); };
-}
 
 function defaultDraft(): LaunchConfig {
     return {};
@@ -163,10 +155,6 @@ class PresetsStore {
         this.value.set({ ...this.value.get(), draft: active ? { ...active.config } : defaultDraft(), isDirty: false });
     }
 
-    overrides() {
-        return overridesFromConfig(this.value.get().draft);
-    }
-
     async save(): Promise<{ ok: boolean; warnings: string[] }> {
         const { active, draft } = this.value.get();
         if (!active) return { ok: false, warnings: ['No active preset to save to.'] };
@@ -198,19 +186,6 @@ class PresetsStore {
             return { ok: result.ok, warnings: result.warnings || [] };
         } catch (err) {
             return { ok: false, warnings: [], error: getErrorMessage(err) };
-        }
-    }
-
-    async remove(name: string): Promise<boolean> {
-        try {
-            await api(`/api/presets/${encodeURIComponent(name)}`, { method: 'DELETE' });
-            const { active } = this.value.get();
-            if (active?.name === name) this.setActive(null);
-            else await this.refresh();
-            return true;
-        } catch (err) {
-            this.value.set({ ...this.value.get(), error: getErrorMessage(err) });
-            return false;
         }
     }
 }

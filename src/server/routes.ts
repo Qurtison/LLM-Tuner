@@ -9,7 +9,7 @@ import type { LlamaService } from './services/llama';
 import { formatCommand, LlamaSpawnError } from './services/llama';
 import type { BenchService } from './services/bench';
 import type { TelemetryService } from './services/telemetry';
-import { appendBenchmarkRow, logCompletedRequest } from './services/csvlog';
+import { appendBenchmarkRow, logCompletedRequest, CSV_COL } from './services/csvlog';
 import { scanModels } from './services/models';
 import { PresetStore, validatePreset } from './services/presets';
 import * as unitMod from './services/unit';
@@ -27,6 +27,12 @@ export class BodyTooLargeError extends Error {
     constructor() { super('Payload too large'); }
 }
 
+// Thrown by jsonBodyOr400 on malformed bodies; handleApiRoute maps it to the
+// frozen 400 shape ({ error: 'Invalid JSON' }) in one central place.
+export class InvalidJsonError extends Error {
+    constructor() { super('Invalid JSON'); }
+}
+
 export interface RouteCtx {
     config: DashboardConfig;
     state: ServerState;
@@ -36,10 +42,9 @@ export interface RouteCtx {
     telemetry: TelemetryService;
     presets: PresetStore;
     appRoot: string;
-    // Body reader honoring config.server.maxBodyBytes; resolves null when the
-    // body exceeded the cap (legacy behavior reset the socket; the Bun entry
-    // answers 413 — same protection, documentable status).
-    readBody: (req: Request) => Promise<string | null>;
+    // Body reader honoring config.server.maxBodyBytes; throws
+    // BodyTooLargeError when the cap is exceeded (the entry maps it to 413).
+    readBody: (req: Request) => Promise<string>;
     json: (body: unknown, status?: number, headers?: Record<string, string>) => Response;
 }
 
@@ -56,17 +61,19 @@ function workerComposeCommand(ctx: RouteCtx, command: string): string {
 // BodyTooLargeError from the entry's size-guarded reader (maps to 413).
 async function parseJsonBody(ctx: RouteCtx, req: Request): Promise<Record<string, unknown>> {
     const raw = await ctx.readBody(req);
-    return JSON.parse(raw ?? '') as Record<string, unknown>;
+    return JSON.parse(raw) as Record<string, unknown>;
 }
 
 // Every POST route parses bodies through this so the frozen 400 shape stays
-// uniform while oversized bodies keep their own (413) handling.
+// uniform while oversized bodies keep their own (413) handling. Invalid JSON
+// throws InvalidJsonError (mapped centrally); it must not be swallowed by any
+// route's own try/catch.
 async function jsonBodyOr400(ctx: RouteCtx, req: Request): Promise<Record<string, unknown>> {
     try {
         return await parseJsonBody(ctx, req);
     } catch (err) {
         if (err instanceof BodyTooLargeError) throw err;
-        return ctx.json({ error: 'Invalid JSON' }, 400) as never;
+        throw new InvalidJsonError();
     }
 }
 
@@ -96,7 +103,10 @@ function upgradeStream(ctx: RouteCtx, req: Request): Response {
                 try { controller.close(); } catch { /* already closed */ }
             }
         },
-        cancel() { upgradeRunning = false; },
+        // Client gone != build gone: runUpgrade keeps building, so the flag
+        // stays set until the run finishes or a second build would race the
+        // same buildDir. Emissions into the closed controller just no-op.
+        cancel() { /* keep upgradeRunning; run continues */ },
     });
     return new Response(stream, {
         status: 200,
@@ -105,6 +115,15 @@ function upgradeStream(ctx: RouteCtx, req: Request): Response {
 }
 
 export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<Response> {
+    try {
+        return await dispatchApiRoute(ctx, req, url);
+    } catch (err) {
+        if (err instanceof InvalidJsonError) return ctx.json({ error: 'Invalid JSON' }, 400);
+        throw err;
+    }
+}
+
+async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<Response> {
     const route = url.pathname;
     const method = req.method;
 
@@ -133,8 +152,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
         return ctx.json({ presets, active });
     }
     if (route === '/api/presets' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         const name = typeof body.name === 'string' ? body.name : '';
         if (!name) return ctx.json({ error: 'preset needs a name' }, 400);
         const existing = await ctx.presets.get(name);
@@ -173,8 +191,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
         return ctx.json({ ok: true, active: name });
     }
     if (route === '/api/presets/validate' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         const warnings = await validatePreset({ name: String(body.name || 'x'), build: String(body.build || ''), config: (body.config as never) || {} } as import('./services/presets').Preset, ctx.config.paths.modelDirectories);
         return ctx.json({ warnings });
     }
@@ -189,8 +206,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
         }
     }
     if (route === '/api/files/delete' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         try {
             await deleteFile(ctx.config.paths.modelDirectories[0], String(body.path || ''));
             return ctx.json({ ok: true });
@@ -245,12 +261,15 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
             let restartOk: boolean | undefined;
             let restartOutput: string | undefined;
             if (ctx.config.service.manageViaSystemd && ctx.config.service.unitName) {
-                const scriptPath = ctx.config.service.unitPath || path.join(ctx.appRoot, 'generated', 'launch.sh');
+                // Shared helper keeps script + unit paths distinct (the old
+                // unitPath fallback made both the same and installUnit
+                // overwrote the freshly written script with the unit file).
+                const scriptPath = unitMod.scriptPathFor(ctx.config.service, ctx.appRoot);
                 await fs.mkdir(path.dirname(scriptPath), { recursive: true });
                 const script = '#!/usr/bin/env bash\nset -euo pipefail\nexec ' + command + '\n';
                 await fs.writeFile(scriptPath, script);
                 await fs.chmod(scriptPath, 0o755);
-                const unitPath = ctx.config.service.unitPath || path.join(process.env.HOME || '/home/james', '.config', 'systemd', 'user', ctx.config.service.unitName);
+                const unitPath = unitMod.unitFilePathFor(ctx.config.service);
                 // In systemd mode the unit must be enabled so the model
                 // survives reboots (A+D); enableOnApply is ignored there.
                 const installed = await unitMod.installUnit(unitPath, scriptPath, ctx.config.service.unitName, true);
@@ -303,8 +322,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
 
     // --- BENCHMARK LOG (manual/external logging) ---
     if (route === '/api/log' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         const runId = await appendBenchmarkRow(ctx.config.paths.logsDirectory, body);
         return ctx.json({ success: true, run_id: runId });
     }
@@ -342,20 +360,20 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
                 const cols = csv.splitCsvLine(line);
                 if (cols.length < 32) continue; // only schema v3+ rows have model_name/transport at known offsets
                 rows.push({
-                    timestamp: cols[0],
-                    runId: cols[1],
-                    model: cols[2],
-                    transport: cols[7],
-                    promptTps: csv.parseNumOrNull(cols[10]),
-                    genTps: csv.parseNumOrNull(cols[11]),
-                    promptTokens: csv.parseNumOrNull(cols[13]),
-                    genTokens: csv.parseNumOrNull(cols[28]),
-                    wallTime: csv.parseNumOrNull(cols[30]),
-                    draftAcceptRate: cols.length > 33 ? csv.parseNumOrNull(cols[33]) : null,
-                    draftAccepted: cols.length > 34 ? csv.parseNumOrNull(cols[34]) : null,
-                    draftGenerated: cols.length > 35 ? csv.parseNumOrNull(cols[35]) : null,
-                    draftMeanLen: cols.length > 36 ? csv.parseNumOrNull(cols[36]) : null,
-                    aborted: cols.length > 37 ? cols[37] === '1' : false,
+                    timestamp: cols[CSV_COL.timestamp],
+                    runId: cols[CSV_COL.runId],
+                    model: cols[CSV_COL.model],
+                    transport: cols[CSV_COL.transport],
+                    promptTps: csv.parseNumOrNull(cols[CSV_COL.promptTps]),
+                    genTps: csv.parseNumOrNull(cols[CSV_COL.genTps]),
+                    promptTokens: csv.parseNumOrNull(cols[CSV_COL.promptTokens]),
+                    genTokens: csv.parseNumOrNull(cols[CSV_COL.genTokens]),
+                    wallTime: csv.parseNumOrNull(cols[CSV_COL.wallTime]),
+                    draftAcceptRate: cols.length > CSV_COL.draftAcceptRate ? csv.parseNumOrNull(cols[CSV_COL.draftAcceptRate]) : null,
+                    draftAccepted: cols.length > CSV_COL.draftAccepted ? csv.parseNumOrNull(cols[CSV_COL.draftAccepted]) : null,
+                    draftGenerated: cols.length > CSV_COL.draftGenerated ? csv.parseNumOrNull(cols[CSV_COL.draftGenerated]) : null,
+                    draftMeanLen: cols.length > CSV_COL.draftMeanLen ? csv.parseNumOrNull(cols[CSV_COL.draftMeanLen]) : null,
+                    aborted: cols.length > CSV_COL.aborted ? cols[CSV_COL.aborted] === '1' : false,
                 });
             }
             return ctx.json({ rows });
@@ -382,8 +400,8 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
                 const cols = csv.splitCsvLine(line);
                 if (cols.length < 25) continue;
                 if (cols.length >= 32) {
-                    const rowModel = cols[2];
-                    const rowTransport = cols[7];
+                    const rowModel = cols[CSV_COL.model];
+                    const rowTransport = cols[CSV_COL.transport];
                     if (filterModel && rowModel !== filterModel) continue;
                     if (filterTransport && rowTransport !== filterTransport) continue;
                     lastModel = rowModel;
@@ -396,13 +414,10 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
                     continue;
                 }
                 let pTps: number, gTps: number, pLat: number, wTime: number, lTime: number;
-                if (cols.length >= 32) {
-                    pTps = parseFloat(cols[10]); gTps = parseFloat(cols[11]); pLat = parseFloat(cols[12]); wTime = parseFloat(cols[30]); lTime = parseFloat(cols[31]);
-                } else if (cols.length >= 31) {
-                    pTps = parseFloat(cols[9]); gTps = parseFloat(cols[10]); pLat = parseFloat(cols[11]); wTime = parseFloat(cols[29]); lTime = parseFloat(cols[30]);
-                } else {
-                    pTps = parseFloat(cols[8]); gTps = parseFloat(cols[9]); pLat = parseFloat(cols[10]); wTime = parseFloat(cols[28]); lTime = parseFloat(cols[29]);
-                }
+                // Older schemas shift everything after arg_string: v2 (no
+                // launch_command) by 1, old (no launch_command/config_json) by 2.
+                const shift = cols.length >= 32 ? 0 : cols.length >= 31 ? 1 : 2;
+                pTps = parseFloat(cols[CSV_COL.promptTps - shift]); gTps = parseFloat(cols[CSV_COL.genTps - shift]); pLat = parseFloat(cols[CSV_COL.promptLatency - shift]); wTime = parseFloat(cols[CSV_COL.wallTime - shift]); lTime = parseFloat(cols[CSV_COL.loadTime - shift]);
                 lastPromptTps = Number.isFinite(pTps) ? pTps : null;
                 lastGenTps = Number.isFinite(gTps) ? gTps : null;
                 lastLoadTime = Number.isFinite(lTime) ? lTime : null;
@@ -443,8 +458,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
 
     // --- BENCH: single config or { queue } (server-side matrix queue) ---
     if (route === '/api/bench/start' && method === 'POST') {
-        let cfg: Record<string, unknown>;
-        try { cfg = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const cfg = await jsonBodyOr400(ctx, req);
         const result = ctx.bench.start(cfg);
         if (result.error) return ctx.json({ error: result.error }, result.code || 500);
         // Frozen shapes: queue mode carries queued, single mode does not.
@@ -466,14 +480,12 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
         return ctx.json({ ok: true, output });
     }
     if (route === '/api/bench/dequeue' && method === 'POST') {
-        let dq: Record<string, unknown>;
-        try { dq = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const dq = await jsonBodyOr400(ctx, req);
         const res = ctx.bench.dequeue(dq.label);
         return ctx.json({ ok: true, removed: res.removed, queueRemaining: res.queueRemaining });
     }
     if (route === '/api/bench/note' && method === 'POST') {
-        let noteBody: Record<string, unknown>;
-        try { noteBody = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const noteBody = await jsonBodyOr400(ctx, req);
         ctx.bench.note(noteBody.lines);
         return ctx.json({ ok: true });
     }
@@ -506,8 +518,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
 
     // --- PREVIEW LAUNCH COMMAND (no spawn) ---
     if (route === '/api/preview-command' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         try {
             const { command, args } = launch.resolveLaunchCommand(body, ctx.config.llama.builds, {
                 rpcPort: ctx.config.llama.rpcPort,
@@ -521,8 +532,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
 
     // --- START SERVER (frozen status split: validation 400, spawn 500) ---
     if (route === '/api/start' && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         if (ctx.llama.running) return ctx.json({ error: 'Running' }, 400);
         try {
             ctx.llama.launch(body);
@@ -558,8 +568,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
     };
     const worker = workerRoutes[route];
     if (worker && method === 'POST') {
-        let body: Record<string, unknown>;
-        try { body = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const body = await jsonBodyOr400(ctx, req);
         const workerHost = (body.worker_ssh as string) || ctx.config.worker.sshHost;
         if (!workerHost) return ctx.json(NO_WORKER_HOST, 400);
         if (!worker.command) {
@@ -604,7 +613,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
                     try { controller.enqueue(encoder.encode('data: ' + line + '\n\n')); }
                     catch { /* client gone; abort handler cleans up */ }
                 };
-                for (const line of ctx.llama.logs.slice(-tailCount)) emit(line);
+                for (const line of (tailCount > 0 ? ctx.llama.logs.slice(-tailCount) : [])) emit(line);
                 unsubscribe = ctx.llama.onLine(emit);
                 req.signal.addEventListener('abort', () => {
                     unsubscribe?.();
@@ -624,8 +633,7 @@ export async function handleApiRoute(ctx: RouteCtx, req: Request, url: URL): Pro
         return ctx.json(ctx.telemetry.latest() || { t: 0, stats: null });
     }
     if (route === '/api/telemetry/rate' && method === 'POST') {
-        let rateBody: Record<string, unknown>;
-        try { rateBody = await parseJsonBody(ctx, req); } catch (e) { if (e instanceof BodyTooLargeError) throw e; return ctx.json({ error: 'Invalid JSON' }, 400); }
+        const rateBody = await jsonBodyOr400(ctx, req);
         const ms = ctx.telemetry.setPollMs(rateBody.ms as number);
         return ctx.json({ ok: true, ms });
     }

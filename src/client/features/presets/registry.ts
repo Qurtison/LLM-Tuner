@@ -13,7 +13,7 @@
  * don't get a "changed from default" badge. Add to LAUNCH_FIELD_TO_PARAM
  * when the registry grows a matching id.
  */
-import { PARAM_BY_ID, type ParamDef } from '../../../../shared/llama-params';
+import { PARAM_BY_ID, type ParamDef, type ParamGroup } from '../../../../shared/llama-params';
 import type { LaunchConfig } from '../../../../shared/contracts';
 
 export type ParamId = string;
@@ -120,6 +120,10 @@ export function overridesFromConfig(config: LaunchConfig | null | undefined): Ov
         const def = paramForField(field);
         if (!def) continue;
         if (def.default !== undefined && deepEqual(value, def.default)) continue;
+        // Two fields can map to one param id (preserveThinking and
+        // reasoningPreserve both -> reasoning_preserve); emit one row for the
+        // first mapped field, same precedence PARAM_TO_FIELD uses.
+        if (emitted.has(def.id)) continue;
         emitted.add(def.id);
         out.push({ field, paramId: def.id, def, value });
     }
@@ -173,3 +177,28 @@ export function intInputValid(raw: string): boolean {
     if (raw.trim() === '') return true;
     return Number.isInteger(Number(raw));
 }
+
+// Same gate for float commits: '1.2.3' would otherwise persist a raw string
+// into the preset config (the poison class 31588f2 fixed for ints).
+export function numericInputValid(control: string, raw: string): boolean {
+    if (control === 'int') return intInputValid(raw);
+    if (control === 'float') return raw.trim() === '' || Number.isFinite(Number(raw));
+    return true;
+}
+
+// Shared group labels for PresetDock + PresetBrowserDialog (was copy-pasted).
+export const GROUP_LABELS: Record<ParamGroup, string> = {
+    speed: 'Speed & threads',
+    memory: 'Memory & VRAM',
+    context: 'Context & caching',
+    sampling: 'Output & sampling',
+    model: 'Model & source',
+    devices: 'Devices & GPUs',
+    speculative: 'Speculative decoding',
+    server: 'Server & network',
+    agents: 'Agents & tools',
+    multimodal: 'Multimodal & embeddings',
+    chat: 'Chat & reasoning',
+    logging: 'Logging & debug',
+    archive: 'Archive',
+};

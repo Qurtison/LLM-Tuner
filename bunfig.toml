@@ -1,0 +1,5 @@
+[test]
+
+# Internal helpers wait up to 10s (SSE timeouts, poll()); bun's 5s default
+# per-test timeout could never let those fire before killing the test.
+timeout = 15000

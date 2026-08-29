@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { tokenizeCommand } from '../lib/tokenize';
-import type { BenchStatusResponse, LaunchConfig, TelemetrySample } from '../../../shared/contracts';
+import { SseLogPrefixes, type BenchStatusResponse, type LaunchConfig, type TelemetrySample } from '../../../shared/contracts';
 import type { ServerCtx } from './types';
 
 type BenchConfig = LaunchConfig & { label?: string };
@@ -178,10 +178,10 @@ export class BenchService {
         void process.exited.then(
             code => streams.then(() => {
                 const signal = process.signalCode;
-                finish('[bench] exited with ' + (signal ? 'signal ' + signal : 'code ' + code), 'BENCH_DONE:' + (signal ? 'signal' : code));
+                finish('[bench] exited with ' + (signal ? 'signal ' + signal : 'code ' + code), SseLogPrefixes.BENCH_DONE + ':' + (signal ? 'signal' : code));
             }),
-            error => streams.then(() => finish('[bench] error: ' + (error as Error).message, 'BENCH_DONE:error'))
-        ).catch(error => finish('[bench] error: ' + (error as Error).message, 'BENCH_DONE:error'));
+            error => streams.then(() => finish('[bench] error: ' + (error as Error).message, SseLogPrefixes.BENCH_DONE + ':error'))
+        ).catch(error => finish('[bench] error: ' + (error as Error).message, SseLogPrefixes.BENCH_DONE + ':error'));
         return null;
     }
 

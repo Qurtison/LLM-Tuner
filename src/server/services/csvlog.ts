@@ -1,9 +1,50 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as csv from '../lib/csv';
+import { SseLogPrefixes } from '../../../shared/contracts';
 import type { ServerCtx, TelemetryStats } from './types';
 
-export const CSV_HEADERS = 'Timestamp,run_id,model_name,Model_Path,Ctx,NGL,RPC,Transport,arg_string,launch_command,Prompt Tok/s,Gen Tok/s,Prompt Latency (s),prompt_tokens,Master GPU Util (%),Master GPU Pwr (W),Master GPU Temp (C),Master CPU Util (%),Master CPU Temp (C),Master VRAM (MB),Master RAM (MB),Worker GPU Util (%),Worker GPU Pwr (W),Worker GPU Temp (C),Worker CPU Temp (C),Worker VRAM (MB),Worker RAM (MB),Net Throughput (MB/s),Gen Tokens,Reasoning Tokens,Wall Time (s),Load Time,config_json,Draft Accept Rate,Draft Accepted,Draft Generated,Draft Mean Len,Aborted\n';
+// The 38-column benchmarks.csv schema (v3), one source for the header the
+// writer emits and the indices the readers parse.
+export const CSV_COLUMNS = [
+    'Timestamp', 'run_id', 'model_name', 'Model_Path', 'Ctx', 'NGL', 'RPC', 'Transport',
+    'arg_string', 'launch_command', 'Prompt Tok/s', 'Gen Tok/s', 'Prompt Latency (s)', 'prompt_tokens',
+    'Master GPU Util (%)', 'Master GPU Pwr (W)', 'Master GPU Temp (C)', 'Master CPU Util (%)', 'Master CPU Temp (C)', 'Master VRAM (MB)', 'Master RAM (MB)',
+    'Worker GPU Util (%)', 'Worker GPU Pwr (W)', 'Worker GPU Temp (C)', 'Worker CPU Temp (C)', 'Worker VRAM (MB)', 'Worker RAM (MB)',
+    'Net Throughput (MB/s)', 'Gen Tokens', 'Reasoning Tokens', 'Wall Time (s)', 'Load Time', 'config_json',
+    'Draft Accept Rate', 'Draft Accepted', 'Draft Generated', 'Draft Mean Len', 'Aborted',
+] as const;
+
+export const CSV_HEADERS = CSV_COLUMNS.join(',') + '\n';
+
+// Field-name -> column index for the v3 schema. Older rows shift: v2 (no
+// launch_command) shifts every column after arg_string down by 1; old (no
+// launch_command, no config_json) by 2 — see /api/logs/summary.
+export const CSV_COL = {
+    timestamp: 0,
+    runId: 1,
+    model: 2,
+    modelPath: 3,
+    ctx: 4,
+    ngl: 5,
+    rpc: 6,
+    transport: 7,
+    argString: 8,
+    launchCommand: 9,
+    promptTps: 10,
+    genTps: 11,
+    promptLatency: 12,
+    promptTokens: 13,
+    genTokens: 28,
+    wallTime: 30,
+    loadTime: 31,
+    configJson: 32,
+    draftAcceptRate: 33,
+    draftAccepted: 34,
+    draftGenerated: 35,
+    draftMeanLen: 36,
+    aborted: 37,
+} as const;
 
 // Structural superset of shared/contracts LaunchConfig: keeps the fields the
 // CSV row reads, with loose value types, and (unlike the contracts interface)
@@ -84,7 +125,7 @@ export async function logCompletedRequest(ctx: ServerCtx, deps: CsvLogDeps, timi
             draftAcceptRate: timing.draftAcceptRate, draftAccepted: timing.draftAccepted, draftGenerated: timing.draftGenerated, draftMeanLen: timing.draftMeanLen, aborted: !!timing.aborted
         });
         deps.rememberSamples(runId, requestSamples);
-        ctx.broadcast('COMPLETION:' + JSON.stringify({
+        ctx.broadcast(SseLogPrefixes.COMPLETION + ':' + JSON.stringify({
             runId, timestamp: Date.now(), model: (cfg.modelPath || '').split('/').pop(), promptTps: timing.promptTps, genTps: timing.genTps, promptTokens: timing.promptTokens, genTokens: timing.genTokens, wallTime: timing.wallTimeS,
             draftAcceptRate: timing.draftAcceptRate ?? null, draftAccepted: timing.draftAccepted ?? null, draftGenerated: timing.draftGenerated ?? null, draftMeanLen: timing.draftMeanLen ?? null, aborted: !!timing.aborted, metrics: requestSamples
         }));
