@@ -65,8 +65,8 @@ function EngineStatusChip() {
 
 // Always-visible activity strip (where the old engine banner lived): live
 // prefill progress + generation tokens, plus the context usage moved out of
-// the Monitor panel. Hides when no prefill is active — prefill parked at
-// 100% counts as settled after 3s.
+// the Monitor panel. Stays up for the whole request (prefill + generation);
+// clears when the completion frame resets progress.
 function ActivityBar() {
     const { progress } = useServer();
     const [context, setContext] = useState<{ used: number; limit: number } | null>(null);
@@ -78,14 +78,7 @@ function ActivityBar() {
     }), []);
     const prefill = progress?.prefill ?? null;
     const gen = progress?.gen ?? null;
-    const at100 = prefill !== null && prefill.progress >= 0.999;
-    const [settled, setSettled] = useState(false);
-    useEffect(() => {
-        if (!at100) { setSettled(false); return; }
-        const timer = window.setTimeout(() => setSettled(true), 3000);
-        return () => window.clearTimeout(timer);
-    }, [at100]);
-    if (prefill === null || settled) return null;
+    if (prefill === null) return null;
     const pct = Math.min(Math.max(prefill.progress * 100, 0), 100);
     const ctxPct = context ? Math.min(context.used / context.limit * 100, 100) : null;
     return (
