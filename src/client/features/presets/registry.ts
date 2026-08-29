@@ -1,5 +1,5 @@
 /*
- * Bridge between the frozen `LaunchConfig` (shared/contracts.ts) and the
+ * Bridge between the `LaunchConfig` (shared/contracts.ts) and the
  * llama.cpp parameter registry (shared/llama-params.ts). Drives the
  * "preset is a diff" invariant: a Preset only stores LaunchConfig keys
  * that differ from the registry default. Setting a value back to its

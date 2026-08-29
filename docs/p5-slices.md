@@ -162,7 +162,7 @@ Error channel: data.error. LAUNCH CMD: informational only; any other error updat
 
 **Replace functions:** openHFModal 1345; closeHFModal 1346; searchHF 1347-1366; toggleRaw 1367-1382; toggleReasoning 1383-1402; collapse functions 1403-1451.
 
-**API/SSE:** external GET https://huggingface.co/api/models?search=...&sort=downloads&direction=-1&limit=10. No dashboard API/SSE. Proxy only after frozen routes gain one; preserve direct request until then. **Timers/storage:** none.
+**API/SSE:** external GET https://huggingface.co/api/models?search=...&sort=downloads&direction=-1&limit=10. No dashboard API/SSE. Proxy only after the dashboard routes gain one; preserve direct request until then. **Timers/storage:** none.
 
 **States:** unopened, empty query, loading, empty results, external error; markdown raw/expanded/reasoning. **Keyboard/ARIA:** focus trap/Escape/return focus; Enter search; aria-expanded. Sanitize Markdown: vanilla marked.parse plus HTML insertion unsafe; no unsafe HTML without sanitizer.
 

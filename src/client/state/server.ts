@@ -29,7 +29,7 @@ export interface ServerSnapshot {
     // log lines starting with the prefixes below).
     state: SseStatePayload | null;
     config: ConfigResponse | null;
-    // Completed requests (any client — frozen COMPLETION semantics) newest
+    // Completed requests (any client — COMPLETION semantics per the inventory) newest
     // first, capped. Monitor/History/metrics read from here.
     completions: CompletionEvent[];
     // Live progress for the in-flight request (PREFILL_PROGRESS / GEN_PROGRESS).
@@ -62,13 +62,13 @@ const snapshot = new Value<ServerSnapshot>({
 
 export function getServerSnapshot(): ServerSnapshot { return snapshot.get(); }
 
-// --- frame parsing (frozen dispatch table from docs/p5-slices.md) ---
+// --- frame parsing (dispatch table from docs/p5-slices.md) ---
 export function applySseFrame(raw: string): void {
     let payload: SseStatePayload;
     try {
         payload = JSON.parse(raw) as SseStatePayload;
     } catch {
-        return; // vanilla threw on malformed JSON; React must not (frozen intent)
+        return; // vanilla threw on malformed JSON; React must not (original intent)
     }
     const current = snapshot.get();
     let progress = current.progress;

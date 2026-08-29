@@ -1,7 +1,6 @@
 /*
- * API frozen at Phase 1 from docs/api-inventory.md.
+ * API types captured at Phase 1 from docs/api-inventory.md.
  * Server (Phase 3) and client (Phase 4+) must match.
- * Changes require a new freeze commit.
  */
 
 export type ServerState = 'stopped' | 'loading' | 'ready' | 'starting' | 'stopping';

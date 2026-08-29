@@ -113,7 +113,7 @@ export default function MonitorPanel() {
         setTpsPoints(prev => [...prev, { t: Date.now(), genTps: Number.isFinite(genTps) ? genTps : null, prefillTps: Number.isFinite(prefillTps) ? prefillTps : null }].slice(-240));
     }, [progress]);
     // User-reorderable block order (drag a block's title), persisted; the
-    // lock freezes it. First run migrates the legacy metric-only order into
+    // lock pins it. First run migrates the legacy metric-only order into
     // the metric slots of the full block order.
     const [blockOrder, setBlockOrder] = useState<string[]>(() => {
         const defaults = DEFAULT_BLOCK_ORDER;

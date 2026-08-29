@@ -3,8 +3,8 @@
 // Replaces server4.js: Bun.serve for HTTP + SSE + static assets, Bun.spawn
 // children (llama-server, llama-bench, monitor) tracked in one shutdown path,
 // /api/llama/* proxy so browsers never dial the model server directly, and
-// config-driven everything (src/server/config.ts). Route behavior is frozen
-// per docs/api-inventory.md; frozen types in shared/contracts.ts.
+// config-driven everything (src/server/config.ts). Route behavior captured
+// per docs/api-inventory.md; types in shared/contracts.ts.
 //
 // ponytail: routes live in routes.ts alongside this entry rather than a
 // routes/ directory per the plan's target layout -- one import boundary is
@@ -71,9 +71,9 @@ function broadcast(log = '', error = '') {
     if (dead.length) clients = clients.filter(c => !dead.includes(c));
 }
 
-// Keepalive: without frames the client's 45s staleness watchdog (frozen
-// legacy behavior) would tear down a healthy idle connection. A periodic
-// state frame keeps lastSseAt fresh; deviation from the frozen frame
+// Keepalive: without frames the client's 45s staleness watchdog (legacy
+// behavior) would tear down a healthy idle connection. A periodic
+// state frame keeps lastSseAt fresh; deviation from the expected frame
 // sequence (same payload shape, log: '') — see docs/migration-notes.md.
 setInterval(() => { if (clients.length) broadcast(); }, 30_000);
 
@@ -241,7 +241,7 @@ async function serveFile(resolved: string, cacheControl: string): Promise<Respon
 }
 
 // Resolves a relative path against root and guarantees the result stays
-// inside it (frozen traversal guard: 403-style refusal via 404 here).
+// inside it (traversal guard: 403-style refusal via 404 here).
 function safeJoin(root: string, rel: string): string | null {
     const resolved = path.normalize(path.join(root, rel));
     if (resolved !== root && !resolved.startsWith(root + path.sep)) return null;
@@ -288,7 +288,7 @@ async function handleRequest(req: Request): Promise<Response> {
     if (req.method === 'OPTIONS') return new Response(null, { status: 200, headers: baseHeaders });
 
     try {
-        // SSE status stream (frozen shape; initial broadcast on connect).
+        // SSE status stream (shape per docs/api-inventory.md; initial broadcast on connect).
         if (url.pathname === '/api/status') {
             const stream = new ReadableStream({
                 start(controller) {
@@ -377,7 +377,7 @@ async function init(): Promise<void> {
     }
 
     await spawnMonitor();
-    // Reload the bench transcript tail (frozen restart behavior).
+    // Reload the bench transcript tail (restart behavior from server4.js).
     void bench.restore();
     // A+D: adopt a llama unit that survived the restart, or relaunch the
     // persisted last model so a deploy/boot self-heals without user action.

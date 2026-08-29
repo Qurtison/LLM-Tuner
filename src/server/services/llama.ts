@@ -104,8 +104,8 @@ export interface LiveProgress {
 }
 
 // Spawn failures (ENOENT, non-string command, ...) -- the /api/start route
-// maps this to 500, while resolve/validation failures map to 400 (frozen
-// status split).
+// maps this to 500, while resolve/validation failures map to 400 (status
+// split).
 export class LlamaSpawnError extends Error {}
 
 export class LlamaService {
@@ -206,7 +206,7 @@ export class LlamaService {
 
     // Dashboard shutdown: in systemd mode the llama unit deliberately
     // outlives the dashboard (that is the point) -- detach tracking only,
-    // never stop the unit. native mode keeps the frozen kill path.
+    // never stop the unit. native mode keeps the original kill path.
     dispose(): void {
         if (this.mode === 'systemd') {
             this.systemdRunning = false;
@@ -245,8 +245,8 @@ export class LlamaService {
         this.progress = {};
     }
 
-    // Two-phase start so the /api/start route can preserve the frozen
-    // status split: validation/resolve failure -> 400, spawn failure -> 500.
+    // Two-phase start so the /api/start route can preserve the status split:
+    // validation/resolve failure -> 400, spawn failure -> 500.
     // resolveLaunch throws on an invalid config without touching state.
     resolveLaunch(config: LaunchConfig): { command: string; args: string[]; config: LaunchConfig } {
         if (this.proc) throw new Error('Running');
@@ -255,7 +255,7 @@ export class LlamaService {
 
     // Sets launch state, broadcasts, spawns. Throws on synchronous spawn
     // failure AFTER resetting state and broadcasting 'Failed to start
-    // process:' (frozen /api/start failure path).
+    // process:' (original /api/start failure path).
     launch(config: LaunchConfig): void {
         const launchConfig = this.resolveLaunch(config);
         const { command, args } = launchConfig;
@@ -281,7 +281,7 @@ export class LlamaService {
     // SIGTERM now, SIGKILL after the configured grace period if it ignores
     // the first one. Deliberately does NOT await exit and does NOT touch
     // shared state: the /api/stop route transitions stopping -> stopped
-    // immediately (frozen behavior) and the close handler (reset) is the
+    // immediately (original behavior) and the close handler (reset) is the
     // single place that clears launch state once the process is actually
     // gone. Escalation timer is unref'd so a stop never holds the event
     // loop (parity with server4.js:1963-1965).
@@ -303,7 +303,7 @@ export class LlamaService {
             // The poller (kept running) is the single place that clears
             // launch state once the unit is actually inactive (parity with
             // the native close handler); the route has already transitioned
-            // stopping -> stopped (frozen).
+            // stopping -> stopped.
             this.systemdRunning = false;
             this.stopRequested = true;
             void unitMod.stop(this.unitName()).then(r => {
@@ -389,7 +389,7 @@ export class LlamaService {
         }
     }
 
-    // Synchronous on purpose: launch() keeps its frozen two-phase contract
+    // Synchronous on purpose: launch() keeps its two-phase contract
     // (validation -> 400, spawn -> 500). Async unit failures surface via the
     // poller / start-promise as a 'Launch failed' broadcast.
     private systemdLaunch(command: string, args: string[], config: LaunchConfig): void {
@@ -671,7 +671,7 @@ export class LlamaService {
 // Shell-safe quoting for the displayed/copied launch command. JSON.stringify
 // is NOT shell-safe ($, backtick, ! still expand inside its double quotes);
 // single quotes are inert except for the '\'' escape. Verbatim port of the
-// server4.js shellQuoteArg -- the broadcast/displayed command is frozen.
+// server4.js shellQuoteArg -- the broadcast/displayed command stays as ported.
 function shellQuoteArg(arg: string): string {
     const s = String(arg);
     if (s.length === 0) return "''";

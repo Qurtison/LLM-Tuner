@@ -1,4 +1,4 @@
-// /api/llama/* proxy (Phase 3 — new endpoint, not part of the frozen P1 API):
+// /api/llama/* proxy (Phase 3 — new endpoint, not part of the original P1 API):
 // chat + slots requests must reach the launched model server through the
 // dashboard so browsers never dial a model host directly (including
 // streaming responses). Fake children: fake-llama-server.sh boots

@@ -10,7 +10,7 @@ type BenchDeps = {
     benchBinFor: (build: unknown) => string;
     takeSamples: () => TelemetrySample[];
     // Read-only peek at the live request samples while a bench run is in
-    // flight (frozen /api/bench/status behavior: live while running, last
+    // flight (original /api/bench/status behavior: live while running, last
     // run's snapshot when stopped).
     liveSamples: () => TelemetrySample[];
     onBenchLine: (line: string) => void;

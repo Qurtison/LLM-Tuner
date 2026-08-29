@@ -5,7 +5,7 @@ Repo default branch is master (no main). Work branch: bun-vite-react-migration.
 
 ## Status
 - P1: API inventory doc + lib extraction/fixture tests -> two subagents (track ids in session).
-- P1 remaining: route smoke tests, API freeze.
+- P1 remaining: route smoke tests, API types in shared/contracts.ts.
 - P2-P7: not started.
 
 ## Recon findings
@@ -37,11 +37,11 @@ bench_custom_rows, bench_row_status, cluster_sidebar_width, launch_sidebar_width
 sidebar_collapsed_left, sidebar_collapsed_right, launch_ab, bench_subtab
 
 ## Decisions (post-migration behavior)
-- same_host worker stats (2026-08-21): a GPU is a "worker" only when connected over RPC to another machine; otherwise it is a local GPU sharing master's machine-level cpu/ram/net pool. monitor.py marks the worker slot `same_host: true` for the local second-GPU mode and for RPC targets resolving to this machine (loopback / own hostname; collected locally, no SSH to self). MonitorPanel suppresses the worker cpu/ram line and value on same_host points; per-GPU stats (util/pwr/temp/VRAM) still show. Frozen API suite untouched: fake monitor already returns `worker: null`. Future: when monitor.py is folded into the Bun server (SSE stats), the TS side produces the same flag.
-- GPU identity labels (2026-08-21): UI no longer labels the two GPU slots Main/Worker. Main/Worker describe the RPC role, not the card; a remote RPC GPU is "a worker" by role, but the display names come from telemetry `gpu_name` (nvidia-smi / amdgpu_top), falling back to positional GPU 1 / GPU 2 on missing/error markers (Unknown, Offline, Unknown AMD GPU). Applies to MiniChart legends + value tooltips, VRAM breakdown, throttle badge tooltips, omni chart legend. WorkerPanel's "RPC Worker" controls keep the name — they manage the RPC worker service, not a GPU. Contract/CSV field names (workerGpuUtil etc.) untouched — frozen.
+- same_host worker stats (2026-08-21): a GPU is a "worker" only when connected over RPC to another machine; otherwise it is a local GPU sharing master's machine-level cpu/ram/net pool. monitor.py marks the worker slot `same_host: true` for the local second-GPU mode and for RPC targets resolving to this machine (loopback / own hostname; collected locally, no SSH to self). MonitorPanel suppresses the worker cpu/ram line and value on same_host points; per-GPU stats (util/pwr/temp/VRAM) still show. API suite untouched: fake monitor already returns `worker: null`. Future: when monitor.py is folded into the Bun server (SSE stats), the TS side produces the same flag.
+- GPU identity labels (2026-08-21): UI no longer labels the two GPU slots Main/Worker. Main/Worker describe the RPC role, not the card; a remote RPC GPU is "a worker" by role, but the display names come from telemetry `gpu_name` (nvidia-smi / amdgpu_top), falling back to positional GPU 1 / GPU 2 on missing/error markers (Unknown, Offline, Unknown AMD GPU). Applies to MiniChart legends + value tooltips, VRAM breakdown, throttle badge tooltips, omni chart legend. WorkerPanel's "RPC Worker" controls keep the name — they manage the RPC worker service, not a GPU. Contract/CSV field names (workerGpuUtil etc.) untouched.
 
 ## Plan per phase (delta vs scroll)
-- P1: A=inventory doc, B=extraction+fixtures. Then: route smoke tests (start server with fake monitor fixture? decide), freeze API in shared/contracts.ts.
+- P1: A=inventory doc, B=extraction+fixtures. Then: route smoke tests (start server with fake monitor fixture? decide), capture the API in shared/contracts.ts.
 - P2: config.ts TS module + config/dashboard.example.json + /api/config + .gitignore update.
 - P3: server split into src/server, Bun.serve, spawn, process registry, proxy /api/llama/*.
 - P4: vite+react shell, dev proxy, styles.css, fetch helper, SSE hook.

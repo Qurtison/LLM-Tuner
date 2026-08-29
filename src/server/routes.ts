@@ -1,4 +1,4 @@
-// /api/* route handlers (Phase 3). Behavior-frozen from server4.js per
+// /api/* route handlers (Phase 3). Behavior captured from server4.js per
 // docs/api-inventory.md; types from shared/contracts.ts. The SSE endpoint
 // (/api/status) lives in index.ts because it owns the client stream set.
 import path from 'node:path';
@@ -28,7 +28,7 @@ export class BodyTooLargeError extends Error {
 }
 
 // Thrown by jsonBodyOr400 on malformed bodies; handleApiRoute maps it to the
-// frozen 400 shape ({ error: 'Invalid JSON' }) in one central place.
+// 400 shape ({ error: 'Invalid JSON' }) in one central place.
 export class InvalidJsonError extends Error {
     constructor() { super('Invalid JSON'); }
 }
@@ -64,7 +64,7 @@ async function parseJsonBody(ctx: RouteCtx, req: Request): Promise<Record<string
     return JSON.parse(raw) as Record<string, unknown>;
 }
 
-// Every POST route parses bodies through this so the frozen 400 shape stays
+// Every POST route parses bodies through this so the 400 shape stays
 // uniform while oversized bodies keep their own (413) handling. Invalid JSON
 // throws InvalidJsonError (mapped centrally); it must not be swallowed by any
 // route's own try/catch.
@@ -139,7 +139,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         return ctx.json(publicConfig(ctx.config));
     }
 
-    // --- LIST CONFIGURED BUILDS (frozen shape includes paths) ---
+    // --- LIST CONFIGURED BUILDS (shape includes paths) ---
     if (route === '/api/builds') {
         return ctx.json({ builds: ctx.config.llama.builds });
     }
@@ -382,7 +382,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         }
     }
 
-    // --- LOGS SUMMARY (schema v2/v3/old auto-detection — frozen logic) ---
+    // --- LOGS SUMMARY (schema v2/v3/old auto-detection) ---
     if (route.startsWith('/api/logs/summary') && method === 'GET') {
         try {
             const filterModel = url.searchParams.get('model') || '';
@@ -490,7 +490,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         return ctx.json({ ok: true });
     }
 
-    // --- FLAG REFERENCE (frozen: no build -> 500; exec failure -> error in body) ---
+    // --- FLAG REFERENCE (no build -> 500; exec failure -> error in body) ---
     if (route.startsWith('/api/flags') && method === 'GET') {
         const buildId = url.searchParams.get('build') || '';
         let binary: string;
@@ -503,7 +503,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         return ctx.json(result.error ? { flags: [], error: result.error } : { flags: result.flags });
     }
 
-    // --- LIST DEVICES (frozen: binary resolution error -> 200 with error field) ---
+    // --- LIST DEVICES (binary resolution error -> 200 with error field) ---
     if (route.startsWith('/api/devices') && method === 'GET') {
         const buildId = url.searchParams.get('build') || '';
         let binary: string;
@@ -530,7 +530,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         }
     }
 
-    // --- START SERVER (frozen status split: validation 400, spawn 500) ---
+    // --- START SERVER (status split: validation 400, spawn 500) ---
     if (route === '/api/start' && method === 'POST') {
         const body = await jsonBodyOr400(ctx, req);
         if (ctx.llama.running) return ctx.json({ error: 'Running' }, 400);
@@ -546,7 +546,7 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         return ctx.json({ status: 'launching' });
     }
 
-    // --- STOP SERVER (frozen: state transitions here, close handler clears) ---
+    // --- STOP SERVER (state transitions here, close handler clears) ---
     if (route === '/api/stop' && method === 'POST') {
         ctx.state.serverState = 'stopping';
         ctx.broadcast();

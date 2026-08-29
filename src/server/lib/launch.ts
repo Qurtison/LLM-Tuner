@@ -16,9 +16,9 @@ import type { BuildEntry, LaunchConfig } from '../../../shared/contracts';
 // The resolver treats the launch config as untrusted input: every field is
 // coerced (toFiniteNumber/toNonEmptyString) before use. Keys are typed
 // `unknown` (not LaunchConfig's own types) because user JSON and tests feed
-// numbers where the frozen contract says string (e.g. tensorSplit).
+// numbers where the contract says string (e.g. tensorSplit).
 // (The index signature covers config fields the resolver reads that are not
-// in the frozen contract, e.g. topK/topP/minP from raw launch bodies.)
+// in the contract, e.g. topK/topP/minP from raw launch bodies.)
 export type LaunchInput = { [K in keyof LaunchConfig]?: unknown } & Record<string, unknown>;
 
 // Render param-id overrides (LaunchConfig.paramOverrides) into CLI flags.

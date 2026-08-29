@@ -44,13 +44,13 @@ or the monitor port is unreachable.
 ## Tests and typecheck
 
 ~~~sh
-bun test           # behavior-frozen API suite (boots the real server with fake children)
+bun test           # API behavior suite (boots the real server with fake children)
 bun run typecheck
 ~~~
 
-The frozen suite records the legacy API's exact responses, SSE frames,
+The test suite records the legacy API's exact responses, SSE frames,
 latency budgets, and quirks in docs/api-inventory.md. New behavior goes
-behind explicit, documented decisions — it never edits the frozen suite.
+behind explicit, documented decisions, with the suite updated alongside.
 
 ## Upgrading from the old dashboard
 
@@ -67,6 +67,6 @@ behind explicit, documented decisions — it never edits the frozen suite.
   static serving, /api/llama/* proxy to the launched model server.
 - src/client/ — Vite + React 19 app (one SSE owner, per-feature panels).
 - shared/contracts.ts — the API/SSE types both sides compile against.
-- tests/ — frozen API behavior suite + fake children (llama-server, bench,
+- tests/ — API behavior suite + fake children (llama-server, bench,
   monitor, model HTTP sidecar).
 - monitor.py — telemetry collector, managed as a child process.

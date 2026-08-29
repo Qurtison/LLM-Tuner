@@ -92,7 +92,7 @@ export class TelemetryService {
         return samples;
     }
 
-    // Read-only peek (frozen /api/bench/status + /api/logs/active-samples
+    // Read-only peek (original /api/bench/status + /api/logs/active-samples
     // behavior) — does NOT drain the buffer the completion path still needs.
     liveSamples(): TelemetrySample[] {
         return this.activeRequestSamples;
