@@ -385,9 +385,12 @@ export function findAmdgpuTop(): string | null {
         '/usr/bin/amdgpu_top',
         '/bin/amdgpu_top'
     );
+    // accessSync signals success by not throwing (it returns void), so the
+    // check is exception-based -- a truthiness test would always fail.
     for (const candidate of candidates) {
         try {
-            if (fs.existsSync(candidate) && fs.accessSync(candidate, fs.constants.X_OK)) return candidate;
+            fs.accessSync(candidate, fs.constants.X_OK);
+            return candidate;
         } catch { /* keep looking */ }
     }
     return null;
