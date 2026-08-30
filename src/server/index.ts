@@ -188,6 +188,10 @@ async function drainChildStream(stream: ReadableStream<Uint8Array> | number | un
 }
 
 async function spawnMonitor(): Promise<void> {
+    if (config.telemetry.source === 'builtin') {
+        console.log('[monitor] telemetry.source = "builtin" -- in-process hwmon collector active, monitor.py not started');
+        return;
+    }
     if (!config.telemetry.enabled) return;
     const monitorExists = await fs.access(config.paths.monitorScript).then(() => true).catch(() => false);
     if (!monitorExists) {
@@ -360,7 +364,7 @@ async function init(): Promise<void> {
     // Legacy fuser port cleanup: opt-in only (default never kills strangers).
     if (config.processes.cleanupManagedPortsOnStart) {
         await cleanupPort(config.llama.defaultPort);
-        if (config.telemetry.enabled) await cleanupPort(config.telemetry.port);
+        if (config.telemetry.enabled && config.telemetry.source !== 'builtin') await cleanupPort(config.telemetry.port);
     }
 
     // Startup checks (soft): surface a broken setup without crashing.

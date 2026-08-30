@@ -8,7 +8,7 @@ export interface DashboardConfig {
     server: { host: string; port: number; corsOrigins: string[]; maxBodyBytes: number };
     paths: { modelDirectories: string[]; huggingFaceCache: string; logsDirectory: string; pythonCommand: string; monitorScript: string };
     llama: { builds: Build[]; defaultPort: number; defaultHost: string; rpcPort: number };
-    telemetry: { enabled: boolean; host: string; port: number; pollMs: number; providers: string[] };
+    telemetry: { enabled: boolean; host: string; port: number; pollMs: number; providers: string[]; source: 'monitor' | 'builtin' };
     processes: { cleanupManagedPortsOnStart: boolean; stopGraceMs: number };
     service: { unitName: string; unitPath: string; enableOnApply: boolean; manageViaSystemd: boolean };
     upgrade: { repoDir: string; buildDir: string; enabled: boolean };
@@ -34,7 +34,7 @@ const defaults = {
     server: { host: '127.0.0.1', port: 3000, corsOrigins: [], maxBodyBytes: 10 * 1024 * 1024 },
     paths: { modelDirectories: ['./models'], huggingFaceCache: null as string | null, logsDirectory: './logs', pythonCommand: 'python3', monitorScript: './monitor.py' },
     llama: { builds: [], defaultPort: 8080, defaultHost: '127.0.0.1', rpcPort: 50052 },
-    telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'] },
+    telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'], source: 'monitor' },
     processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 3000 },
     service: { unitName: 'llama-dashboard-server.service', unitPath: '', enableOnApply: false, manageViaSystemd: false },
     upgrade: { repoDir: '', buildDir: '', enabled: false },
@@ -47,7 +47,7 @@ const shape: Record<string, unknown> = {
     server: { host: 0, port: 0, corsOrigins: 0, maxBodyBytes: 0 },
     paths: { modelDirectories: 0, huggingFaceCache: 0, logsDirectory: 0, pythonCommand: 0, monitorScript: 0 },
     llama: { builds: 0, defaultPort: 0, defaultHost: 0, rpcPort: 0 },
-    telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0 },
+    telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0, source: 0 },
     processes: { cleanupManagedPortsOnStart: 0, stopGraceMs: 0 },
     service: { unitName: 0, unitPath: 0, enableOnApply: 0, manageViaSystemd: 0 },
     upgrade: { repoDir: 0, buildDir: 0, enabled: 0 },
@@ -121,6 +121,7 @@ function validate(raw: Raw, issues: string[]): void {
     if (typeof u.tensorSplit !== 'number' || !Number.isFinite(u.tensorSplit) || u.tensorSplit < 0 || u.tensorSplit > 100) issues.push('uiDefaults.tensorSplit must be a number between 0 and 100');
     if (typeof u.temperature !== 'number' || !Number.isFinite(u.temperature) || u.temperature <= 0) issues.push('uiDefaults.temperature must be a number greater than 0');
     if (!Array.isArray(t.providers) || !t.providers.every(v => typeof v === 'string' && ['nvidia', 'amd', 'linux'].includes(v))) issues.push('telemetry.providers must contain only nvidia, amd, or linux');
+    if (t.source !== 'monitor' && t.source !== 'builtin') issues.push('telemetry.source must be "monitor" or "builtin"');
     if (!Array.isArray(l.builds)) issues.push('llama.builds must be an array'); else l.builds.forEach((b, i) => { if (!isObject(b)) issues.push('llama.builds.' + i + ' must be an object'); else { checkUnknown(b, { id: 0, label: 0, path: 0 }, 'llama.builds.' + i, issues); nonEmpty(b.id, 'llama.builds.' + i + '.id', issues); nonEmpty(b.label, 'llama.builds.' + i + '.label', issues); nonEmpty(b.path, 'llama.builds.' + i + '.path', issues); } });
     if (!Array.isArray(w.transportPresets)) issues.push('worker.transportPresets must be an array'); else w.transportPresets.forEach((preset, i) => { if (!isObject(preset)) issues.push('worker.transportPresets.' + i + ' must be an object'); else { checkUnknown(preset, { id: 0, label: 0 }, 'worker.transportPresets.' + i, issues); nonEmpty(preset.id, 'worker.transportPresets.' + i + '.id', issues); nonEmpty(preset.label, 'worker.transportPresets.' + i + '.label', issues); } });
     const commands = [w.startCommand, w.stopCommand, w.statusCommand, w.logsCommand] as unknown[];

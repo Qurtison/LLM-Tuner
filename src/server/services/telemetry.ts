@@ -1,5 +1,6 @@
 import type { TelemetrySample } from '../../../shared/contracts';
 import type { ServerCtx, TelemetryStats } from './types';
+import { collectStats } from './hwmon';
 
 export interface LiveProgress {
     prefillTps?: number;
@@ -63,6 +64,16 @@ export class TelemetryService {
     }
 
     async fetchStats(): Promise<TelemetryStats | null> {
+        if (this.ctx.config.telemetry.source === 'builtin') {
+            // In-process collector (src/server/services/hwmon.ts) -- no Python
+            // child, no 8081 hop. Returns offline placeholders on failure,
+            // never null; the poll loop treats it like any other stats frame.
+            try {
+                return await collectStats(this.ctx.state.currentLaunchConfig);
+            } catch {
+                return null;
+            }
+        }
         try {
             const body: { local_second_gpu?: string; worker_ssh?: unknown } = {};
             if (this.ctx.state.currentLaunchConfig?.deviceB) body.local_second_gpu = 'amd';
