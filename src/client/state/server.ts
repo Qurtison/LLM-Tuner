@@ -86,7 +86,9 @@ export function applySseFrame(raw: string): void {
         emitLine(log);
     } else if (log.startsWith(SseLogPrefixes.COMPLETION)) {
         try {
-            const event = JSON.parse(log.slice(SseLogPrefixes.COMPLETION.length).trim()) as CompletionEvent;
+            // Server sends `COMPLETION:` + json (csvlog.ts); the constant is the bare
+            // `COMPLETION`, so skip the separator too or JSON.parse chokes on the leading `:`.
+            const event = JSON.parse(log.slice(SseLogPrefixes.COMPLETION.length + 1).trim()) as CompletionEvent;
             const completions = [event, ...current.completions].slice(0, 100);
             saveCompletions(completions);
             snapshot.set({ ...current, state: { ...payload, log: '' }, completions, lastSseAt: Date.now(), connected: true, progress: null });
