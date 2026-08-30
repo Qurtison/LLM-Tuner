@@ -519,25 +519,34 @@ export class LlamaService {
             stderr: 'pipe',
         });
         this.proc = proc;
-        let logLineBuffer = '';
+        // Each stream owns its line buffer. stdout and stderr are consumed by
+        // concurrent async loops; a shared buffer let a partially-read line on
+        // one stream merge with the other stream's bytes at the await boundary
+        // (corrupting/losing log lines whenever the child wrote to both).
         const consume = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
             const reader = stream.getReader();
             const decoder = new TextDecoder();
-            while (true) {
-                const result = await reader.read();
-                if (result.done) break;
-                const text = decoder.decode(result.value, { stream: true });
-                logLineBuffer += text;
-                const lines = logLineBuffer.split(/\r\n|\r|\n/);
-                logLineBuffer = lines.pop() || '';
-                if (logLineBuffer.length > 1_000_000) logLineBuffer = logLineBuffer.slice(-4096);
-                for (const line of lines) this.handleLine(line);
+            let logLineBuffer = '';
+            try {
+                while (true) {
+                    const result = await reader.read();
+                    if (result.done) break;
+                    const text = decoder.decode(result.value, { stream: true });
+                    logLineBuffer += text;
+                    const lines = logLineBuffer.split(/\r\n|\r|\n/);
+                    logLineBuffer = lines.pop() || '';
+                    if (logLineBuffer.length > 1_000_000) logLineBuffer = logLineBuffer.slice(-4096);
+                    for (const line of lines) this.handleLine(line);
+                }
+                if (logLineBuffer.length) this.pushLog(logLineBuffer);
+            } catch (error) {
+                console.error('Llama process log error:', error);
             }
         };
-        consume(proc.stdout).catch(error => console.error('Llama process log error:', error));
-        consume(proc.stderr).catch(error => console.error('Llama process log error:', error));
-        proc.exited.then(code => {
-            if (logLineBuffer.length) this.pushLog(logLineBuffer);
+        // consume() never rejects; awaiting both before reset() means every
+        // output line is handled before launch state is cleared.
+        const streams = Promise.all([consume(proc.stdout), consume(proc.stderr)]);
+        proc.exited.then(code => streams.then(() => {
             if (this.proc !== proc) return;
             if (this.ctx.state.serverState !== 'ready' && this.ctx.state.serverState !== 'stopped') {
                 const errors = this.logBuffer.filter(line => /\sE\s|error|failed/i.test(line)).slice(-2);
@@ -546,7 +555,7 @@ export class LlamaService {
             this.reset();
             this.onExit?.(code);
             this.ctx.broadcast();
-        }).catch(error => {
+        })).catch(error => {
             console.error('Llama process error:', error);
             if (this.proc !== proc) return;
             this.reset();
