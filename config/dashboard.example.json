@@ -10,9 +10,7 @@
       "./models"
     ],
     "huggingFaceCache": null,
-    "logsDirectory": "./logs",
-    "pythonCommand": "python3",
-    "monitorScript": "./monitor.py"
+    "logsDirectory": "./logs"
   },
   "llama": {
     "builds": [],

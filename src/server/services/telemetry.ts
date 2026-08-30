@@ -63,29 +63,12 @@ export class TelemetryService {
         return this.lastServerTelemetry;
     }
 
+    // In-process collector (src/server/services/hwmon.ts) -- no Python
+    // child, no HTTP hop. Returns offline placeholders on failure; the poll
+    // loop treats every frame the same.
     async fetchStats(): Promise<TelemetryStats | null> {
-        if (this.ctx.config.telemetry.source === 'builtin') {
-            // In-process collector (src/server/services/hwmon.ts) -- no Python
-            // child, no 8081 hop. Returns offline placeholders on failure,
-            // never null; the poll loop treats it like any other stats frame.
-            try {
-                return await collectStats(this.ctx.state.currentLaunchConfig);
-            } catch {
-                return null;
-            }
-        }
         try {
-            const body: { local_second_gpu?: string; worker_ssh?: unknown } = {};
-            if (this.ctx.state.currentLaunchConfig?.deviceB) body.local_second_gpu = 'amd';
-            else if (this.ctx.state.currentLaunchConfig?.rpcTarget) body.worker_ssh = this.ctx.state.currentLaunchConfig.rpcTarget;
-            else if (!this.ctx.state.currentLaunchConfig) body.local_second_gpu = 'amd';
-            const response = await fetch(`http://${this.ctx.config.telemetry.host}:${this.ctx.config.telemetry.port}/stats`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-                signal: AbortSignal.timeout(10000)
-            });
-            return await response.json() as TelemetryStats;
+            return await collectStats(this.ctx.state.currentLaunchConfig);
         } catch {
             return null;
         }

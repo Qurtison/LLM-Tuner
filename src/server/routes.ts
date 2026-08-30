@@ -313,7 +313,6 @@ async function dispatchApiRoute(ctx: RouteCtx, req: Request, url: URL): Promise<
         return ctx.json({
             modelsDir: ctx.config.paths.modelDirectories[0] || '',
             logsDir: ctx.config.paths.logsDirectory,
-            monitorScript: ctx.config.paths.monitorScript,
             repoDir: ctx.config.upgrade.repoDir || null,
             buildDirs: builds.map(b => b.path),
             activeBuildDir: (await ctx.presets.getActive())?.build || builds[0]?.id || null,

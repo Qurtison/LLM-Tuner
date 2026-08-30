@@ -6,6 +6,11 @@ All line numbers refer to `server4.js` unless a `script.js` line is cited explic
 This document is a verbatim behavior capture. Every claim is traceable to a source line.
 Conditional behavior is stated with its condition.
 
+> Superseded (2026-08): the Python `monitor.py` child and its `127.0.0.1:8081/stats`
+> endpoint are gone. Telemetry is collected in-process by `src/server/services/hwmon.ts`
+> (same subprocess + /proc sources, identical response shapes). Client-facing
+> contracts (`/api/telemetry/*`, SSE frames) are unchanged.
+
 ---
 
 ## 1. Route Inventory

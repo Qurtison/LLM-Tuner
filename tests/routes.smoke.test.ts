@@ -242,13 +242,4 @@ describe('server4 route smoke', () => {
         expect((await json(server.url('/api/config'))).response.status).toBe(200);
     });
 
-    it('reads enabled telemetry from fake monitor', async () => {
-        const telemetry = await startTestServer({ config: { telemetry: { enabled: true } } });
-        try {
-            const latest = await poll(async () => { const result = await json(telemetry.url('/api/telemetry/latest')); return result.body.stats ? result.body : null; });
-            expect(latest.stats.master.gpu_util).toBe(42);
-        } finally {
-            await stopTestServer(telemetry);
-        }
-    });
 });

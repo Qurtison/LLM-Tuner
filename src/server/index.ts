@@ -1,7 +1,7 @@
 // Mission Control -- Bun server entry (Phase 3).
 //
 // Replaces server4.js: Bun.serve for HTTP + SSE + static assets, Bun.spawn
-// children (llama-server, llama-bench, monitor) tracked in one shutdown path,
+// children (llama-server, llama-bench) tracked in one shutdown path,
 // /api/llama/* proxy so browsers never dial the model server directly, and
 // config-driven everything (src/server/config.ts). Route behavior captured
 // per docs/api-inventory.md; types in shared/contracts.ts.
@@ -161,60 +161,6 @@ const routeCtx: RouteCtx = {
     json,
 };
 
-// --- MONITOR (managed child; telemetry is best-effort, never fatal) ---
-let monitor: Bun.Subprocess | null = null;
-
-// Drain a child stream line-by-line into the server log. Piping without
-// draining would re-create the original 'ignore' problem (an unread 64KB+
-// pipe blocks the child and stalls its /stats endpoint); draining keeps the
-// child unblocked AND makes its output visible -- before this, monitor.py
-// startup failures (missing module, EADDRINUSE on the telemetry port from an
-// orphaned copy) vanished completely and telemetry died silently.
-async function drainChildStream(stream: ReadableStream<Uint8Array> | number | undefined | null, log: (line: string) => void): Promise<void> {
-    // Spawned with stdout/stderr 'pipe'; the wider parameter type only
-    // reflects Bun's other stdio options ('ignore'/'inherit').
-    if (!(stream instanceof ReadableStream)) return;
-    const decoder = new TextDecoder();
-    let buffer = '';
-    try {
-        for await (const chunk of stream) {
-            buffer += decoder.decode(chunk, { stream: true });
-            const lines = buffer.split(/\r\n|\r|\n/);
-            buffer = lines.pop() || '';
-            for (const line of lines) log(line);
-        }
-        if (buffer.trim()) log(buffer);
-    } catch { /* stream torn down with the child */ }
-}
-
-async function spawnMonitor(): Promise<void> {
-    if (config.telemetry.source === 'builtin') {
-        console.log('[monitor] telemetry.source = "builtin" -- in-process hwmon collector active, monitor.py not started');
-        return;
-    }
-    if (!config.telemetry.enabled) return;
-    const monitorExists = await fs.access(config.paths.monitorScript).then(() => true).catch(() => false);
-    if (!monitorExists) {
-        console.warn(`[config] telemetry enabled but monitor script missing: ${config.paths.monitorScript} -- telemetry disabled`);
-        return;
-    }
-    try {
-        monitor = Bun.spawn([config.paths.pythonCommand, config.paths.monitorScript], { cwd: APP_ROOT, stdin: 'ignore', stdout: 'pipe', stderr: 'pipe' });
-        void drainChildStream(monitor.stdout, line => console.log('[monitor]', line));
-        void drainChildStream(monitor.stderr, line => console.error('[monitor]', line));
-        monitor.exited.then(code => {
-            if (code !== 0 && code !== null) {
-                // Non-zero exit = telemetry is down until we restart; say so
-                // loudly instead of leaving /api/telemetry/* quietly empty.
-                console.error(`[monitor] exited with code ${code} -- telemetry unavailable until this server restarts`);
-            }
-        }).catch(() => { /* best-effort */ });
-    } catch (err) {
-        console.error('monitor spawn error:', (err as Error).message);
-        monitor = null;
-    }
-}
-
 // --- LEGACY PORT CLEANUP (opt-in only; default never kills strangers) ---
 async function cleanupPort(port: number): Promise<void> {
     try {
@@ -364,7 +310,6 @@ async function init(): Promise<void> {
     // Legacy fuser port cleanup: opt-in only (default never kills strangers).
     if (config.processes.cleanupManagedPortsOnStart) {
         await cleanupPort(config.llama.defaultPort);
-        if (config.telemetry.enabled && config.telemetry.source !== 'builtin') await cleanupPort(config.telemetry.port);
     }
 
     // Startup checks (soft): surface a broken setup without crashing.
@@ -380,7 +325,6 @@ async function init(): Promise<void> {
         console.warn('[config] worker.sshHost empty -- worker controls stay disabled in the UI');
     }
 
-    await spawnMonitor();
     // Reload the bench transcript tail (restart behavior from server4.js).
     void bench.restore();
     // A+D: adopt a llama unit that survived the restart, or relaunch the
@@ -399,11 +343,9 @@ async function shutdown(): Promise<void> {
     // (the model must outlive the dashboard); native mode = the old stop().
     try { llama.dispose(); } catch { /* already gone */ }
     try { bench.stop(); } catch { /* already gone */ }
-    if (monitor) { try { monitor.kill('SIGTERM'); } catch { /* already gone */ } }
     // Give children the configured grace period, then SIGKILL stragglers.
     await new Promise(resolve => setTimeout(resolve, config.processes.stopGraceMs).unref());
     try { bench.killForce(); } catch { /* already gone */ }
-    if (monitor) { try { monitor.kill('SIGKILL'); } catch { /* already gone */ } }
     process.exit(0);
 }
 

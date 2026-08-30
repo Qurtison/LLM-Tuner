@@ -451,7 +451,6 @@ export interface FilesDeleteResponse {
 export interface ServerPathsResponse {
     modelsDir: string;
     logsDir: string;
-    monitorScript: string;
     repoDir: string | null;
     buildDirs: string[];
     activeBuildDir: string | null;

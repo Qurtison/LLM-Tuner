@@ -60,7 +60,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     fs.mkdirSync(logsDir);
     fs.mkdirSync(fixturesDir);
     for (const name of opts.models || ['fake.gguf']) fs.writeFileSync(path.join(modelsDir, name), 'x');
-    for (const name of ['fake-llama-server.sh', 'fake-llama-bench.sh', 'fake-monitor.ts', 'fake-llama-http.ts']) {
+    for (const name of ['fake-llama-server.sh', 'fake-llama-bench.sh', 'fake-llama-http.ts']) {
         const destination = path.join(fixturesDir, name.replace('.sh', ''));
         fs.copyFileSync(path.join(fixturesRoot, name), destination);
         if (name.endsWith('.sh')) fs.chmodSync(destination, 0o755);
@@ -69,7 +69,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     const telemetryPort = randomPort();
     const config = merge({
         server: { host: '127.0.0.1', port, maxBodyBytes: 10485760, corsOrigins: [] },
-        paths: { modelDirectories: [modelsDir], logsDirectory: logsDir, monitorScript: path.join(fixturesDir, 'fake-monitor.ts'), pythonCommand: process.execPath, huggingFaceCache: hfCache },
+        paths: { modelDirectories: [modelsDir], logsDirectory: logsDir, huggingFaceCache: hfCache },
         llama: { builds: [{ id: 'fake', label: 'Fake', path: path.join(fixturesDir, 'fake-llama-server') }], defaultPort: randomPort(), defaultHost: '127.0.0.1', rpcPort: 50052 },
         telemetry: { enabled: false, host: '127.0.0.1', port: telemetryPort, pollMs: 250, providers: ['linux'] },
         processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 1500 },
@@ -77,7 +77,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     }, opts.config || {});
     // ponytail: merge() is untyped; the defaults above pin the shape the
     // test server actually reads.
-    const cfg = config as { server: { port: number }; telemetry: { port: number } };
+    const cfg = config as { server: { port: number } };
     fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(config));
     let output = '';
     // Entry under test: the Bun server. (The legacy server4.js entry and its
@@ -86,7 +86,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     const entry = opts.entry || path.join(repoRoot, 'src', 'server', 'index.ts');
     const child = spawn(process.execPath, [entry], {
         cwd: repoRoot,
-        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_MONITOR_PORT: String(cfg.telemetry.port), FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
+        env: { ...process.env, DASHBOARD_CONFIG: path.join(tempDir, 'config.json'), HF_HOME: '', HUGGINGFACE_HUB_CACHE: '', FAKE_LLM_PIDFILE: path.join(tempDir, 'llm.pid'), FAKE_BENCH_PIDFILE: path.join(tempDir, 'bench.pid'), FAKE_BUN: process.execPath },
         detached: true,
         stdio: ['ignore', 'pipe', 'pipe']
     });

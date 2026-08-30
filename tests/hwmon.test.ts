@@ -93,7 +93,6 @@ test('server boots with telemetry.source=builtin and serves /api/telemetry/lates
     let server: TestServer | null = null;
     try {
         server = await startTestServer({ config: { telemetry: { enabled: true, source: 'builtin' } } });
-        expect(server.output).toContain('in-process hwmon collector active');
         const until = Date.now() + 10000;
         type Latest = { t: number; stats: { master?: Record<string, unknown>; worker?: Record<string, unknown> | null } | null };
         let stats: Latest | null = null;

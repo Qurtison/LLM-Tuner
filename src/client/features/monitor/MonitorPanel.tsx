@@ -47,8 +47,8 @@ const thermalReasons = new Set(['hw_thermal_slowdown', 'sw_thermal_slowdown']);
 const labels = labelsFromPoints;
 function series(points: Point[], from: 'master' | 'worker', key: string): (number | null)[] { return points.map(point => stat(point[from], key)); }
 // Machine-level stats a worker shares with main when it runs on the same host
-// (local second GPU or loopback RPC target). monitor.py marks those points
-// same_host; showing the worker value there would just repeat main's.
+// (local second GPU or loopback RPC target). The collector (hwmon.ts) marks
+// those points same_host; showing the worker value there would repeat main's.
 const SHARED_KEYS = new Set(['cpu_util', 'ram_used']);
 function workerSeries(points: Point[], key: string): (number | null)[] { return points.map(point => SHARED_KEYS.has(key) && point.worker && point.worker.same_host === true ? null : stat(point.worker, key)); }
 // The block title itself is the drag handle: plain-looking text, but grabbable

@@ -6,7 +6,7 @@ export interface Build { id: string; label: string; path: string }
 export interface TransportPreset { id: string; label: string }
 export interface DashboardConfig {
     server: { host: string; port: number; corsOrigins: string[]; maxBodyBytes: number };
-    paths: { modelDirectories: string[]; huggingFaceCache: string; logsDirectory: string; pythonCommand: string; monitorScript: string };
+    paths: { modelDirectories: string[]; huggingFaceCache: string; logsDirectory: string };
     llama: { builds: Build[]; defaultPort: number; defaultHost: string; rpcPort: number };
     telemetry: { enabled: boolean; host: string; port: number; pollMs: number; providers: string[]; source: 'monitor' | 'builtin' };
     processes: { cleanupManagedPortsOnStart: boolean; stopGraceMs: number };
@@ -32,9 +32,9 @@ type Raw = Record<string, unknown>;
 
 const defaults = {
     server: { host: '127.0.0.1', port: 3000, corsOrigins: [], maxBodyBytes: 10 * 1024 * 1024 },
-    paths: { modelDirectories: ['./models'], huggingFaceCache: null as string | null, logsDirectory: './logs', pythonCommand: 'python3', monitorScript: './monitor.py' },
+    paths: { modelDirectories: ['./models'], huggingFaceCache: null as string | null, logsDirectory: './logs' },
     llama: { builds: [], defaultPort: 8080, defaultHost: '127.0.0.1', rpcPort: 50052 },
-    telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'], source: 'monitor' },
+    telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'], source: 'builtin' },
     processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 3000 },
     service: { unitName: 'llama-dashboard-server.service', unitPath: '', enableOnApply: false, manageViaSystemd: false },
     upgrade: { repoDir: '', buildDir: '', enabled: false },
@@ -45,7 +45,7 @@ const defaults = {
 
 const shape: Record<string, unknown> = {
     server: { host: 0, port: 0, corsOrigins: 0, maxBodyBytes: 0 },
-    paths: { modelDirectories: 0, huggingFaceCache: 0, logsDirectory: 0, pythonCommand: 0, monitorScript: 0 },
+    paths: { modelDirectories: 0, huggingFaceCache: 0, logsDirectory: 0 },
     llama: { builds: 0, defaultPort: 0, defaultHost: 0, rpcPort: 0 },
     telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0, source: 0 },
     processes: { cleanupManagedPortsOnStart: 0, stopGraceMs: 0 },
@@ -98,7 +98,7 @@ function integer(value: unknown, field: string, min: number, max: number, issues
 function validate(raw: Raw, issues: string[]): void {
     const s = raw.server as Raw; const p = raw.paths as Raw; const l = raw.llama as Raw;
     const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const svc = raw.service as Raw; const upg = raw.upgrade as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw; const launch = raw.launch as Raw;
-    const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['paths.pythonCommand', p.pythonCommand], ['paths.monitorScript', p.monitorScript], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
+    const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
     for (const [field, value] of hostChecks) nonEmpty(value, field, issues);
     if (p.huggingFaceCache !== null) nonEmpty(p.huggingFaceCache, 'paths.huggingFaceCache', issues);
     for (const [field, value] of [['worker.sshHost', w.sshHost], ['worker.rpcTarget', w.rpcTarget], ['worker.workDirectory', w.workDirectory], ['worker.startCommand', w.startCommand], ['worker.stopCommand', w.stopCommand], ['worker.statusCommand', w.statusCommand], ['worker.logsCommand', w.logsCommand]]) if (typeof value !== 'string') issues.push(field + ' must be a string');
@@ -175,13 +175,11 @@ export async function loadConfig(opts: { appRoot: string; env?: Record<string, s
     const cfg = raw as unknown as DashboardConfig;
     cfg.paths.modelDirectories = cfg.paths.modelDirectories.map(v => resolvePath(v, fileBase));
     cfg.paths.logsDirectory = resolvePath(cfg.paths.logsDirectory, fileBase);
-    cfg.paths.monitorScript = resolvePath(cfg.paths.monitorScript, fileBase);
     const cacheValue = env.HF_HOME || env.HUGGINGFACE_HUB_CACHE || cfg.paths.huggingFaceCache || path.join(os.homedir(), '.cache', 'huggingface', 'hub');
     if (env.HF_HOME || env.HUGGINGFACE_HUB_CACHE) sources['paths.huggingFaceCache'] = 'env';
     else if (!cfg.paths.huggingFaceCache) sources['paths.huggingFaceCache'] = 'default';
     cfg.paths.huggingFaceCache = resolvePath(cacheValue, fileBase);
     cfg.llama.builds = cfg.llama.builds.map(build => ({ ...build, path: resolvePath(build.path, fileBase) }));
-    if (cfg.paths.pythonCommand.includes('/') || cfg.paths.pythonCommand.includes('\\')) cfg.paths.pythonCommand = resolvePath(cfg.paths.pythonCommand, fileBase);
     log('[config] source: built-in defaults' + (filePath ? ', file: ' + filePath : ''));
     function print(value: unknown, prefix = ''): void { if (Array.isArray(value) || !isObject(value)) { log('[config] ' + prefix + ' = ' + (typeof value === 'string' ? value : JSON.stringify(value)) + ' (' + sourceFor(sources, prefix) + ')'); return; } for (const [key, child] of Object.entries(value)) print(child, prefix ? prefix + '.' + key : key); }
     print(cfg);

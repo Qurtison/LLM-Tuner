@@ -23,7 +23,7 @@ bun test --timeout 15000 tests/launch.test.ts   # single test file
 
 If the dev server runs on a nonstandard port: `VITE_API_PROXY_TARGET=http://127.0.0.1:<port> bun run dev`.
 
-Tests boot the **real server** as a child process on a random port with a temp dir, wired to fake children in `tests/fixtures/` (fake-llama-server.sh, fake-llama-bench.sh, fake-monitor.ts, fake-llama-http.ts) via `tests/helpers/test-server.ts`. The 15s timeout matters: internal helpers wait up to 10s, so bun's 5s default kills them (set in `bunfig.toml` for `bun run test`; pass `--timeout 15000` when invoking `bun test` directly).
+Tests boot the **real server** as a child process on a random port with a temp dir, wired to fake children in `tests/fixtures/` (fake-llama-server.sh, fake-llama-bench.sh, fake-llama-http.ts) via `tests/helpers/test-server.ts`. The 15s timeout matters: internal helpers wait up to 10s, so bun's 5s default kills them (set in `bunfig.toml` for `bun run test`; pass `--timeout 15000` when invoking `bun test` directly).
 
 ## The API contract
 
@@ -39,7 +39,7 @@ The API's behavior was captured verbatim from the legacy `server4.js` in `docs/a
 - `index.ts` — Bun.serve entry: owns the SSE client set (`/api/status`), static serving from `dist/client`, the `/api/llama/*` proxy (browsers never dial the model server directly), the size-guarded body reader (413 via `BodyTooLargeError`), and one shutdown path for all spawned children.
 - `routes.ts` — every `/api/*` handler in one file (deliberate: one import boundary; split only when forced).
 - `config.ts` — precedence: built-in defaults < config file (`DASHBOARD_CONFIG` env, else `config/dashboard.json`, else legacy `dashboard.config.json`) < env (`DASHBOARD_HOST`, `DASHBOARD_PORT`, `DASHBOARD_LOGS_DIR`). Startup prints every resolved value with its source; invalid config fails startup with field-specific errors. No machine-specific values in code.
-- `services/` — stateful, own child processes: `llama.ts` (spawn/log state machine; persists `last-launch.json` under the configured logs dir so a restart can adopt/relaunch the model), `bench.ts`, `telemetry.ts` (manages `monitor.py` as a Python child; degrades to disabled with a warning), `presets.ts`, `csvlog.ts`, `unit.ts` (systemd mode), `upgrade.ts`, `devices.ts`, `models.ts`, `files.ts`, `ssh.ts`.
+- `services/` — stateful, own child processes: `llama.ts` (spawn/log state machine; persists `last-launch.json` under the configured logs dir so a restart can adopt/relaunch the model), `bench.ts`, `telemetry.ts` (sampling/recording around the in-process hardware collector `hwmon.ts`; degrades to offline placeholders), `presets.ts`, `csvlog.ts`, `unit.ts` (systemd mode), `upgrade.ts`, `devices.ts`, `models.ts`, `files.ts`, `ssh.ts`.
 - `lib/` — pure helpers (`launch.ts`, `csv.ts`, `tokenize.ts`, `helpparse.ts`, `fatallogs.ts`).
 
 **Client** (`src/client/`, Vite + React 19):
