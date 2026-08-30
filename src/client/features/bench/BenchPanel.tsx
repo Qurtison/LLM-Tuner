@@ -5,7 +5,8 @@ import { getErrorMessage } from '../../api/errors';
 import { useDevices } from '../../hooks/useDevices';
 import { chartOptions } from '../../lib/charts';
 import { onSseLine, useServer } from '../../state/server';
-import type { BenchDequeueResponse, BenchOpResponse, BenchRestoreResponse, BenchStartResponse, BenchStatusResponse, BuildsResponse, DevicesResponse, ModelEntry, TelemetrySample } from '../../../../shared/contracts';
+import { useEventSource } from '../../hooks/useEventSource';
+import type { BenchDequeueResponse, BenchOpResponse, BenchRestoreResponse, BenchStartResponse, BenchStatusResponse, BenchStreamFrame, BuildsResponse, DevicesResponse, ModelEntry, TelemetrySample } from '../../../../shared/contracts';
 
 type Config = { build: string; modelPath: string; devices: string | null; splitMode: string | null; tensorSplit: string | null; fa: boolean; cacheK: string | null; cacheV: string | null; nPrompt: string | null; nGen: string | null; depths: string | null; reps: string | null; extraArgs: string | null; rawArgs?: string | null; label?: string };
 type Row = { label: string; body: Config };
@@ -31,9 +32,17 @@ export default function BenchPanel() {
     const canvas = useRef<HTMLCanvasElement>(null); const chart = useRef<Chart | null>(null); const outputRef = useRef<HTMLDivElement>(null); const running = status?.running ?? false; const statusRef = useRef<BenchStatusResponse | null>(null); statusRef.current = status;
     const field = (key: keyof Form, label: string) => <label className="block text-xs text-neutral-400">{label}<input value={String(form[key])} onChange={event => setForm(value => ({ ...value, [key]: event.target.value }))} className="mt-1 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 font-mono text-xs text-white" /></label>;
     const refresh = async () => { try { const next = await api<BenchStatusResponse>('/api/bench/status'); setStatus(next); setOutput(next.output || []); } catch (error) { setMessage('Status failed: ' + errorText(error)); } };
-    useEffect(() => { void Promise.all([api<BuildsResponse>('/api/builds'), api<ModelEntry[]>('/api/models')]).then(([buildResult, modelResult]) => { setBuilds(buildResult.builds || []); setModels((Array.isArray(modelResult) ? modelResult : []).slice().sort((a, b) => parseFloat(a.size) - parseFloat(b.size))); setForm(value => ({ ...value, build: value.build || buildResult.builds[0]?.id || '', modelPath: value.modelPath || modelResult[0]?.path || '' })); }).catch(error => setMessage('Load failed: ' + errorText(error))); void refresh(); return onSseLine(line => { if (line.startsWith('BENCH:')) setOutput(old => [...old, line.slice(6)].slice(-4000)); if (line.startsWith('BENCH_DONE:')) { setStatus(old => old ? { ...old, running: false } : old); setRowStatus(old => statusRef.current?.currentLabel ? { ...old, [statusRef.current.currentLabel]: line.includes('code 0') ? 'done' : 'failed' } : old); void refresh(); } }); }, []);
+    useEffect(() => { void Promise.all([api<BuildsResponse>('/api/builds'), api<ModelEntry[]>('/api/models')]).then(([buildResult, modelResult]) => { setBuilds(buildResult.builds || []); setModels((Array.isArray(modelResult) ? modelResult : []).slice().sort((a, b) => parseFloat(a.size) - parseFloat(b.size))); setForm(value => ({ ...value, build: value.build || buildResult.builds[0]?.id || '', modelPath: value.modelPath || modelResult[0]?.path || '' })); }).catch(error => setMessage('Load failed: ' + errorText(error))); void refresh(); return onSseLine(line => { if (line.startsWith('BENCH:')) setOutput(old => [...old, line.slice(6)].slice(-4000)); if (line.startsWith('BENCH_DONE:')) { setStatus(old => old ? { ...old, running: false } : old); setRowStatus(old => statusRef.current?.currentLabel ? { ...old, [statusRef.current.currentLabel]: line.includes('code 0') ? 'done' : 'failed' } : old); } }); }, []);
     useEffect(() => { if (devicesError) setMessage('Devices failed: ' + devicesError); }, [devicesError]);
-    useEffect(() => { if (!running) return; const id = window.setInterval(() => void refresh(), 2000); return () => window.clearInterval(id); }, [running]);
+    // Bench state arrives over /api/bench/stream (push on every transition;
+    // output lines still ride the /api/status BENCH: broadcast above), so no
+    // 2s status poll is needed while a run is in flight.
+    useEventSource('/api/bench/stream', data => {
+        try {
+            const frame = JSON.parse(data) as BenchStreamFrame;
+            setStatus(old => (old ? { ...old, ...frame } : { ...frame, output: [] }));
+        } catch { /* non-JSON frame; ignore */ }
+    });
     useEffect(() => { save('bench_custom_rows', rows); }, [rows]); useEffect(() => { save('bench_row_status', rowStatus); }, [rowStatus]); useEffect(() => { save('bench_stars', stars); }, [stars]); useEffect(() => { save('bench_subtab', subtab); }, [subtab]); useEffect(() => { save('launch_ab', { rows: sweepRows, prompt: sweepPrompt, genTokens: sweepGen, reps: sweepReps }); }, [sweepRows, sweepPrompt, sweepGen, sweepReps]);
     useEffect(() => { const el = canvas.current; if (!el) return; chart.current = new Chart(el, { type: 'line', data: { labels: [], datasets: [{ label: 'GPU util %', data: [], borderColor: '#4ade80', tension: .2 }, { label: 'Power W', data: [], borderColor: '#60a5fa', tension: .2 }] }, options: chartOptions() }); return () => { chart.current?.destroy(); chart.current = null; }; }, []);
     useEffect(() => { if (!chart.current) return; const samples: TelemetrySample[] = status?.samples || []; chart.current.data.labels = samples.map(sample => new Date(sample.t).toLocaleTimeString()); chart.current.data.datasets[0].data = samples.map(sample => sample.masterGpuUtil); chart.current.data.datasets[1].data = samples.map(sample => sample.masterPwr); chart.current.update(); }, [status?.samples]);

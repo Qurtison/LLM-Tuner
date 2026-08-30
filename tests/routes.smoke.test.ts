@@ -242,4 +242,32 @@ describe('server4 route smoke', () => {
         expect((await json(server.url('/api/config'))).response.status).toBe(200);
     });
 
+    it('streams telemetry samples and bench state over SSE', async () => {
+        // Telemetry stream: first frame is immediate on connect (stats may
+        // still be null before the first server-side sample lands).
+        const tele = await sse(server.url('/api/telemetry/stream'), payload => typeof payload.t === 'number');
+        expect(tele.response.statusCode).toBe(200);
+        expect(tele.response.headers['content-type']).toContain('text/event-stream');
+        expect(tele.payload).toEqual(expect.objectContaining({ t: expect.any(Number) }));
+        expect(tele.payload).toHaveProperty('stats');
+
+        // Bench stream: first frame is the current state, WITHOUT the output
+        // array (lines ride the /api/status BENCH: broadcast instead).
+        const benchFrame = await sse(server.url('/api/bench/stream'), payload => typeof payload.running === 'boolean');
+        expect(benchFrame.response.headers['content-type']).toContain('text/event-stream');
+        expect(benchFrame.payload).toEqual(expect.objectContaining({ running: false, queueRemaining: 0, queueTotal: 0, currentLabel: '' }));
+        expect(benchFrame.payload).not.toHaveProperty('output');
+
+        // Live push: connect first, then start a bench and receive the
+        // running=true transition frame (the 2s client poll this replaces
+        // would wait up to 2s for the same truth).
+        const runningFrame = sse(server.url('/api/bench/stream'), payload => payload.running === true);
+        await Bun.sleep(300);
+        const modelPath = path.join(server.tempDir, 'models', 'fake.gguf');
+        const start = await post('/api/bench/start', { modelPath, build: 'fake', reps: 1 });
+        expect(start.body).toEqual({ ok: true, command: expect.stringContaining('fake-llama-bench') });
+        await runningFrame;
+        await poll(async () => (await json(server.url('/api/bench/status'))).body.running ? null : true);
+    });
+
 });

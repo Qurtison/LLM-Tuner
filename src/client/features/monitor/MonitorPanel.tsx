@@ -100,7 +100,6 @@ export default function MonitorPanel() {
     });
     const [rate, setRate] = useState(1000);
     const [error, setError] = useState('');
-    const [failures, setFailures] = useState(0);
     const [expanded, setExpanded] = useState(false);
     const [smooth, setSmooth] = useState(() => { try { return window.localStorage.getItem('omni_smoothing') === '1'; } catch { return false; } });
     // Live token-rate ring: one sample per SSE progress frame (PREFILL/GEN),
@@ -208,11 +207,11 @@ export default function MonitorPanel() {
         chart.update('none');
     }, [selectedCompletion, smooth]);
 
-    const effectiveInterval = Math.min(rate * Math.max(1, 2 ** Math.min(failures, 4)), 16_000);
-    const { latest: telemetry, error: telemetryError } = useTelemetryLatest(effectiveInterval);
+    // Telemetry arrives over /api/telemetry/stream (server pushes at its
+    // own poll rate; the Rate select above changes that server-side).
+    const { latest: telemetry, error: telemetryError } = useTelemetryLatest();
     useEffect(() => {
         if (telemetryError) {
-            setFailures(old => old + 1);
             setError(telemetryError);
             return;
         }
@@ -228,7 +227,6 @@ export default function MonitorPanel() {
         pointsRef.current = next;
         saveJson(POINTS_KEY, next);
         setPoints(next);
-        setFailures(0);
         setError('');
     }, [telemetry, telemetryError]);
 
@@ -280,7 +278,6 @@ export default function MonitorPanel() {
     };
 
     return <section className="@container space-y-4" aria-label="Telemetry monitor">
-        {failures >= 3 && <p role="alert" className="rounded border border-orange-700/50 bg-orange-900/20 px-3 py-2 text-xs text-orange-300">Telemetry polling failed ({failures} consecutive errors). Backing off.</p>}
         {error && <p role="alert" className="text-xs text-red-400">{error}</p>}
         {blockOrder.map(key => <div key={key} onDragOver={event => { if (!metricLocked) event.preventDefault(); }} onDrop={event => { event.preventDefault(); moveBlock(dragKey.current, key); }}>{renderBlock(key)}</div>)}
         {expanded && <div role="dialog" aria-modal="true" aria-label="Expanded live hardware chart" className="fixed inset-0 z-50 flex flex-col bg-black/95 p-6"><div className="mb-3 flex items-center gap-3"><h2 className="text-lg font-bold">Live hardware</h2><label className="text-xs text-neutral-400"><input checked={smooth} onChange={event => toggleSmooth(event.target.checked)} type="checkbox" className="mr-1 accent-indigo-500" />smooth</label><button type="button" onClick={() => { setExpanded(false); window.setTimeout(() => restoreFocus.current?.focus(), 0); }} className="ml-auto rounded bg-neutral-800 px-3 py-1 text-sm">Close</button></div><div className="min-h-0 flex-1 overflow-y-auto"><div className="grid gap-3 grid-cols-1 @lg:grid-cols-2 2xl:grid-cols-3">{blockOrder.map(key => { const metric = metricByKey.get(key); if (!metric) return null; return <MiniChart key={metric.key} metric={metric} points={points} smooth={smooth} master={master} worker={worker} net={net} masterLabel={masterLabel} workerLabel={workerLabel} tpsPoints={tpsPoints} />; })}</div></div></div>}

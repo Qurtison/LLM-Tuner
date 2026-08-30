@@ -38,6 +38,7 @@ export class BenchService {
     private currentLabel = '';
     private lastSamples: TelemetrySample[] = [];
     private logWriteChain: Promise<void> = Promise.resolve();
+    private readonly streamListeners = new Set<() => void>();
 
     private ctx: ServerCtx;
     private deps: BenchDeps;
@@ -45,6 +46,21 @@ export class BenchService {
     constructor(ctx: ServerCtx, deps: BenchDeps) {
         this.ctx = ctx;
         this.deps = deps;
+    }
+
+    // /api/bench/stream subscribers: invoked on every bench state transition
+    // (start, next matrix run, finish, stop, queue drain/abort). Output lines
+    // are NOT pushed here -- they already flow per-line over the /api/status
+    // BENCH: broadcast, so stream frames stay small (no output array).
+    subscribe(listener: () => void): () => void {
+        this.streamListeners.add(listener);
+        return () => { this.streamListeners.delete(listener); };
+    }
+
+    private emit(): void {
+        for (const listener of this.streamListeners) {
+            try { listener(); } catch { /* a bad listener must not break bench runs */ }
+        }
     }
 
     status(): BenchStatusResponse {
@@ -89,6 +105,7 @@ export class BenchService {
         this.queue = [];
         this.queueTotal = 0;
         this.process?.kill('SIGTERM');
+        this.emit();
     }
 
     // Shutdown escalation after the grace period (called by the entry).
@@ -109,6 +126,7 @@ export class BenchService {
             this.log('===== llama-bench 1/' + this.queueTotal + ': ' + this.currentLabel + ' =====');
             const error = this.launch(first);
             if (error) return { error, code: 400 };
+            this.emit();
             return { ok: true, queued: this.queue.length, command: this.command };
         }
         const run = cfg as BenchConfig;
@@ -117,6 +135,7 @@ export class BenchService {
         this.queueTotal = 0;
         const error = this.launch(run);
         if (error) return { error, code: 400 };
+        this.emit();
         return { ok: true, command: this.command };
     }
 
@@ -160,6 +179,7 @@ export class BenchService {
             this.running = false;
             const message = (error as Error).message;
             this.log('[bench] failed to spawn: ' + message);
+            this.emit();
             return message;
         }
         this.process = process;
@@ -173,6 +193,7 @@ export class BenchService {
             this.log(line);
             this.deps.onBenchDone(tag);
             this.startNext();
+            this.emit();
         };
         const streams = Promise.all([this.readOutput(process.stdout), this.readOutput(process.stderr)]);
         void process.exited.then(
@@ -209,12 +230,14 @@ export class BenchService {
         try {
             if (this.queue.length === 0) {
                 this.queueTotal = 0;
+                this.emit();
                 return;
             }
             if (this.deps.llamaRunning()) {
                 this.log('[matrix] a model was launched mid-matrix -- aborting remaining runs');
                 this.queue = [];
                 this.queueTotal = 0;
+                this.emit();
                 return;
             }
             const next = this.queue.shift()!;
@@ -222,10 +245,12 @@ export class BenchService {
             this.currentLabel = next.label || next.devices || 'run';
             this.log('===== llama-bench ' + index + '/' + this.queueTotal + ': ' + this.currentLabel + ' =====');
             if (this.launch(next)) this.startNext();
+            this.emit();
         } catch (error) {
             this.queue = [];
             this.queueTotal = 0;
             this.log('[matrix] aborted: ' + (error as Error).message);
+            this.emit();
         }
     }
 

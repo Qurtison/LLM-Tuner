@@ -160,7 +160,7 @@ function GpuRowCard({ title, stats, isWorker }: { title: string; stats: GpuStats
 }
 
 function GpuRow() {
-    const { latest } = useTelemetryLatest(5000);
+    const { latest } = useTelemetryLatest();
     const master = latest?.stats && typeof latest.stats.master === 'object' && latest.stats.master !== null ? latest.stats.master as GpuStats : null;
     const worker = latest?.stats && typeof latest.stats.worker === 'object' && latest.stats.worker !== null && !(latest.stats.worker as GpuStats).nvidia_smi_error && !(latest.stats.worker as GpuStats).amdgpu_top_error ? latest.stats.worker as GpuStats : null;
     return (

@@ -1,37 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api/client';
-import { getErrorMessage } from '../api/errors';
+import { useEventSource } from './useEventSource';
 import type { TelemetryLatestResponse } from '../../../shared/contracts';
 
-export function useTelemetryLatest(intervalMs: number, enabled = true): { latest: TelemetryLatestResponse | null; error: string } {
+// One EventSource per consumer (App GpuRow + MonitorPanel). The server
+// pushes every sample at its own poll rate (POST /api/telemetry/rate still
+// controls the server-side sampling interval), so the client no longer keeps
+// a poll timer. The error only appears after a once-live stream drops.
+export function useTelemetryLatest(opts: { enabled?: boolean } = {}): { latest: TelemetryLatestResponse | null; error: string } {
+    const enabled = opts.enabled ?? true;
     const [latest, setLatest] = useState<TelemetryLatestResponse | null>(null);
     const [error, setError] = useState('');
-    const inFlight = useRef(false);
-
+    const wasLive = useRef(false);
+    const onMessage = (data: string) => {
+        try {
+            setLatest(JSON.parse(data) as TelemetryLatestResponse);
+            setError('');
+        } catch {
+            setError('Bad telemetry frame.');
+        }
+    };
+    const { live } = useEventSource(enabled ? '/api/telemetry/stream' : null, onMessage);
     useEffect(() => {
-        if (!enabled || intervalMs <= 0) return;
-        let alive = true;
-        const poll = async () => {
-            if (inFlight.current) return;
-            inFlight.current = true;
-            try {
-                const result = await api<TelemetryLatestResponse>('/api/telemetry/latest');
-                if (!alive) return;
-                setLatest(result);
-                setError('');
-            } catch (cause) {
-                if (!alive) return;
-                // OverviewPanel previously silently ignored 5s poll errors; keep
-                // visible error for MonitorPanel via caller check, but don't spam.
-                setError(getErrorMessage(cause, 'Telemetry request failed.'));
-            } finally {
-                inFlight.current = false;
-            }
-        };
-        void poll();
-        const timer = window.setInterval(() => { void poll(); }, intervalMs);
-        return () => { alive = false; window.clearInterval(timer); };
-    }, [intervalMs, enabled]);
-
+        if (live) { wasLive.current = true; setError(''); }
+        else if (wasLive.current) setError('Telemetry stream disconnected. Reconnecting…');
+    }, [live]);
     return { latest, error };
 }

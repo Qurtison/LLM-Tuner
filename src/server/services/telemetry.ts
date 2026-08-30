@@ -37,6 +37,7 @@ export class TelemetryService {
     private telemetrySampleInFlight = false;
     private telemetryPollMs: number;
     private telemetryLoopTimer: ReturnType<typeof setInterval> | null = null;
+    private readonly sampleListeners = new Set<() => void>();
     private lastServerTelemetry: { t: number; stats: TelemetryStats } | null = null;
     private lastSampleNetBytes: number | null = null;
     private lastSampleNetTime = 0;
@@ -61,6 +62,19 @@ export class TelemetryService {
 
     latest(): { t: number; stats: TelemetryStats } | null {
         return this.lastServerTelemetry;
+    }
+
+    // /api/telemetry/stream subscribers: invoked after every new server-side
+    // sample (the poll loop below), so SSE clients push instead of polling.
+    onSample(listener: () => void): () => void {
+        this.sampleListeners.add(listener);
+        return () => { this.sampleListeners.delete(listener); };
+    }
+
+    private emitSamples(): void {
+        for (const listener of this.sampleListeners) {
+            try { listener(); } catch { /* a bad listener must not kill the poll loop */ }
+        }
     }
 
     // In-process collector (src/server/services/hwmon.ts) -- no Python
@@ -161,6 +175,7 @@ export class TelemetryService {
         const stats = await this.fetchStats();
         if (!stats) return;
         this.lastServerTelemetry = { t: Date.now(), stats };
+        this.emitSamples();
         const recording = this.deps.benchRunning() || Date.now() - this.lastActivityTimestamp < ACTIVITY_TIMEOUT_MS;
         if (recording) await this.takeOneSample(stats);
     }

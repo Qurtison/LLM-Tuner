@@ -582,3 +582,91 @@ Every hardcoded absolute path, hostname, IP, username, port, and executable refe
 3. **`fuser -k 8080/tcp` and `fuser -k 8081/tcp`** (lines 2073–2074) — startup port cleanup killing arbitrary processes on llama-server and monitor ports
 4. **`python3`** (line 2093) — hardcoded Python executable name for spawning `monitor.py`
 5. **`50052`** (line 536) — hardcoded RPC port appended to the `--rpc` flag in the llama-server launch command
+
+---
+
+## Phase 7: Route split + SSE push streams (2026-08, current)
+
+Explicit documented change: the frozen single-file `src/server/routes.ts` was
+split into a `src/server/routes/` directory, and the two poll-based endpoints
+whose data already changes on a server-side event source were converted to
+SSE. Everything below is additive or a client-side consumption change; every
+pre-existing route keeps its exact response shape, status codes, and
+dispatch order.
+
+### Route split (behavior unchanged)
+
+`src/server/routes.ts` becomes the `src/server/routes/` directory:
+
+- `context.ts` — shared `RouteCtx`, `BodyTooLargeError`, `InvalidJsonError`,
+  body parsers (`jsonBodyOr400`, tolerant `parseJsonBody`), and
+  `sseResponse` (the `text/event-stream` headers shared by all push endpoints).
+- `index.ts` — the `handleApiRoute` dispatcher. Each group exports
+  `handle(ctx, req, url)` returning `null` on no match; groups run in a
+  **frozen order** so first-match-wins stays byte-identical (notably
+  `/api/presets/<name>` GET is checked before `/api/presets/validate` POST).
+- One file per group: `models` (models/config/builds/server-paths),
+  `presets`, `files`, `unit`, `apply`, `upgrade`, `logs`
+  (log/csv/samples/active-samples/recent/summary), `bench`, `devices`
+  (flags/devices), `launch` (preview-command/start/stop), `worker`,
+  `master` (logs + log stream), `telemetry`, `hf`.
+
+No response shape, status code, or dispatch order changed in this split.
+The behavior tests (which boot the real server) are the guard.
+
+### New SSE endpoints
+
+#### `GET /api/telemetry/stream` (SSE stream — `text/event-stream`)
+- **Method:** GET
+- **Query params:** none
+- **Response:** SSE stream, 200 on connect. Immediate first frame with the
+  current sample; thereafter one frame per server-side telemetry sample.
+- **Frame shape:** exactly `GET /api/telemetry/latest` — `{ t: number,
+  stats: object | null }`. `stats` is `null` until the first sample lands.
+- **Side effects:** adds an `onSample` subscriber to `TelemetryService`
+  (invoked by the existing poll loop after every new sample; removed on
+  client disconnect via abort/cancel).
+- **Rate:** unchanged — `POST /api/telemetry/rate` still sets the
+  server-side sampling interval (clamped to `[250, 5000]` ms).
+- **Decision:** client consumers (`GpuRow` in App.tsx, `MonitorPanel`) now
+  subscribe via `useTelemetryLatest()` (EventSource-backed) instead of
+  polling on a client timer. The client poll-error backoff (up to 16s) is
+  removed; reconnect is handled by the EventSource retry in
+  `useEventSource`. `GET /api/telemetry/latest` stays (one-shot snapshot;
+  tests + external consumers).
+
+#### `GET /api/bench/stream` (SSE stream — `text/event-stream`)
+- **Method:** GET
+- **Query params:** none
+- **Response:** SSE stream, 200 on connect. Immediate first frame with the
+  current bench state; thereafter one frame per **state transition**
+  (start, next matrix run, finish, stop, queue drain, mid-matrix abort,
+  spawn failure).
+- **Frame shape:** `BenchStreamFrame` (shared/contracts.ts) =
+  `BenchStatusResponse` **minus `output`** — `{ running, command,
+  queueRemaining, queueTotal, currentLabel, samples }`. Output lines are
+  deliberately NOT on this stream: they already arrive per-line via the
+  existing `/api/status` `BENCH:` broadcast, so frames stay small (no
+  4000-line array per transition).
+- **Side effects:** adds a `subscribe` listener to `BenchService`; removed
+  on client disconnect.
+- **Decision:** `BenchPanel` no longer polls `/api/bench/status` every 2s
+  while a run is in flight. It keeps the one-shot fetch on mount and after
+  user actions (start/dequeue/clear/restore — which also sync `output`) and
+  applies stream frames on top. `GET /api/bench/status` stays unchanged.
+
+### Deliberately NOT converted to SSE
+
+- **`/api/worker/status` / `/api/worker/logs`** (client polls at 5s/3s):
+  every update costs one SSH round trip to the remote worker and the server
+  has no local event source. A stream would only relocate the timer
+  server-side (same SSH cost, one long-lived connection per tab, and the SSH
+  host is per-request, which a stream URL cannot vary). Request/response stays.
+- **`/api/unit/status`**: fetched once on panel mount, not a poll; pushing
+  systemd state changes would need an external monitor process for a rare
+  event. Request/response stays.
+- **ChatPanel's 250ms `/api/llama/slots` poll while streaming**: proxies the
+  model server's own endpoint; `llama-server` exposes no slots stream to
+  subscribe to. Left as is.
+- **`/api/upgrade/status`**: one-shot on mount; the run itself already
+  streams (`/api/upgrade/stream`).

@@ -241,6 +241,17 @@ export interface BenchStatusResponse {
     samples: TelemetrySample[];
 }
 
+// /api/bench/stream SSE frame: current bench state without the output array
+// (lines already flow per-line over the /api/status BENCH: broadcast).
+export interface BenchStreamFrame {
+    running: boolean;
+    command: string;
+    queueRemaining: number;
+    queueTotal: number;
+    currentLabel: string;
+    samples: TelemetrySample[];
+}
+
 export interface BenchStartResponse {
     ok: true;
     command: string;

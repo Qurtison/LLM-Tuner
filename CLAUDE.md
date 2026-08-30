@@ -37,13 +37,13 @@ The API's behavior was captured verbatim from the legacy `server4.js` in `docs/a
 
 **Server** (`src/server/`):
 - `index.ts` — Bun.serve entry: owns the SSE client set (`/api/status`), static serving from `dist/client`, the `/api/llama/*` proxy (browsers never dial the model server directly), the size-guarded body reader (413 via `BodyTooLargeError`), and one shutdown path for all spawned children.
-- `routes.ts` — every `/api/*` handler in one file (deliberate: one import boundary; split only when forced).
+- `routes/` — one file per route group (`presets`, `bench`, `logs`, `worker`, …); `routes/index.ts` dispatches the groups in a **frozen order** (first-match-wins must stay identical to the legacy single file), shared `RouteCtx`/body-parsing/SSE helpers in `routes/context.ts`.
 - `config.ts` — precedence: built-in defaults < config file (`DASHBOARD_CONFIG` env, else `config/dashboard.json`, else legacy `dashboard.config.json`) < env (`DASHBOARD_HOST`, `DASHBOARD_PORT`, `DASHBOARD_LOGS_DIR`). Startup prints every resolved value with its source; invalid config fails startup with field-specific errors. No machine-specific values in code.
 - `services/` — stateful, own child processes: `llama.ts` (spawn/log state machine; persists `last-launch.json` under the configured logs dir so a restart can adopt/relaunch the model), `bench.ts`, `telemetry.ts` (sampling/recording around the in-process hardware collector `hwmon.ts`; degrades to offline placeholders), `presets.ts`, `csvlog.ts`, `unit.ts` (systemd mode), `upgrade.ts`, `devices.ts`, `models.ts`, `files.ts`, `ssh.ts`.
 - `lib/` — pure helpers (`launch.ts`, `csv.ts`, `tokenize.ts`, `helpparse.ts`, `fatallogs.ts`).
 
 **Client** (`src/client/`, Vite + React 19):
-- One SSE owner: the app shell (via `state/server.ts`) opens the single `/api/status` EventSource, parses every frame, and fans out to typed stores. Feature panels read via `useServer()` and **never open their own EventSource**. Panels that consume raw log lines (`BENCH:`, `BENCH_DONE:`, …) subscribe through `onSseLine`.
+- One SSE owner: the app shell (via `state/server.ts`) opens the single `/api/status` EventSource, parses every frame, and fans out to typed stores. Feature panels read via `useServer()` and **never open a second `/api/status` EventSource**. Panels that consume raw log lines (`BENCH:`, `BENCH_DONE:`, …) subscribe through `onSseLine`. Dedicated per-resource streams are the exception: the consuming panel owns them through `useEventSource`/`useSse` — master logs (`/api/master/logs/stream`), upgrade (`/api/upgrade/stream`), telemetry (`/api/telemetry/stream`, via `useTelemetryLatest()`), bench state (`/api/bench/stream`, frames = `BenchStreamFrame`, no output array — lines still ride the `BENCH:` broadcast).
 - `state/value.ts` — the minimal external-store cell (`Value<T>`) behind every module-level store, read with `useSyncExternalStore`. Its `get` is an arrow field on purpose: it gets detached when passed to `useSyncExternalStore`.
 - `features/` — per-panel directories (overview, interactive, bench, monitor, presets, logs, files, history, upgrade).
 
