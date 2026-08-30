@@ -90,7 +90,7 @@ function ActivityBar() {
                     <span className="text-neutral-500">Prefill</span>
                     {prefill
                         ? <>
-                            <span className="h-1.5 w-40 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-500" style={{ width: pct + '%' }} /></span>
+                            <span className="h-1.5 w-40 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-500 transition-[width] duration-500 ease-linear" style={{ width: pct + '%' }} /></span>
                             <span className="font-mono text-neutral-300">{pct.toFixed(0)}% · {prefill.tokens.toLocaleString()} tok · {prefill.tps} t/s</span>
                         </>
                         : <span className="font-mono text-neutral-600">idle</span>}
@@ -105,7 +105,7 @@ function ActivityBar() {
                     <span className="text-neutral-500">Context</span>
                     {context
                         ? <>
-                            <span className="h-1.5 w-24 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-400" style={{ width: (ctxPct ?? 0) + '%' }} /></span>
+                            <span className="h-1.5 w-24 overflow-hidden rounded bg-neutral-800"><span className="block h-full bg-indigo-400 transition-[width] duration-500 ease-linear" style={{ width: (ctxPct ?? 0) + '%' }} /></span>
                             <span className="font-mono text-neutral-300">{context.used.toLocaleString()} / {context.limit.toLocaleString()} · {(ctxPct ?? 0).toFixed(0)}%</span>
                         </>
                         : <span className="font-mono text-neutral-600">—</span>}
@@ -120,7 +120,7 @@ function ActivityBar() {
 type GpuStats = Record<string, unknown>;
 
 function GpuBar({ pct }: { pct: number }) {
-    return <div className="h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500" style={{ width: Math.min(Math.max(pct, 0), 100) + '%' }} /></div>;
+    return <div className="h-1.5 overflow-hidden rounded bg-neutral-800"><div className="h-full bg-indigo-500 transition-[width] duration-500 ease-linear" style={{ width: Math.min(Math.max(pct, 0), 100) + '%' }} /></div>;
 }
 
 function GpuRowCard({ title, stats, isWorker }: { title: string; stats: GpuStats | null; isWorker: boolean }) {
