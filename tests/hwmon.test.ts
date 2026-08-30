@@ -15,6 +15,11 @@ test('isSameHost marks shared-host worker targets (port of monitor._is_same_host
         ['[::1]', true],
         ['kyle4090@169.254.61.173', false],
         ['192.168.1.50', false],
+        // explicit :port (raw --rpc / custom ssh port) must not defeat loopback
+        ['127.0.0.1:50052', true],
+        ['localhost:22', true],
+        ['user@127.0.0.1:2222', true],
+        ['169.254.61.173:50052', false],
         ['', false]
     ];
     for (const [target, expected] of cases) expect(isSameHost(target), target).toBe(expected);

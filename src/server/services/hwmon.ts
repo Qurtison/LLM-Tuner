@@ -67,7 +67,12 @@ async function runCmd(cmd: string[], timeoutMs: number): Promise<{ ok: boolean; 
 // second-GPU mode) shares master's machine-level cpu/ram/net pool, so the
 // worker slot is marked same_host and the frontend does not show them twice.
 export function isSameHost(sshTarget: string): boolean {
-    const host = (sshTarget.split('@').pop() || '').trim().replace(/^[\][]+|[\][]+$/g, '').toLowerCase();
+    let host = (sshTarget.split('@').pop() || '').trim().replace(/^[\][]+|[\][]+$/g, '').toLowerCase();
+    // A single-colon "host:port" (e.g. the raw --rpc "127.0.0.1:50052") must
+    // not defeat loopback detection; a bare IPv6 literal (multiple colons,
+    // e.g. ::1) is left intact.
+    const parts = host.split(':');
+    if (parts.length === 2 && /^\d+$/.test(parts[1])) host = parts[0];
     if (!host) return false;
     return host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1' || host === os.hostname().toLowerCase();
 }
