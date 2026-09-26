@@ -10,6 +10,7 @@ import type { BenchService } from '../services/bench';
 import type { TelemetryService } from '../services/telemetry';
 import type { PresetStore } from '../services/presets';
 
+import type { HfDownloadService } from '../services/hf';
 // Thrown by the entry's size-guarded body reader; route catches must let it
 // propagate (it maps to 413 in the entry, NOT 400 Invalid JSON).
 export class BodyTooLargeError extends Error {
@@ -30,6 +31,8 @@ export interface RouteCtx {
     bench: BenchService;
     telemetry: TelemetryService;
     presets: PresetStore;
+    // Hugging Face model downloads (model download modal).
+    hf: HfDownloadService;
     appRoot: string;
     // Body reader honoring config.server.maxBodyBytes; throws
     // BodyTooLargeError when the cap is exceeded (the entry maps it to 413).

@@ -21,6 +21,7 @@ import { CSV_HEADERS } from './services/csvlog';
 import type { ServerState } from './services/types';
 import { handleApiRoute, type RouteCtx, BodyTooLargeError } from './routes';
 import { PresetStore } from './services/presets';
+import { HfDownloadService } from './services/hf';
 
 const APP_ROOT = path.join(import.meta.dir, '..', '..'); // src/server/<entry> -> repo root
 const DIST_DIR = path.join(APP_ROOT, 'dist', 'client');
@@ -148,6 +149,10 @@ const bench = new BenchService(
 
 const presets = new PresetStore(path.join(APP_ROOT, 'presets'));
 
+// Downloads land in the first configured models dir, the same tree the file
+// browser lists.
+const hfDownloads = new HfDownloadService(config.paths.modelDirectories[0]);
+
 const routeCtx: RouteCtx = {
     config,
     state,
@@ -156,6 +161,7 @@ const routeCtx: RouteCtx = {
     bench,
     telemetry,
     presets,
+    hf: hfDownloads,
     appRoot: APP_ROOT,
     readBody,
     json,

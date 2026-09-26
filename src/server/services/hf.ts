@@ -1,0 +1,436 @@
+// Hugging Face model downloads (model download modal).
+//
+// Files are pulled straight off huggingface.co with fetch and streamed to
+// disk under the models dir, one subfolder per repo:
+//
+//   models/<owner>--<name>/<file>.gguf
+//
+// Every transfer lands in a `<file>.part` sibling first and is renamed only
+// after the last byte is written, so a killed server never leaves a truncated
+// model that looks complete. A leftover .part is resumed with an HTTP Range
+// request instead of being thrown away.
+//
+// Progress is pushed over /api/hf/download/stream (see routes/hf.ts); the
+// client never polls per-byte.
+import * as fs from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
+import type { HfDownloadTask, HfRepoFile, HfRepoListing } from '../../../shared/contracts';
+import { resolveInside } from './files';
+
+const HF_ORIGIN = 'https://huggingface.co';
+// A 10 GB transfer must not sit on a dead connection forever; the same timer
+// guards headers and body, and aborts the same controller cancel() uses.
+const LIST_TIMEOUT_MS = 15_000;
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+// How often progress is pushed to subscribers. 250ms keeps the bar smooth
+// without a flood of SSE frames on a 10 GB file.
+const EMIT_INTERVAL_MS = 250;
+// Finished tasks are kept for the modal to render, then dropped.
+const HISTORY_LIMIT = 20;
+
+export const REPO_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+export class HfDownloadService {
+    private readonly modelsDir: string;
+    // Seam for the test suite: a local Bun.served stand-in for HF, so the
+    // download/resume/rename path is exercised without touching the network.
+    private readonly origin: string;
+    private readonly tasks = new Map<string, HfDownloadTask>();
+    /** id -> controllers for the in-flight requests, so cancel() can abort. */
+    private readonly inFlight = new Map<string, AbortController>();
+    private readonly listeners = new Set<() => void>();
+    private counter = 0;
+
+    constructor(modelsDir: string, origin: string = HF_ORIGIN) {
+        this.modelsDir = modelsDir;
+        this.origin = origin.replace(/\/+$/, '');
+    }
+
+    subscribe(listener: () => void): () => void {
+        this.listeners.add(listener);
+        return () => { this.listeners.delete(listener); };
+    }
+
+    private emit(): void {
+        for (const listener of this.listeners) {
+            try { listener(); } catch { /* a bad listener must not break a download */ }
+        }
+    }
+
+    snapshot(): HfDownloadTask[] {
+        return [...this.tasks.values()].map(task => ({ ...task }));
+    }
+
+    /** models-dir-relative folder for a repo; slashes become `--` so one repo is one folder. */
+    folderFor(repo: string): string {
+        return repo.replace('/', '--');
+    }
+
+    private absolute(folder: string, name: string): string {
+        return resolveInside(this.modelsDir, folder ? `${folder}/${name}` : name);
+    }
+
+    // --- REPO LISTING ---
+
+    async listRepo(repo: string): Promise<HfRepoListing> {
+        if (!REPO_PATTERN.test(repo)) throw new Error('Invalid repository (expected owner/name)');
+        // ?recursive=1 so a quant nested in a subfolder still shows up; the
+        // tree API is paginated at 1000 entries, which no GGUF repo reaches.
+        const upstream = await fetch(
+            `${this.origin}/api/models/${repo}/tree/main?recursive=true&limit=1000`,
+            { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
+        );
+        if (upstream.status === 404) throw new Error('Repository not found on Hugging Face');
+        if (!upstream.ok) throw new Error(`Hugging Face returned ${upstream.status}`);
+        const tree: unknown = await upstream.json();
+        if (!Array.isArray(tree)) throw new Error('Invalid Hugging Face response');
+
+        const folder = this.folderFor(repo);
+        const ggufs: HfRepoFile[] = [];
+        for (const node of tree) {
+            if (!node || typeof node !== 'object') continue;
+            const entry = node as { type?: string; path?: string; size?: number };
+            // LFS pointers report the pointer size in `size` only for small
+            // files; real GGUF rows carry their true byte count.
+            if (entry.type !== 'file' || typeof entry.path !== 'string') continue;
+            if (!entry.path.toLowerCase().endsWith('.gguf')) continue;
+            if (typeof entry.size !== 'number' || entry.size <= 0) continue;
+            const name = entry.path.split('/').pop() as string;
+            ggufs.push(await this.describeFile(folder, entry.path, name, entry.size));
+        }
+        if (ggufs.length === 0) throw new Error('No GGUF files in that repository');
+        // Shard counts are only knowable once every file is in hand.
+        this.recountShards(ggufs);
+        ggufs.sort((a, b) => a.group.localeCompare(b.group) || a.shard - b.shard);
+
+        let totalSize = 0;
+        let presentSize = 0;
+        for (const file of ggufs) {
+            totalSize += file.size;
+            if (file.present) presentSize += file.size;
+        }
+        return { repo, folder, files: ggufs, totalSize, presentSize };
+    }
+
+    /** Adds the quant label / shard info and probes the disk for an existing copy. */
+    private async describeFile(folder: string, repoPath: string, name: string, size: number): Promise<HfRepoFile> {
+        const { group, quant, shard } = parseGgufName(name);
+        return {
+            path: repoPath,
+            name,
+            size,
+            quant,
+            group,
+            shard: shard ?? 0,
+            shards: 1, // recountShards fixes this once the whole list is known
+            present: await this.sizeOf(this.absolute(folder, name)) === size,
+            partial: await this.sizeOf(this.absolute(folder, `${name}.part`)) ?? 0,
+        };
+    }
+
+    private async sizeOf(target: string): Promise<number | null> {
+        try {
+            const stat = await fs.stat(target);
+            return stat.isFile() ? stat.size : null;
+        } catch {
+            return null;
+        }
+    }
+
+    private recountShards(files: HfRepoFile[]): void {
+        const byGroup = new Map<string, HfRepoFile[]>();
+        for (const file of files) {
+            const bucket = byGroup.get(file.group);
+            if (bucket) bucket.push(file); else byGroup.set(file.group, [file]);
+        }
+        for (const bucket of byGroup.values()) {
+            const shards = bucket.length;
+            for (const file of bucket) file.shards = shards;
+        }
+    }
+
+    // --- TASK LIFECYCLE ---
+
+    start(repo: string, requested: string[]): HfDownloadTask {
+        if (!REPO_PATTERN.test(repo)) throw new Error('Invalid repository (expected owner/name)');
+        const listing = this.listingFor(repo);
+        const wanted = [...new Set(requested.filter(name => typeof name === 'string' && name))];
+        if (wanted.length === 0) throw new Error('No files selected');
+        // Only accept names the listing actually contains, so a crafted
+        // request cannot steer the write out of the repo folder.
+        const files = listing.files.filter(file => wanted.includes(file.name));
+        if (files.length === 0) throw new Error('No matching files in that repository');
+        // A file already on disk at full size is not re-fetched.
+        const queue = files.filter(file => !file.present);
+        if (queue.length === 0) throw new Error('All selected files are already downloaded');
+
+        if ([...this.tasks.values()].some(task => task.status === 'running' || task.status === 'queued')) {
+            throw new Error('A download is already in progress');
+        }
+
+        const task: HfDownloadTask = {
+            id: `dl${Date.now().toString(36)}${(this.counter++).toString(36)}`,
+            repo,
+            folder: this.folderFor(repo),
+            status: 'queued',
+            files: queue,
+            fileIndex: 0,
+            received: 0,
+            total: queue[0].size,
+            completedBytes: 0,
+            taskTotal: queue.reduce((sum, file) => sum + file.size, 0),
+            bytesPerSecond: 0,
+            error: '',
+            startedAt: Date.now(),
+        };
+        this.tasks.set(task.id, task);
+        this.prune();
+        void this.run(task);
+        this.emit();
+        return { ...task };
+    }
+
+    cancel(id: string): boolean {
+        const task = this.tasks.get(id);
+        if (!task) return false;
+        if (task.status !== 'running' && task.status !== 'queued') return false;
+        task.status = 'cancelled';
+        // Abort kills the fetch; the .part file stays for a later resume.
+        this.inFlight.get(id)?.abort();
+        this.emit();
+        return true;
+    }
+
+    private prune(): void {
+        const settled = [...this.tasks.values()]
+            .filter(task => task.status !== 'running' && task.status !== 'queued')
+            .sort((a, b) => a.startedAt - b.startedAt);
+        while (settled.length > HISTORY_LIMIT) {
+            const task = settled.shift();
+            if (task) this.tasks.delete(task.id);
+        }
+    }
+
+    /** Cache of the last listing per repo, so start() needs no second network call. */
+    private readonly listings = new Map<string, HfRepoListing>();
+
+    rememberListing(listing: HfRepoListing): void {
+        this.listings.set(listing.repo, listing);
+    }
+
+    private listingFor(repo: string): HfRepoListing {
+        const listing = this.listings.get(repo);
+        if (!listing) throw new Error('Look the repository up before starting a download');
+        return listing;
+    }
+
+    private async run(task: HfDownloadTask): Promise<void> {
+        const targetDir = this.absolute(task.folder, '');
+        try {
+            await fs.mkdir(targetDir, { recursive: true });
+        } catch (err) {
+            this.fail(task, `Could not create ${task.folder}: ${messageOf(err)}`);
+            return;
+        }
+
+        task.status = 'running';
+        this.emit();
+
+        for (let index = 0; index < task.files.length; index++) {
+            if (isCancelled(task)) return;
+            const file = task.files[index];
+            task.fileIndex = index;
+            task.received = file.partial; // a resumed part starts where it left off
+            task.total = file.size;
+            task.bytesPerSecond = 0;
+            this.emit();
+            try {
+                await this.fetchOne(task, file);
+            } catch (err) {
+                if (isCancelled(task) || isAbort(err)) return;
+                this.fail(task, `${file.name}: ${messageOf(err)}`);
+                return;
+            }
+            if (isCancelled(task)) return;
+            // Count the file as done only after the rename, so taskTotal
+            // progress never runs ahead of what is on disk.
+            task.completedBytes += file.size;
+            task.received = 0;
+            task.total = 0;
+            task.bytesPerSecond = 0;
+            this.emit();
+        }
+
+        if (task.status === 'running') {
+            task.status = 'done';
+            this.emit();
+        }
+    }
+
+    private fail(task: HfDownloadTask, error: string): void {
+        task.status = 'failed';
+        task.error = error;
+        task.bytesPerSecond = 0;
+        this.emit();
+    }
+
+    private async fetchOne(task: HfDownloadTask, file: HfRepoFile): Promise<void> {
+        const finalPath = this.absolute(task.folder, file.name);
+        const partPath = `${finalPath}.part`;
+        // Re-stat: the listing may be minutes old, and a finished .part from
+        // an earlier run should not be downloaded again.
+        const existing = (await this.sizeOf(partPath)) ?? 0;
+        if (existing >= file.size) {
+            await fs.rename(partPath, finalPath).catch(() => {});
+            return;
+        }
+        task.received = existing;
+
+        // The controller stays registered for the WHOLE transfer, headers and
+        // body: dropping it after the response arrived left cancel() with
+        // nothing to abort while a multi-GB body was still streaming.
+        const controller = new AbortController();
+        this.inFlight.set(task.id, controller);
+        // A stalled CDN connection must not hang the task forever; the timer
+        // aborts the same controller, so the .part survives for a resume.
+        const stall = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+        try {
+            return await this.stream(task, file, controller, existing, partPath, finalPath);
+        } finally {
+            clearTimeout(stall);
+            this.inFlight.delete(task.id);
+        }
+    }
+
+    private async stream(task: HfDownloadTask, file: HfRepoFile, controller: AbortController, existing: number, partPath: string, finalPath: string): Promise<void> {
+        const headers: Record<string, string> = {};
+        if (existing > 0) headers.Range = 'bytes=' + existing + '-';
+        const response = await fetch(
+            `${this.origin}/${task.repo}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`,
+            { headers, signal: controller.signal, redirect: 'follow' },
+        );
+
+        if (response.status === 416) {
+            // Range past the end: the part is complete or corrupt. Start over.
+            await fs.rm(partPath, { force: true });
+            throw new Error('partial file was stale, retry to start over');
+        }
+        if (!response.ok && response.status !== 206) {
+            throw new Error(`Hugging Face returned ${response.status}`);
+        }
+        if (!response.body) throw new Error('Hugging Face sent an empty body');
+
+        // 206 means the server honoured the resume; a 200 to a Range request
+        // means it ignored it, so the part must be truncated before writing.
+        const resumed = response.status === 206 && existing > 0;
+        if (!resumed && existing > 0) await fs.rm(partPath, { force: true });
+        if (!resumed) task.received = 0;
+
+        const length = Number(response.headers.get('content-length') || '0');
+        // x-linked-size is the authoritative size; content-length of a 206 is
+        // only the remaining slice.
+        const total = resumed ? existing + length : file.size;
+        task.total = total || file.size;
+
+        const out = createWriteStream(partPath, { flags: resumed ? 'a' : 'w' });
+        // A write stream signals failure as an 'error' event, which nothing
+        // awaits: without a permanent listener a failed open or a full disk
+        // escapes as an uncaught exception. Capture it and let the task fail
+        // with a readable message instead.
+        let writeError: Error | null = null;
+        out.on('error', err => { writeError = err instanceof Error ? err : new Error(String(err)); });
+        let received = resumed ? existing : 0;
+        let lastEmit = 0;
+        const startedAt = Date.now();
+        const baseBytes = received;
+
+        try {
+            const reader = response.body.getReader();
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                if (!value) continue;
+                if (isCancelled(task)) {
+                    await reader.cancel().catch(() => {});
+                    return;
+                }
+                received += value.byteLength;
+                if (writeError) throw writeError;
+                if (!out.write(value)) {
+                    // Backpressure: wait for the fd to drain before reading more.
+                    await new Promise<void>((resolve, reject) => {
+                        out.once('drain', () => resolve());
+                        out.once('error', reject);
+                    });
+                }
+                task.received = received;
+                const now = Date.now();
+                if (now - lastEmit >= EMIT_INTERVAL_MS) {
+                    const seconds = (now - startedAt) / 1000;
+                    task.bytesPerSecond = seconds > 0 ? Math.max(0, (received - baseBytes) / seconds) : 0;
+                    lastEmit = now;
+                    this.emit();
+                }
+            }
+        } finally {
+            await new Promise<void>(resolve => { out.end(resolve); });
+        }
+        if (writeError) throw writeError;
+
+        const written = (await this.sizeOf(partPath)) ?? 0;
+        if (written < task.total) throw new Error('stream ended early (' + written + ' of ' + task.total + ' bytes)');
+        await fs.rename(partPath, finalPath);
+        task.received = task.total;
+    }
+}
+
+function messageOf(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+}
+
+// cancel() flips task.status from another closure, but TypeScript keeps the
+// 'running' narrowing it inferred at the assignment, so the flag is read
+// through this helper instead of compared inline.
+function isCancelled(task: HfDownloadTask): boolean {
+    return task.status === 'cancelled';
+}
+
+function isAbort(err: unknown): boolean {
+    return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
+// --- GGUF NAME PARSING ---
+//
+// Quant labels are matched longest-first, otherwise Q4_K_M would be read as
+// Q4_K + a "_M" suffix. Splits are recognised by the usual
+// <stem>-00001-of-00003.gguf / -part-00001-of-00003.gguf suffixes.
+const QUANTS = [
+    'IQ1_S', 'IQ1_M', 'IQ2_XXS', 'IQ2_XS', 'IQ2_S', 'IQ2_M',
+    'IQ3_XXS', 'IQ3_XS', 'IQ3_S', 'IQ3_M', 'IQ4_XS', 'IQ4_NL',
+    // The community also ships _XL/_L/_S variants that upstream llama.cpp
+    // does not define; without them Q4_K_L and Q6_K_L read as Q4_K and Q6_K,
+    // which mislabels the row and splits one quant into two entries.
+    'Q2_K', 'Q2_K_S', 'Q2_K_XL', 'Q3_K_S', 'Q3_K_M', 'Q3_K_L', 'Q3_K_XL',
+    'Q4_0', 'Q4_1', 'Q4_K_S', 'Q4_K_M', 'Q4_K_L', 'Q4_K_XL',
+    'Q5_0', 'Q5_1', 'Q5_K_S', 'Q5_K_M', 'Q5_K_L', 'Q5_K_XL',
+    'Q6_K', 'Q6_K_S', 'Q6_K_L', 'Q6_K_XL', 'Q8_0', 'TQ1_0', 'TQ2_0',
+    'BF16', 'F16', 'F32',
+];
+const QUANT_PATTERN = new RegExp('(' + [...QUANTS].sort((a, b) => b.length - a.length).join('|') + ')', 'i');
+const SHARD_PATTERN = /^(.*?)-(?:part-)?(\d{5})-of-(\d{5})$/i;
+
+export function parseGgufName(name: string): { group: string; quant: string; shard: number | null } {
+    const stem = name.replace(/\.gguf$/i, '');
+    const shardMatch = SHARD_PATTERN.exec(stem);
+    const base = shardMatch ? shardMatch[1] : stem;
+    const quantMatch = QUANT_PATTERN.exec(base);
+    const quant = quantMatch ? quantMatch[1].toUpperCase() : 'UNKNOWN';
+    // The group key must be identical for every shard of one split quant, and
+    // must still separate different quants of the same model.
+    const groupBase = quantMatch ? base.slice(0, quantMatch.index) + quant : base;
+    return {
+        group: (shardMatch ? groupBase : stem).toLowerCase(),
+        quant,
+        shard: shardMatch ? Number.parseInt(shardMatch[2], 10) : null,
+    };
+}

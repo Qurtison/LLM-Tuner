@@ -476,3 +476,61 @@ export interface ServerPathsResponse {
     activeBuildDir: string | null;
 }
 
+// --- HUGGING FACE DOWNLOADS ---
+// One row per .gguf in a repo, as returned by the HF tree API. `quant` is the
+// human-facing label the modal sorts and groups by (e.g. "Q4_K_M"); `group`
+// is the stem shared by split shards so a 2-part quant stays together.
+export interface HfRepoFile {
+    path: string;
+    name: string;
+    size: number;
+    quant: string;
+    group: string;
+    shard: number;
+    shards: number;
+    /** Already present on disk at full size -- the UI checks it and skips it. */
+    present: boolean;
+    /** Bytes of a previous, resumable partial (.part sibling). */
+    partial: number;
+}
+
+export interface HfRepoListing {
+    repo: string;
+    /** models-dir-relative subfolder the files land in. */
+    folder: string;
+    files: HfRepoFile[];
+    totalSize: number;
+    presentSize: number;
+}
+
+export type HfDownloadStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+
+export interface HfDownloadTask {
+    id: string;
+    repo: string;
+    folder: string;
+    status: HfDownloadStatus;
+    /** Files in transfer order; the one at fileIndex is the active one. */
+    files: HfRepoFile[];
+    fileIndex: number;
+    received: number;
+    /** 0 until the first byte of a file lands and the real total is known. */
+    total: number;
+    /** Bytes for the files already finished in this task. */
+    completedBytes: number;
+    /** received + completedBytes: the task-wide progress bar. */
+    taskTotal: number;
+    bytesPerSecond: number;
+    error: string;
+    startedAt: number;
+}
+
+export interface HfDownloadsSnapshot {
+    tasks: HfDownloadTask[];
+}
+
+/** /api/hf/download/stream frame: the full task list on every change. */
+export interface HfDownloadStreamFrame {
+    tasks: HfDownloadTask[];
+}
+

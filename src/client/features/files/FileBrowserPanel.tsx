@@ -1,8 +1,10 @@
 // Model file manager (gap G5, docs/gap-analysis.md): browse the models
 // directory tree, delete files. Path-guarded server side; this panel only
-// navigates + confirms deletions.
-import { useCallback, useEffect, useState } from 'react';
+// navigates + confirms deletions. "Download new" opens the Hugging Face
+// download modal, which writes into the same tree this panel lists.
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../api/client';
+import ModelDownloadDialog from './ModelDownloadDialog';
 import type { FilesResponse } from '../../../../shared/contracts';
 
 function formatSize(size: number | null): string {
@@ -29,6 +31,8 @@ export default function FileBrowserPanel() {
     const [data, setData] = useState<FilesResponse | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
+    const [downloading, setDownloading] = useState(false);
+    const openerRef = useRef<HTMLButtonElement>(null);
 
     const load = useCallback(async (requested: string) => {
         setLoading(true); setError('');
@@ -61,6 +65,15 @@ export default function FileBrowserPanel() {
                 {path !== '' && (
                     <button type="button" onClick={() => void load(parentPath(path))} className="rounded border border-neutral-700 bg-neutral-800 px-2 py-1 text-neutral-300 hover:bg-neutral-700" title="Up one folder">↑ Up</button>
                 )}
+                <button
+                    ref={openerRef}
+                    type="button"
+                    onClick={() => setDownloading(true)}
+                    className="rounded border border-indigo-700 bg-indigo-950/40 px-2 py-1 font-medium text-indigo-300 hover:bg-indigo-900/40"
+                    title="Download a GGUF model from Hugging Face"
+                >
+                    + Download new
+                </button>
                 <nav aria-label="Breadcrumb" className="flex min-w-0 flex-wrap items-center gap-1 font-mono text-neutral-400">
                     <button type="button" onClick={() => void load('')} className={path === '' ? 'text-indigo-300' : 'hover:text-neutral-200'}>{data?.root ?? '…'}</button>
                     {crumbs.map((part, index) => (
@@ -88,6 +101,17 @@ export default function FileBrowserPanel() {
                         </li>
                     ))}
                 </ul>
+            )}
+            {downloading && (
+                <ModelDownloadDialog
+                    onClose={() => setDownloading(false)}
+                    onDownloaded={() => {
+                        // A finished task wrote new files into the folder the
+                        // user is looking at (or into models/ when they are at
+                        // the root); reload whatever is on screen.
+                        void load(path);
+                    }}
+                />
             )}
         </section>
     );
