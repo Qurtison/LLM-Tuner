@@ -80,6 +80,13 @@ describe('server4 route smoke', () => {
         expect(builds.body).toEqual({ builds: [{ id: 'fake', label: 'Fake', path: expect.any(String) }] });
     });
 
+    it('lists GGUFs nested under subdirectories of a model directory', async () => {
+        const nested = path.join(server.tempDir, 'models', 'org--Model-GGUF');
+        fs.mkdirSync(nested, { recursive: true });
+        fs.writeFileSync(path.join(nested, 'nested.gguf'), 'x');
+        const models = await json(server.url('/api/models'));
+        expect(models.body).toContainEqual(expect.objectContaining({ name: 'nested.gguf', source: 'local', path: path.join(nested, 'nested.gguf') }));
+    });
     it('streams stopped SSE state', async () => {
         const event = await sse(server.url('/api/status'), payload => payload.state === 'stopped');
         expect(event.response.statusCode).toBe(200);
