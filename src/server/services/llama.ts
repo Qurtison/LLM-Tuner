@@ -117,6 +117,27 @@ export interface LiveProgress {
 // maps this to 500, while resolve/validation failures map to 400 (status
 // split).
 export class LlamaSpawnError extends Error {}
+// How far back an adopted unit's journal replay should reach: its own
+// process start, never further.
+//
+// The fatal-log detector SIGINTs the model when it sees a fatal line (see
+// handleLine), and a unit's journal history contains such lines from earlier
+// runs — e.g. the `failed to fit params` warning a 27B prints on the way up
+// while layers are still being fitted. Replaying those against a freshly
+// started server kills a healthy process about a second after it starts.
+// Fresh launches already scope their follow with --since; the adopt paths must
+// do the same, or a dashboard restart takes the model down with it.
+//
+// Returns null when the timestamp is missing or unparseable, which falls back
+// to the older catch-up behaviour rather than losing the logs.
+// Exported for tests: the adopt paths' replay window is the whole bug.
+export function journalSinceFor(st: UnitStatus): string | null {
+    if (!st.since) return null;
+    const parsed = new Date(st.since);
+    if (Number.isNaN(parsed.getTime())) return null;
+    return parsed.toISOString();
+}
+
 
 export class LlamaService {
     private ctx: ServerCtx;
@@ -142,6 +163,7 @@ export class LlamaService {
     private recentlyCompleted = new Set<string>();
     onExit?: (code: number) => void;
 
+
     constructor(ctx: ServerCtx, opts: LlamaOptions = {}) {
         this.ctx = ctx;
         this.mode = ctx.config.service.manageViaSystemd && !!ctx.config.service.unitName ? 'systemd' : 'native';
@@ -162,7 +184,7 @@ export class LlamaService {
             const up = st.activeState === 'active' || st.activeState === 'activating';
             if (up) {
                 this.systemdRunning = true;
-                this.startJournalFollow();
+                this.startJournalFollow(journalSinceFor(st));
                 await this.applyIdentityFromLast(last, true);
                 this.ctx.broadcast();
                 console.log('[llama] adopted running systemd unit ' + this.unitName());
@@ -480,7 +502,7 @@ export class LlamaService {
                 if (!up) this.stopRequested = false;
                 return;
             }
-            if (up) await this.readoptAfterSystemdRestart();
+            if (up) await this.readoptAfterSystemdRestart(st);
             return;
         }
         if (up) return;
@@ -490,7 +512,7 @@ export class LlamaService {
     // Crash -> systemd restarted the unit: reset() cleared the launch
     // identity, restore it from the persisted last launch and go starting;
     // the journal follow catches loading/ready transitions.
-    private async readoptAfterSystemdRestart(): Promise<void> {
+    private async readoptAfterSystemdRestart(st: UnitStatus): Promise<void> {
         const last = await loadLastLaunch(this.lastLaunchDir());
         if (last) {
             this.ctx.state.currentModel = last.config.model || last.config.modelPath || '';
@@ -500,7 +522,7 @@ export class LlamaService {
         }
         this.systemdRunning = true;
         this.stopRequested = false;
-        this.startJournalFollow();
+        this.startJournalFollow(journalSinceFor(st));
         this.ctx.state.serverState = 'starting';
         this.ctx.state.loadStartTime = Date.now();
         this.ctx.broadcast('', 'llama-server restarted by systemd');

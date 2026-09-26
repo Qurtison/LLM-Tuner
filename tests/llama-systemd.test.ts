@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { writeUnitFile } from '../src/server/services/unit';
-import { writeLaunchScriptFile, loadLastLaunch, persistLastLaunch, probeLlama } from '../src/server/services/llama';
+import { writeLaunchScriptFile, loadLastLaunch, persistLastLaunch, probeLlama, journalSinceFor } from '../src/server/services/llama';
 
 let tmp: string;
 beforeAll(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tuner-')); });
@@ -62,4 +62,25 @@ test('probeLlama maps /health to ready/loading/down', async () => {
         ok.stop(true);
         loading.stop(true);
     }
+});
+
+// A dashboard restart adopts the running unit and follows its journal. The
+// follow MUST start at that unit's own process start: history catch-up replays
+// fatal lines from earlier runs (a 27B prints `failed to fit params` while
+// fitting layers), and the fatal-log detector SIGINTs the model when it sees
+// one -- which killed a healthy server a second after every start.
+test('journalSinceFor pins the replay window to the unit process start', () => {
+    const started = 'Sat 2026-09-26 18:10:57 CDT';
+    const since = journalSinceFor({ activeState: 'active', subState: 'running', since: started, pid: 1, restarts: 0, result: '' });
+    if (!since) throw new Error('expected a replay window');
+    // The window is the process start, NOT now: anything earlier (a previous
+    // run's fatal lines) stays out of the replay.
+    expect(new Date(since).getTime()).toBe(new Date(started).getTime());
+    expect(since).not.toBe(new Date().toISOString());
+});
+
+test('journalSinceFor falls back to catch-up rather than losing the logs', () => {
+    const base = { activeState: 'active', subState: 'running', pid: 1, restarts: 0, result: '' };
+    expect(journalSinceFor({ ...base, since: null })).toBeNull();
+    expect(journalSinceFor({ ...base, since: 'not a timestamp' })).toBeNull();
 });
