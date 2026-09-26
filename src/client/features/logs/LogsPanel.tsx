@@ -3,6 +3,8 @@
 // tail-and-follow shape as the old dashboard's journal pane, pointed at our
 // in-memory capture instead of journald. Auto-reconnects with a fresh tail so
 // a dashboard restart never leaves the pane dead.
+// Rendered by the app shell as a docked, always-visible full-width strip
+// directly under the GPU/launch strip — not a movable canvas panel.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEventSource } from '../../hooks/useEventSource';
 
@@ -35,8 +37,8 @@ export default function LogsPanel() {
 
     const btn = 'rounded bg-neutral-800 px-2 py-0.5 text-[10px] text-neutral-300 hover:bg-neutral-700 disabled:opacity-40';
     return (
-        <section className="rounded border border-neutral-800 bg-neutral-900" aria-label="Server logs">
-            <div className="flex items-center gap-2 px-3 py-2">
+        <section className="flex h-[260px] flex-col border-b border-neutral-800 bg-neutral-900" aria-label="Server logs">
+            <div className="flex items-center gap-2 px-4 py-2">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">llama-server logs</h3>
                 <span title={live ? 'Streaming live' : 'Reconnecting…'} className={'h-1.5 w-1.5 rounded-full ' + (live ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse')} />
                 <div className="ml-auto flex items-center gap-1">
@@ -44,7 +46,7 @@ export default function LogsPanel() {
                     <button type="button" onClick={() => setLines([])} disabled={lines.length === 0} className={btn}>Clear</button>
                 </div>
             </div>
-            <pre ref={boxRef} onScroll={onScroll} className="max-h-80 overflow-auto border-t border-neutral-800 bg-neutral-950/60 px-3 py-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap select-text text-neutral-400">
+            <pre ref={boxRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-auto border-t border-neutral-800 bg-neutral-950/60 px-4 py-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap select-text text-neutral-400">
                 {lines.length === 0 ? <span className="text-neutral-600">No log lines yet — start a launch.</span> : lines.join('\n')}
             </pre>
         </section>

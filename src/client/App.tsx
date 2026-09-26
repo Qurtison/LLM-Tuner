@@ -2,6 +2,8 @@
 // hidden) is per-user, persisted in localStorage. Users open the
 // "Panels" menu in the header to add/remove panels and drag the
 // "⋮⋮" handle to reorder. ⌘K opens the preset browser overlay.
+// The Logs strip is not a canvas panel: it is docked full-width directly
+// under the GPU/launch strip and is always visible.
 import { useCallback, useEffect, useState } from 'react';
 import { useSse } from './hooks/useSse';
 import { useTelemetryLatest } from './hooks/useTelemetry';
@@ -22,7 +24,6 @@ registerPanel('preset-dock', 'Preset Inspector', () => <PresetDock />);
 registerPanel('rpc-worker', 'RPC Worker', () => <RpcWorkerPanel />);
 registerPanel('overview', 'Overview', () => <OverviewPanel />);
 registerPanel('monitor', 'Monitor', () => <MonitorPanel />);
-registerPanel('logs', 'Logs', () => <LogsPanel />);
 registerPanel('live-requests', 'Live Requests', () => <LiveRequestsPanel />);
 registerPanel('history', 'History', () => <HistoryPanel />);
 registerPanel('bench', 'Bench', () => <BenchPanel />);
@@ -216,6 +217,7 @@ export default function App() {
             </header>
             <ActivityBar />
             <TopStrip />
+            <LogsPanel />
             <main className="px-2 py-4">
                 <PanelCanvas />
             </main>
