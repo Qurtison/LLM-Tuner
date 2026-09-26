@@ -21,7 +21,15 @@ const HF_ORIGIN = 'https://huggingface.co';
 // A 10 GB transfer must not sit on a dead connection forever; the same timer
 // guards headers and body, and aborts the same controller cancel() uses.
 const LIST_TIMEOUT_MS = 15_000;
-const DOWNLOAD_TIMEOUT_MS = 60_000;
+// Inactivity limit: how long a transfer may go WITHOUT a byte before it is
+// treated as dead. This must never be a cap on total transfer time -- a 30 GB
+// quant on a slow link is legitimately quiet-free for many minutes.
+const STALL_TIMEOUT_MS = 45_000;
+// How often the watchdog checks for inactivity.
+const STALL_POLL_MS = 1_000;
+// Transient network errors are retried in place, resuming from the .part.
+const MAX_ATTEMPTS = 4;
+const RETRY_BASE_MS = 1_500;
 // How often progress is pushed to subscribers. 250ms keeps the bar smooth
 // without a flood of SSE frames on a 10 GB file.
 const EMIT_INTERVAL_MS = 250;
@@ -41,9 +49,16 @@ export class HfDownloadService {
     private readonly listeners = new Set<() => void>();
     private counter = 0;
 
-    constructor(modelsDir: string, origin: string = HF_ORIGIN) {
+    private readonly timings: { stallMs: number; maxAttempts: number; retryBaseMs: number };
+
+    constructor(modelsDir: string, origin: string = HF_ORIGIN, timings: Partial<{ stallMs: number; maxAttempts: number; retryBaseMs: number }> = {}) {
         this.modelsDir = modelsDir;
         this.origin = origin.replace(/\/+$/, '');
+        this.timings = {
+            stallMs: timings.stallMs ?? STALL_TIMEOUT_MS,
+            maxAttempts: timings.maxAttempts ?? MAX_ATTEMPTS,
+            retryBaseMs: timings.retryBaseMs ?? RETRY_BASE_MS,
+        };
     }
 
     subscribe(listener: () => void): () => void {
@@ -164,10 +179,46 @@ export class HfDownloadService {
         const queue = files.filter(file => !file.present);
         if (queue.length === 0) throw new Error('All selected files are already downloaded');
 
+        this.assertIdle();
+        return this.enqueue(repo, queue);
+    }
+
+    // PAUSE / RESUME
+    // cancel() is the pause: it aborts the request but leaves the .part, so
+    // nothing already fetched is thrown away. resume() picks the transfer up
+    // again, re-checking the disk first so files that finished while the task
+    // was paused are not fetched twice.
+    async resume(id: string): Promise<HfDownloadTask> {
+        const previous = this.tasks.get(id);
+        if (!previous) throw new Error('Unknown download');
+        if (previous.status === 'running' || previous.status === 'queued') throw new Error('Download is already running');
+        this.assertIdle();
+
+        const queue: HfRepoFile[] = [];
+        for (const file of previous.files) {
+            const onDisk = await this.sizeOf(this.absolute(previous.folder, file.name));
+            if (onDisk === file.size) continue; // finished before the pause
+            queue.push({ ...file, present: false });
+        }
+        if (queue.length === 0) {
+            previous.status = 'done';
+            previous.error = '';
+            previous.received = 0;
+            previous.total = 0;
+            previous.bytesPerSecond = 0;
+            this.emit();
+            return { ...previous };
+        }
+        return this.enqueue(previous.repo, queue);
+    }
+
+    private assertIdle(): void {
         if ([...this.tasks.values()].some(task => task.status === 'running' || task.status === 'queued')) {
             throw new Error('A download is already in progress');
         }
+    }
 
+    private enqueue(repo: string, queue: HfRepoFile[]): HfDownloadTask {
         const task: HfDownloadTask = {
             id: `dl${Date.now().toString(36)}${(this.counter++).toString(36)}`,
             repo,
@@ -244,12 +295,27 @@ export class HfDownloadService {
             task.total = file.size;
             task.bytesPerSecond = 0;
             this.emit();
-            try {
-                await this.fetchOne(task, file);
-            } catch (err) {
-                if (isCancelled(task) || isAbort(err)) return;
-                this.fail(task, `${file.name}: ${messageOf(err)}`);
-                return;
+            // Transient failures (a dropped connection, a stalled CDN) are
+            // retried in place. Each attempt re-stats the .part, so a retry
+            // resumes from the last good byte instead of starting over.
+            for (let attempt = 1; ; attempt++) {
+                try {
+                    await this.fetchOne(task, file);
+                    break;
+                } catch (err) {
+                    if (isCancelled(task)) return;
+                    if (isPermanent(err) || attempt >= this.timings.maxAttempts) {
+                        const reason = messageOf(err);
+                        this.fail(task, isStall(err)
+                            ? `${file.name}: stalled (no data for ${Math.round(this.timings.stallMs / 1000)}s) after ${attempt} attempt${attempt === 1 ? '' : 's'}. Resume to continue.`
+                            : `${file.name}: ${reason}`);
+                        return;
+                    }
+                    task.error = `${file.name}: ${messageOf(err)} -- retrying (${attempt}/${this.timings.maxAttempts - 1})`;
+                    this.emit();
+                    await sleep(this.timings.retryBaseMs * attempt);
+                    if (isCancelled(task)) return;
+                }
             }
             if (isCancelled(task)) return;
             // Count the file as done only after the rename, so taskTotal
@@ -290,19 +356,31 @@ export class HfDownloadService {
         // body: dropping it after the response arrived left cancel() with
         // nothing to abort while a multi-GB body was still streaming.
         const controller = new AbortController();
+        let stalled = false;
         this.inFlight.set(task.id, controller);
-        // A stalled CDN connection must not hang the task forever; the timer
-        // aborts the same controller, so the .part survives for a resume.
-        const stall = setTimeout(() => controller.abort(), DOWNLOAD_TIMEOUT_MS);
+        // Stall watchdog: an INACTIVITY timer, reset by every chunk received.
+        // A one-shot deadline here capped the whole transfer, so every file
+        // over a few GB aborted itself partway through.
+        let lastByteAt = Date.now();
+        const watchdog = setInterval(() => {
+            if (Date.now() - lastByteAt >= this.timings.stallMs) {
+                stalled = true;
+                controller.abort();
+            }
+        }, STALL_POLL_MS);
         try {
-            return await this.stream(task, file, controller, existing, partPath, finalPath);
+            return await this.stream(task, file, controller, existing, partPath, finalPath, () => { lastByteAt = Date.now(); });
+        } catch (err) {
+            // Tag a watchdog abort so the caller can say "stalled" instead of
+            // the opaque "The operation was aborted."
+            throw stalled ? new StallError(`${Math.round(this.timings.stallMs / 1000)}s without data`) : err;
         } finally {
-            clearTimeout(stall);
+            clearInterval(watchdog);
             this.inFlight.delete(task.id);
         }
     }
 
-    private async stream(task: HfDownloadTask, file: HfRepoFile, controller: AbortController, existing: number, partPath: string, finalPath: string): Promise<void> {
+    private async stream(task: HfDownloadTask, file: HfRepoFile, controller: AbortController, existing: number, partPath: string, finalPath: string, markByte: () => void): Promise<void> {
         const headers: Record<string, string> = {};
         if (existing > 0) headers.Range = 'bytes=' + existing + '-';
         const response = await fetch(
@@ -316,7 +394,13 @@ export class HfDownloadService {
             throw new Error('partial file was stale, retry to start over');
         }
         if (!response.ok && response.status !== 206) {
-            throw new Error(`Hugging Face returned ${response.status}`);
+            const detail = `Hugging Face returned ${response.status}`;
+            // 4xx (other than the 416 handled above) will not change on a
+            // retry -- a missing or gated file fails the same way every time,
+            // so say so instead of burning the retry budget.
+            throw response.status >= 400 && response.status < 500
+                ? new PermanentError(detail + (response.status === 403 ? ' (repo is gated or private)' : ''))
+                : new Error(detail);
         }
         if (!response.body) throw new Error('Hugging Face sent an empty body');
 
@@ -355,6 +439,7 @@ export class HfDownloadService {
                     return;
                 }
                 received += value.byteLength;
+                markByte();
                 if (writeError) throw writeError;
                 if (!out.write(value)) {
                     // Backpressure: wait for the fd to drain before reading more.
@@ -395,8 +480,22 @@ function isCancelled(task: HfDownloadTask): boolean {
     return task.status === 'cancelled';
 }
 
-function isAbort(err: unknown): boolean {
-    return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+/** Thrown by the inactivity watchdog; retried, then reported as a stall. */
+class StallError extends Error {}
+
+function isStall(err: unknown): boolean {
+    return err instanceof StallError;
+}
+
+/** 4xx-style failures that will never succeed on a retry. */
+class PermanentError extends Error {}
+
+function isPermanent(err: unknown): boolean {
+    return err instanceof PermanentError;
+}
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // --- GGUF NAME PARSING ---

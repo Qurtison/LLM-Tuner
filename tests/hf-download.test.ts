@@ -74,18 +74,23 @@ afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
 });
 
-function service(): HfDownloadService {
-    return new HfDownloadService(tempDir, origin);
+function service(timings?: Partial<{ stallMs: number; maxAttempts: number; retryBaseMs: number }>): HfDownloadService {
+    return new HfDownloadService(tempDir, origin, timings);
 }
 
-/** Waits for a task to leave the running/queued states. */
-async function settled(svc: HfDownloadService, id: string) {
-    for (let i = 0; i < 200; i++) {
+/**
+ * Waits for a task to leave the running/queued states. `budgetMs` is the
+ * wall-clock allowance; the stall tests pass a generous one because a task
+ * that is retrying stays in a non-settled state longer.
+ */
+async function settled(svc: HfDownloadService, id: string, budgetMs = 5_000) {
+    const deadline = Date.now() + budgetMs;
+    while (Date.now() < deadline) {
         const task = svc.snapshot().find(t => t.id === id);
         if (task && task.status !== 'running' && task.status !== 'queued') return task;
         await new Promise(r => setTimeout(r, 25));
     }
-    throw new Error('task did not settle');
+    throw new Error(`task ${id} did not settle within ${budgetMs}ms`);
 }
 
 describe('parseGgufName', () => {
@@ -270,5 +275,187 @@ describe('transfer', () => {
         // The stream is a progress signal, so it must actually have fired.
         expect(seen.length).toBeGreaterThan(0);
         expect(Math.max(...seen)).toBeGreaterThan(0);
+    });
+});
+
+// --- STALL HANDLING ---
+// The regression these cover: the old code aborted on a fixed total-duration
+// timer, so any file slower than that cap killed itself partway through. The
+// watchdog must key off INACTIVITY, not elapsed time.
+describe('stalls', () => {
+    type Mode = 'normal' | 'slow' | 'stall-always' | 'stall-once' | 'gated';
+    let flaky: ReturnType<typeof Bun.serve>;
+    let flakyOrigin: string;
+    let mode: Mode = 'normal';
+    let stallBytes: number;
+    let requests: number;
+
+    const CHUNK = 512;
+
+    beforeAll(() => {
+        flaky = Bun.serve({
+            port: 0,
+            async fetch(req) {
+                const url = new URL(req.url);
+                if (url.pathname.includes('/tree/main')) {
+                    return Response.json([{ type: 'file', path: 'model-Q4_K_M.gguf', size: PAYLOAD.byteLength }]);
+                }
+                if (!url.pathname.includes('/resolve/main/')) return new Response('nope', { status: 404 });
+                // Count the attempt before answering, so the "one request, no
+                // retries" assertion below actually sees the 403.
+                requests++;
+                if (mode === 'gated') return new Response('private', { status: 403 });
+                const stallThis = mode === 'stall-always' || (mode === 'stall-once' && requests === 1);
+                // Either serve the whole body, or stop dead after stallBytes:
+                // an open response that never sends another byte, which is
+                // exactly what a wedged CDN connection looks like.
+                if (stallThis) {
+                    const head = PAYLOAD.subarray(0, stallBytes);
+                    return new Response(
+                        new ReadableStream({
+                            start(controller) {
+                                controller.enqueue(new Uint8Array(head));
+                                // Never call close(): the stream just goes quiet.
+                            },
+                            cancel() { },
+                        }),
+                        { status: 200, headers: { 'content-length': String(PAYLOAD.byteLength) } },
+                    );
+                }
+                // 'slow' keeps sending but slower than the stall window is wide;
+                // total elapsed time still exceeds it, which must be fine.
+                const body = new ReadableStream({
+                    async start(controller) {
+                        for (let off = 0; off < PAYLOAD.byteLength; off += CHUNK) {
+                            controller.enqueue(new Uint8Array(PAYLOAD.subarray(off, off + CHUNK)));
+                            if (mode === 'slow') await new Promise(r => setTimeout(r, 40));
+                        }
+                        controller.close();
+                    },
+                });
+                return new Response(body, { status: 200, headers: { 'content-length': String(PAYLOAD.byteLength) } });
+            },
+        });
+        flakyOrigin = `http://localhost:${flaky.port}`;
+    });
+
+    afterAll(() => { flaky?.stop(true); });
+
+    beforeEach(() => {
+        mode = 'normal';
+        stallBytes = CHUNK * 2;
+        requests = 0;
+    });
+
+    function flakyService(timings: Partial<{ stallMs: number; maxAttempts: number; retryBaseMs: number }>) {
+        return new HfDownloadService(tempDir, flakyOrigin, timings);
+    }
+
+    async function run(svc: HfDownloadService, timings: Partial<{ stallMs: number; maxAttempts: number; retryBaseMs: number }>) {
+        svc.rememberListing(await svc.listRepo(REPO));
+        const task = svc.start(REPO, ['model-Q4_K_M.gguf']);
+        return await settled(svc, task.id, timings.stallMs! * timings.maxAttempts! + 5_000);
+    }
+
+    test('a slow but steady transfer is NOT killed for taking a long time', async () => {
+        // 4096 bytes in 512-byte chunks at 40ms = ~320ms total, while the stall
+        // window is only 150ms. Total time exceeds the window; the gap between
+        // bytes never does, so the transfer must finish.
+        mode = 'slow';
+        const timings = { stallMs: 150, maxAttempts: 1, retryBaseMs: 10 };
+        const svc = flakyService(timings);
+        const done = await run(svc, timings);
+        expect(done.status).toBe('done');
+        expect(await fs.readFile(path.join(tempDir, FOLDER, 'model-Q4_K_M.gguf'))).toEqual(PAYLOAD);
+    });
+
+    test('a quiet connection is retried and can recover on its own', async () => {
+        // Stalls on the first request only; the retry resumes and completes.
+        mode = 'stall-once';
+        const timings = { stallMs: 150, maxAttempts: 3, retryBaseMs: 10 };
+        const svc = flakyService(timings);
+        const done = await run(svc, timings);
+        expect(done.status).toBe('done');
+        expect(requests).toBeGreaterThan(1);
+        expect(await fs.readFile(path.join(tempDir, FOLDER, 'model-Q4_K_M.gguf'))).toEqual(PAYLOAD);
+    });
+
+    test('a permanent stall gives up with a message that says how to recover', async () => {
+        mode = 'stall-always';
+        const timings = { stallMs: 120, maxAttempts: 2, retryBaseMs: 10 };
+        const svc = flakyService(timings);
+        const done = await run(svc, timings);
+        expect(done.status).toBe('failed');
+        expect(done.error).toMatch(/stalled/);
+        // The message has to tell the user there is a way out, not just that
+        // it stopped.
+        expect(done.error).toMatch(/Resume/i);
+        // The bytes already received are kept for the resume.
+        expect(stallBytes).toBeGreaterThan(0);
+    });
+
+    test('a gated repo fails immediately instead of burning the retries', async () => {
+        mode = 'gated';
+        const timings = { stallMs: 1000, maxAttempts: 4, retryBaseMs: 10 };
+        const svc = flakyService(timings);
+        const done = await run(svc, timings);
+        expect(done.status).toBe('failed');
+        expect(done.error).toMatch(/403/);
+        expect(done.error).toMatch(/gated or private/);
+        // One request: a 4xx is the same answer every time.
+        expect(requests).toBe(1);
+    });
+
+    test('resume picks a stalled task up from its .part', async () => {
+        mode = 'stall-always';
+        const stallTimings = { stallMs: 120, maxAttempts: 1, retryBaseMs: 10 };
+        const svc = flakyService(stallTimings);
+        const failed = await run(svc, stallTimings);
+        expect(failed.status).toBe('failed');
+
+        // The network comes back; the user hits Resume.
+        mode = 'normal';
+        const partPath = path.join(tempDir, FOLDER, 'model-Q4_K_M.gguf.part');
+        expect(await fs.readFile(partPath)).toEqual(PAYLOAD.subarray(0, stallBytes));
+
+        const resumed = await svc.resume(failed.id);
+        const done = await settled(svc, resumed.id, 5_000);
+
+        expect(done.status).toBe('done');
+        // Resumed, not restarted: the first stallBytes came from the .part and
+        // only the remainder was refetched.
+        expect(await fs.readFile(path.join(tempDir, FOLDER, 'model-Q4_K_M.gguf'))).toEqual(PAYLOAD);
+    });
+
+    test('pause then resume completes the file', async () => {
+        mode = 'slow';
+        const timings = { stallMs: 5_000, maxAttempts: 1, retryBaseMs: 10 };
+        const svc = flakyService(timings);
+        svc.rememberListing(await svc.listRepo(REPO));
+        const task = svc.start(REPO, ['model-Q4_K_M.gguf']);
+        // Let some bytes land, then pause.
+        await new Promise(r => setTimeout(r, 120));
+        expect(svc.cancel(task.id)).toBe(true);
+        const paused = await settled(svc, task.id, 5_000);
+        expect(paused.status).toBe('cancelled');
+
+        const resumed = await svc.resume(task.id);
+        const done = await settled(svc, resumed.id, 10_000);
+        expect(done.status).toBe('done');
+        expect(await fs.readFile(path.join(tempDir, FOLDER, 'model-Q4_K_M.gguf'))).toEqual(PAYLOAD);
+    });
+
+    test('resuming a finished task is a no-op that reports done', async () => {
+        const svc = service();
+        svc.rememberListing(await svc.listRepo(REPO));
+        const task = svc.start(REPO, ['model-Q4_K_M.gguf']);
+        const done = await settled(svc, task.id);
+        expect(done.status).toBe('done');
+        const again = await svc.resume(task.id);
+        expect(again.status).toBe('done');
+    });
+
+    test('resuming an unknown task is refused', async () => {
+        await expect(service().resume('nope')).rejects.toThrow('Unknown download');
     });
 });

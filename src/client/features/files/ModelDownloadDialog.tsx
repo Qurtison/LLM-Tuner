@@ -129,7 +129,10 @@ export default function ModelDownloadDialog({ onClose, onDownloaded }: Props) {
 
     const groups = useMemo(() => (listing ? groupFiles(listing.files) : []), [listing]);
     const active = tasks.find(task => task.status === 'running' || task.status === 'queued') || null;
-    const history = tasks.filter(task => task.status === 'done' || task.status === 'failed' || task.status === 'cancelled').slice(-4).reverse();
+    // Paused and failed tasks stay resumable, so the row is kept until it is
+    // either resumed or aged out of the service's history.
+    const resumable = tasks.filter(task => task.status === 'failed' || task.status === 'cancelled');
+    const history = tasks.filter(task => task.status === 'done' || resumable.includes(task)).slice(-4).reverse();
 
     const repo = parseRepo(term);
     const chosen = useMemo(
@@ -179,6 +182,17 @@ export default function ModelDownloadDialog({ onClose, onDownloaded }: Props) {
             });
         } catch (cause) {
             setError(getErrorMessage(cause, 'Could not start the download.'));
+        }
+    };
+
+    // Pause: the server aborts the request but keeps the .part, so Resume
+    // continues from the last good byte instead of refetching.
+    const resume = async (id: string) => {
+        setError('');
+        try {
+            await api('/api/hf/download/resume', { method: 'POST', body: JSON.stringify({ id }) });
+        } catch (cause) {
+            setError(getErrorMessage(cause, 'Could not resume the download.'));
         }
     };
 
@@ -278,8 +292,8 @@ export default function ModelDownloadDialog({ onClose, onDownloaded }: Props) {
                                         : 'Download ' + (chosen.length ? chosen.length + ' selected' : '') + (chosenSize ? ' · ' + formatBytes(chosenSize) : '')}
                                 </button>
                                 {active && (
-                                    <button type="button" onClick={() => void cancel(active.id)} className="rounded border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300 hover:bg-red-900/50">
-                                        Cancel
+                                    <button type="button" onClick={() => void cancel(active.id)} className="rounded border border-amber-900/60 bg-amber-950/40 px-3 py-2 text-sm text-amber-300 hover:bg-amber-900/50">
+                                        Pause
                                     </button>
                                 )}
                             </div>
@@ -295,9 +309,18 @@ export default function ModelDownloadDialog({ onClose, onDownloaded }: Props) {
                                     <span className="truncate font-mono">{task.repo}</span>
                                     <span className="ml-auto shrink-0">
                                         {task.status === 'done' && <span className="text-emerald-400">done</span>}
-                                        {task.status === 'failed' && <span className="text-red-400" title={task.error}>failed: {task.error}</span>}
-                                        {task.status === 'cancelled' && <span className="text-neutral-500">cancelled</span>}
+                                        {task.status === 'failed' && <span className="max-w-64 truncate text-red-400" title={task.error}>{task.error}</span>}
+                                        {task.status === 'cancelled' && <span className="text-amber-400">paused</span>}
                                     </span>
+                                    {resumable.includes(task) && !active && (
+                                        <button
+                                            type="button"
+                                            onClick={() => void resume(task.id)}
+                                            className="shrink-0 rounded border border-indigo-700 bg-indigo-950/40 px-2 py-0.5 text-[10px] text-indigo-300 hover:bg-indigo-900/40"
+                                        >
+                                            Resume
+                                        </button>
+                                    )}
                                 </li>
                             ))}
                         </ul>
@@ -341,6 +364,11 @@ function Progress({ task }: { task: HfDownloadTask }) {
                 {task.files.length > 1 && <span>· file {task.fileIndex + 1} of {task.files.length}</span>}
                 <span className="ml-auto">ETA {formatEta(eta)}</span>
             </div>
+            {/* A dropped connection is retried in place, so the task carries a
+                note while it works through them instead of looking frozen. */}
+            {task.error && (
+                <p className="mt-1 text-amber-400" role="status">{task.error}</p>
+            )}
         </div>
     );
 }

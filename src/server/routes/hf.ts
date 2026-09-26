@@ -67,6 +67,17 @@ export async function handle(ctx: RouteCtx, req: Request, url: URL): Promise<Res
         const body = await jsonBodyOr400(ctx, req);
         return ctx.json({ ok: ctx.hf.cancel(String(body.id || '')) });
     }
+    // POST /api/hf/download/resume { id } -> picks a paused or failed task up
+    // again from its .part. The file list comes from the task itself, so this
+    // works without a fresh repo lookup (and after a listing cache miss).
+    if (route === '/api/hf/download/resume' && method === 'POST') {
+        const body = await jsonBodyOr400(ctx, req);
+        try {
+            return ctx.json({ ok: true, task: await ctx.hf.resume(String(body.id || '')) });
+        } catch (err) {
+            return ctx.json({ error: err instanceof Error ? err.message : 'Could not resume the download' }, 400);
+        }
+    }
     // GET /api/hf/download/stream -> SSE task snapshots. Every frame carries
     // the whole task list; the modal renders from it and never polls.
     if (route === '/api/hf/download/stream' && method === 'GET') {
