@@ -147,6 +147,19 @@ describe('server4 route smoke', () => {
         expect(preview.response.status).toBe(200);
         expect(preview.body.command).toContain('fake-llama-server');
         expect(preview.body.command).toContain('--port');
+        // Single-model mode has no preset to hand back.
+        expect(preview.body.ini).toBeUndefined();
+        const routerPreview = await post('/api/preview-command', {
+            ...body,
+            router: { enabled: true, maxModels: 1, models: [{ modelPath: body.modelPath, loadOnStartup: true }] },
+        });
+        expect(routerPreview.response.status).toBe(200);
+        expect(routerPreview.body.command).toContain('--models-dir');
+        expect(routerPreview.body.command).toContain('--models-preset');
+        expect(routerPreview.body.command).not.toContain('-m ');
+        // The per-model knobs move into the INI the command line points at.
+        expect(routerPreview.body.ini).toContain('ctx-size = 4096');
+        expect(routerPreview.body.ini).toContain('load-on-startup = true');
         expect((await post('/api/start', body)).body).toEqual({ status: 'launching' });
         const duplicate = await post('/api/start', body);
         expect(duplicate.response.status).toBe(400);

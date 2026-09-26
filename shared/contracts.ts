@@ -50,7 +50,42 @@ export type LaunchConfig = {
     // id (shared/llama-params.ts). Rendered to CLI flags by the launch
     // resolver; dedicated fields above always win for the same param.
     paramOverrides?: Record<string, unknown>;
+    // Router mode: launch llama-server with --models-dir and no -m, so the
+    // server discovers GGUF files and loads them on demand. Everything a
+    // single model needs moves into a generated preset INI (--models-preset);
+    // see src/server/lib/router.ts. Omitted or disabled = single-model mode.
+    router?: RouterConfig;
 };
+// One model the router should know about beyond plain discovery. A section is
+// only emitted when it carries something the shared `[*]` block cannot:
+// `loadOnStartup` (no global equivalent) or a value that differs.
+export interface RouterModelConfig {
+    // A GGUF file, or a directory under modelsDir holding one (multi-shard
+    // models and mmproj files live that way). The router matches the entry by
+    // its id, so a file inside a model directory resolves to that directory.
+    modelPath: string;
+    // Load as soon as the router starts, so the dashboard comes up serving
+    // this model with no client interaction.
+    loadOnStartup?: boolean;
+    // Per-model context size; overrides the shared block.
+    ctx?: number;
+    // Per-model param overrides, same bag and param ids as LaunchConfig.
+    paramOverrides?: Record<string, unknown>;
+}
+
+export interface RouterConfig {
+    enabled: boolean;
+    // Defaults to paths.modelDirectories[0] from the server config.
+    modelsDir?: string;
+    // --models-max: how many models stay resident at once. 0 = unlimited.
+    // Left unset, llama-server defaults to 4.
+    maxModels?: number;
+    // false adds --no-models-autoload, so a request naming an unloaded model
+    // fails instead of loading it. Unset = autoload (the llama-server default).
+    autoload?: boolean;
+    models?: RouterModelConfig[];
+}
+
 
 export interface SseStatePayload {
     state: ServerState;
@@ -298,6 +333,10 @@ export interface DevicesResponse {
 
 export interface PreviewCommandResponse {
     command: string;
+    // Router mode only: the generated model preset the command line points at
+    // via --models-preset, holding every per-model knob. Absent in
+    // single-model mode.
+    ini?: string;
     error?: string;
 }
 

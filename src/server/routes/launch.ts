@@ -11,11 +11,15 @@ export async function handle(ctx: RouteCtx, req: Request, url: URL): Promise<Res
     if (route === '/api/preview-command' && method === 'POST') {
         const body = await jsonBodyOr400(ctx, req);
         try {
-            const { command, args } = launchLib.resolveLaunchCommand(body, ctx.config.llama.builds, {
+            const { command, args, ini } = launchLib.resolveLaunchCommand(body, ctx.config.llama.builds, {
                 rpcPort: ctx.config.llama.rpcPort,
                 defaultPort: ctx.config.llama.defaultPort,
+                modelsDir: ctx.config.paths.modelDirectories[0] || '',
+                appRoot: ctx.appRoot,
             });
-            return ctx.json({ command: formatCommand(command, args) });
+            // Router mode keeps its per-model tuning in a generated INI, so the
+            // command line alone would hide every knob the launch applies.
+            return ctx.json({ command: formatCommand(command, args), ini });
         } catch (err) {
             return ctx.json({ command: '', error: (err as Error).message });
         }

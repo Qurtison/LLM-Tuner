@@ -54,6 +54,13 @@ export function writeLaunchScriptFile(scriptPath: string, command: string, args:
     chmodSync(scriptPath, 0o755);
 }
 
+// The router's model preset. Written on every router launch, next to
+// launch.sh, because the command line references it by absolute path -- a
+// stale file would silently apply the previous launch's tuning instead.
+export function writeRouterIniFile(iniPath: string, ini: string): void {
+    mkdirSync(path.dirname(iniPath), { recursive: true });
+    writeFileSync(iniPath, ini);
+}
 export type LlamaProbe = 'ready' | 'loading' | 'down';
 
 // llama-server /health: {"status":"ok"} once the model is loaded,
@@ -95,6 +102,9 @@ type Launch = {
     config: LaunchConfig;
 };
 
+// A resolved launch plus, in router mode, the preset INI the command line
+// points at. The caller must write it before spawning.
+export type ResolvedLaunch = Launch & { ini?: string };
 export interface LiveProgress {
     prefillTps?: number;
     prefillProgress?: number;
@@ -248,7 +258,7 @@ export class LlamaService {
     // Two-phase start so the /api/start route can preserve the status split:
     // validation/resolve failure -> 400, spawn failure -> 500.
     // resolveLaunch throws on an invalid config without touching state.
-    resolveLaunch(config: LaunchConfig): { command: string; args: string[]; config: LaunchConfig } {
+    resolveLaunch(config: LaunchConfig): ResolvedLaunch {
         if (this.proc) throw new Error('Running');
         return this.resolve(config);
     }
@@ -259,6 +269,11 @@ export class LlamaService {
     launch(config: LaunchConfig): void {
         const launchConfig = this.resolveLaunch(config);
         const { command, args } = launchConfig;
+        // Router mode: the model preset must exist on disk before the process
+        // reads it, in native and systemd mode alike.
+        if (launchConfig.ini !== undefined) {
+            writeRouterIniFile(launch.routerIniPathFor(this.appRoot()), launchConfig.ini);
+        }
         this.setLaunchState(launchConfig.config, command, args);
         if (this.mode !== 'systemd') {
             // Native mode has no unit file to re-read on boot; persist here so
@@ -328,7 +343,7 @@ export class LlamaService {
         }, this.ctx.config.processes.stopGraceMs).unref();
     }
 
-    private resolve(config: LaunchConfig): Launch {
+    private resolve(config: LaunchConfig): ResolvedLaunch {
         if (config.rawCommand && config.rawCommand.trim().length > 0) {
             const tokens = tokenize.tokenizeCommand(config.rawCommand.trim());
             const command = tokens[0];
@@ -346,6 +361,8 @@ export class LlamaService {
         const resolved = launch.resolveLaunchCommand(config, this.ctx.config.llama.builds, {
             rpcPort: this.ctx.config.llama.rpcPort,
             defaultPort: this.ctx.config.llama.defaultPort,
+            modelsDir: this.ctx.config.paths.modelDirectories[0] || '',
+            appRoot: this.appRoot(),
         });
         return { ...resolved, config };
     }

@@ -60,6 +60,9 @@ const LAUNCH_FIELD_TO_PARAM: Record<keyof LaunchConfig, ParamId | undefined> = {
     transport: undefined,
     label: undefined,
     paramOverrides: undefined,
+    // Structured, not a flat knob: the router block is edited as a unit (see
+    // RouterFields) and has no single registry param behind it.
+    router: undefined,
 };
 
 export interface OverrideEntry {

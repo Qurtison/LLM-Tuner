@@ -235,7 +235,7 @@ Conditional behavior is stated with its condition.
 - **Query params:** none
 - **Request body JSON shape:** launch config object (same shape as `/api/start`'s config body — see `buildLlamaArgs` for full field list at lines 390–504)
 - **Validation applied:** JSON parse error → 400 `{ error: "Invalid JSON" }` (line 1855)
-- **Response shape:** `application/json`: On success: `{ command: string }` (line 1859). On error: `{ command: '', error: string }` (line 1862)
+- **Response shape:** `application/json`: On success: `{ command: string, ini?: string }` (line 1859). `ini` appears only in router mode (launch config `router.enabled: true`) and holds the generated model preset that the command line passes via `--models-preset`; in that mode the per-model knobs live there rather than on the command line. On error: `{ command: '', error: string }` (line 1862)
 - **Status codes:** 200 always
 - **Side effects:** Calls `resolveLaunchCommand(body)` (lines 522–546); does NOT spawn anything
 
@@ -678,3 +678,80 @@ The behavior tests (which boot the real server) are the guard.
   (used after a build). A successful run clears the cache, since the tree moved.
   Unconfigured upgrade: `configured: false`, `behind: 0`, and the stream
   still returns 400.
+
+## Router mode (2026-09)
+
+`llama-server` runs in one of two modes, and clients that manage models
+themselves (pi's `/llama` and `/model`, for one) only work against the second.
+
+- **Single-model** (default, unchanged): `llama-server -m <file> ...`. One
+  model, every knob on the command line.
+- **Router**: `llama-server --models-dir <dir> --models-preset <ini> ...`
+  with **no `-m`**. The server discovers GGUF files, keeps them addressable by
+  id, and loads/unloads them on demand. A client that sees `-m` — or a build
+  without `--models-dir` — reports "not in router mode" and refuses to manage
+  models.
+
+Router mode is opt-in per launch config: `router: { enabled: true, ... }`
+(`RouterConfig` in shared/contracts.ts). Absent or `enabled: false` means the
+single-model path, byte for byte as before.
+
+### Command line
+
+```text
+--models-dir <modelsDir> --models-preset <appRoot>/generated/router.ini
+--host 0.0.0.0 --port <port> --metrics --models-max N [--no-models-autoload]
+```
+
+- `modelsDir` defaults to `paths.modelDirectories[0]`; `router.modelsDir`
+  overrides it. With neither, the launch **fails validation** (400) rather than
+  starting a router with nowhere to look.
+- `host`, `port`, `model`, `alias`, `api-key` and `mmproj` are set by the router
+  per child instance, so they are never written into the preset.
+- `-m` / `--model` in `argString` is **dropped** in router mode: passing it
+  would silently downgrade the launch back to single-model.
+- `--models-max` is always emitted, defaulting to **1** rather than
+  llama-server's 4: a models directory holds a whole library (several 27Bs on
+  the reference host) and the router keeps loaded models warm, so 4 resident
+  models is an OOM that kills a working server. `router.maxModels` overrides
+  it; `0` still means unlimited.
+- `modelPath`, `ctx` and `ngl` are no longer required in router mode (there is
+  no single model to point at, and both may live in the preset instead). A bad
+  `port` is still rejected.
+
+### Model preset (`generated/router.ini`)
+
+Written on every router launch, before the spawn, at
+`<appRoot>/generated/router.ini` — beside `launch.sh`, which the systemd unit
+runs, and referenced by absolute path. Written each time so a stale file cannot
+apply the previous launch's tuning. `/api/preview-command` returns the same
+text as `ini`.
+
+```ini
+version = 1
+
+[*]
+<one key per per-model knob, shared by every discovered model>
+
+[<model id>]
+load-on-startup = true
+<only the values that differ from [*]>
+```
+
+- **Keys are argument names without dashes**, derived from the param registry
+  (`shared/llama-params.ts`, generated from `llama-server --help`): the key is
+  the param's first long flag minus `--`, so `-ngl` → `gpu-layers`,
+  `no_reasoning_preserve` → `reasoning-preserve`, `cache_type_k_draft` →
+  `spec-draft-type-k`.
+- **One unrecognized key aborts the entire router** before it serves anything
+  (`option '<key>' not recognized in preset '*'`), so keys are never spelled by
+  hand; unknown flags and router-controlled params are dropped instead.
+- **Model ids** are the path relative to `modelsDir`, minus any `.gguf`
+  suffix, collapsed to its first segment: `models/llama-3.2-1b-Q4_K_M.gguf` →
+  `llama-3.2-1b-Q4_K_M`, and `models/gemma-3-4b-it-Q8_0/gemma-3-4b-it-Q8_0.gguf`
+  → `gemma-3-4b-it-Q8_0`. Collapsing matters: naming a section after the `.gguf`
+  *inside* a model directory makes the router list those weights a second time.
+- A model whose path is outside `modelsDir` gets `model = <path>` in its
+  section, since no discovered model matches the name.
+- A model whose settings all match `[*]` and that has no `load-on-startup` gets
+  no section at all.

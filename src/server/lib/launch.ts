@@ -11,8 +11,27 @@
  */
 import { tokenizeCommand } from './tokenize';
 import { PARAM_BY_ID, type ParamDef } from '../../../shared/llama-params';
-import type { BuildEntry, LaunchConfig } from '../../../shared/contracts';
+import type { BuildEntry, LaunchConfig, RouterModelConfig } from '../../../shared/contracts';
+import * as path from 'node:path';
+import {
+    argsToIniEntries,
+    buildRouterArgs,
+    buildRouterIni,
+    buildRouterSections,
+    isRouterMode,
+    resolveModelsDir,
+} from './router';
 
+// The router's per-model list, if the config carries one. Read through the
+// untrusted-input type: a preset is user JSON, so `models` arrives as whatever
+// was on disk. Anything that is not an object with a usable modelPath is
+// dropped by buildRouterSections.
+function routerModels(config: LaunchInput): RouterModelConfig[] {
+    const router = config.router as { models?: unknown } | undefined;
+    if (!router || !Array.isArray(router.models)) return [];
+    return router.models.filter((m): m is RouterModelConfig =>
+        !!m && typeof m === 'object' && typeof (m as RouterModelConfig).modelPath === 'string');
+}
 // The resolver treats the launch config as untrusted input: every field is
 // coerced (toFiniteNumber/toNonEmptyString) before use. Keys are typed
 // `unknown` (not LaunchConfig's own types) because user JSON and tests feed
@@ -151,32 +170,48 @@ function dedupeFlags(args: string[]): string[] {
     return out;
 }
 
-export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, defaultPort = 8080 }: { mapModelPath: (p: string) => string; deviceArgs: string[]; defaultPort?: number }): string[] {
+export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, defaultPort = 8080, router = false }: { mapModelPath: (p: string) => string; deviceArgs: string[]; defaultPort?: number; router?: boolean }): string[] {
     config = promoteBagToFields(config);
     // Validate the required knobs up front so a malformed config fails with a
     // clear message instead of spawning `llama-server -m undefined -c NaN`
     // (a blank ctx/ngl field reaches us as NaN -> JSON null).
+    //
+    // Router mode is exempt: there is no single model to point -m at, and ctx/
+    // ngl may legitimately live in the preset INI instead of the command line.
+    // The knob values themselves are still coerced, so a blank field cannot
+    // become a `-c NaN` further down.
     const modelPath = toNonEmptyString(config.modelPath);
-    if (!modelPath) throw new Error('modelPath is required');
+    if (!modelPath && !router) throw new Error('modelPath is required');
 
     const ctx = toFiniteNumber(config.ctx);
     const ngl = toFiniteNumber(config.ngl);
-    if (ctx === undefined || ngl === undefined) {
+    if (!router && (ctx === undefined || ngl === undefined)) {
         throw new Error('ctx and ngl must be numbers');
     }
 
     // Port: the UI has no port field today, but a raw command (or a future UI)
     // may set one -- and the /slots poll + CSV rows depend on this being real.
     // Default port comes from server config (llama.defaultPort); a per-launch
-    // config.port or --port in a raw command still wins.
+    // config.port or --port in a raw command still wins. In router mode the
+    // port belongs to the router's own command line (buildRouterArgs), which
+    // validates it.
     const port = toFiniteNumber(toNonEmptyString(config.port) || String(defaultPort));
-    if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
+    if (!router && (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535)) {
         throw new Error('port must be an integer between 1 and 65535');
     }
 
-    const args: string[] = ['-m', mapModelPath(modelPath),
-        '-c', String(ctx), '-ngl', String(ngl),
-        '--host', '0.0.0.0', '--port', String(port), '--metrics'];
+    // Router mode: the same per-model knobs as a single-model launch, minus the
+    // three arguments the router owns (-m, --host, --port). They become INI
+    // entries via argsToIniEntries, so a preset means the same thing in both
+    // modes.
+    const args: string[] = [];
+    if (!router) {
+        args.push('-m', mapModelPath(modelPath as string));
+    }
+    if (ctx !== undefined) args.push('-c', String(ctx));
+    if (ngl !== undefined) args.push('-ngl', String(ngl));
+    if (!router) args.push('--host', '0.0.0.0', '--port', String(port));
+    args.push('--metrics');
 
     if (config.fa) args.push('-fa', 'on');
     const cacheK = toNonEmptyString(config.cacheK);
@@ -245,6 +280,13 @@ export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, 
         const rawTokens = tokenizeCommand(argString.trim());
         for (let i = 0; i < rawTokens.length; i++) {
             const t = rawTokens[i];
+            // Router mode never passes -m: that flag is exactly what selects
+            // single-model mode. A leftover -m in a raw command is dropped
+            // rather than silently downgrading the launch back to one model.
+            if (router && (t === '-m' || t === '--model')) {
+                if (i + 1 < rawTokens.length && !looksLikeFlag(rawTokens[i + 1])) i += 1;
+                continue;
+            }
             if (t === '-m' && i + 1 < rawTokens.length) {
                 args.push('-m', mapModelPath(rawTokens[++i]));
             } else {
@@ -318,8 +360,16 @@ function parseTensorSplit(v: unknown): string | undefined {
     return parts.join(',');
 }
 
-export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], { rpcPort = 50052, defaultPort = 8080 }: { rpcPort?: number; defaultPort?: number } = {}): { command: string; args: string[] } {
+// Where the generated router INI lands. It sits beside launch.sh (the unit
+// runs that script, and the preset path is absolute, so the two can't drift
+// apart and a stale path in the command line can't outlive a moved file).
+export const ROUTER_INI_FILENAME = 'router.ini';
 
+export function routerIniPathFor(appRoot: string): string {
+    return path.join(appRoot, 'generated', ROUTER_INI_FILENAME);
+}
+
+export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], { rpcPort = 50052, defaultPort = 8080, modelsDir = '', appRoot = process.cwd() }: { rpcPort?: number; defaultPort?: number; modelsDir?: string; appRoot?: string } = {}): { command: string; args: string[]; ini?: string } {
     const command = getLlamaServerBinary(builds, config.build as string | undefined);
     const mapModelPath = (p: string): string => p; // raw host path, no container mount to remap into
     const deviceArgs: string[] = [];
@@ -331,6 +381,23 @@ export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], 
         if (rpcTarget) deviceArgs.push('--rpc', hostFromRpcTarget(rpcTarget) + ':' + rpcPort);
         const tensorSplit = parseTensorSplit(config.tensorSplit);
         if (tensorSplit !== undefined) deviceArgs.push('-ts', tensorSplit);
+    }
+
+    if (isRouterMode(config)) {
+        const dir = resolveModelsDir(config, modelsDir);
+        if (!dir) throw new Error('router mode needs a models directory (set paths.modelDirectories or router.modelsDir)');
+        const presetPath = routerIniPathFor(appRoot);
+        // The per-model knobs are rendered once, as args, then rewritten as
+        // INI entries -- one code path decides what a preset means, so the
+        // two launch modes cannot drift apart.
+        const modelArgs = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort, router: true });
+        const globalEntries = argsToIniEntries(modelArgs);
+        const sections = buildRouterSections(routerModels(config), dir, globalEntries);
+        return {
+            command,
+            args: buildRouterArgs(config, { modelsDir: dir, presetPath, defaultPort }),
+            ini: buildRouterIni(globalEntries, sections),
+        };
     }
 
     const args = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort });
