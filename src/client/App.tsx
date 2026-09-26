@@ -19,7 +19,6 @@ import { PanelCanvas, PanelVisibilityMenu, registerPanel } from './components/pa
 
 registerPanel('chat', 'Chat', () => <ChatPanel />);
 registerPanel('preset-dock', 'Preset Inspector', () => <PresetDock />);
-registerPanel('launch-bar', 'Launch Bar', () => <LaunchBar />);
 registerPanel('rpc-worker', 'RPC Worker', () => <RpcWorkerPanel />);
 registerPanel('overview', 'Overview', () => <OverviewPanel />);
 registerPanel('monitor', 'Monitor', () => <MonitorPanel />);
@@ -115,8 +114,10 @@ function ActivityBar() {
     );
 }
 
-// Always-visible GPU row under the ActivityBar: GPU 1 (master) on the left,
-// GPU 2 (worker) on the right. Moved out of the Overview panel.
+// Always-visible status strip under the ActivityBar, in three cards: GPU 1
+// (master) on the left, GPU 2 (worker) next, and the Launch controls on the
+// right. The two GPU cards moved out of the Overview panel; the Launch card
+// is not a canvas panel at all (see features/interactive/LaunchBar.tsx).
 type GpuStats = Record<string, unknown>;
 
 function GpuBar({ pct }: { pct: number }) {
@@ -159,15 +160,16 @@ function GpuRowCard({ title, stats, isWorker }: { title: string; stats: GpuStats
     );
 }
 
-function GpuRow() {
+function TopStrip() {
     const { latest } = useTelemetryLatest();
     const master = latest?.stats && typeof latest.stats.master === 'object' && latest.stats.master !== null ? latest.stats.master as GpuStats : null;
     const worker = latest?.stats && typeof latest.stats.worker === 'object' && latest.stats.worker !== null && !(latest.stats.worker as GpuStats).nvidia_smi_error && !(latest.stats.worker as GpuStats).amdgpu_top_error ? latest.stats.worker as GpuStats : null;
     return (
-        <section className="border-b border-neutral-800 px-4 py-3" aria-label="GPU stats">
-            <div className="grid gap-3 sm:grid-cols-2">
+        <section className="border-b border-neutral-800 px-4 py-3" aria-label="System status and launch controls">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
                 <GpuRowCard title={gpuLabel(master, 'GPU 1')} stats={master} isWorker={false} />
                 <GpuRowCard title={gpuLabel(worker, 'GPU 2')} stats={worker} isWorker={true} />
+                <LaunchBar />
             </div>
         </section>
     );
@@ -213,7 +215,7 @@ export default function App() {
                 </nav>
             </header>
             <ActivityBar />
-            <GpuRow />
+            <TopStrip />
             <main className="px-2 py-4">
                 <PanelCanvas />
             </main>

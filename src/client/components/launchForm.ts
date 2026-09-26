@@ -1,7 +1,8 @@
 /*
  * Shared launch form: model + build + GPU A/B + RPC + raw command
- * + Preview/Start/Stop. Multiple panels (LaunchBar, RPC Worker, etc.)
- * pull pieces off this so they can compose into one Start request.
+ * + Preview/Start/Stop. Several surfaces (the LaunchBar strip card, the
+ * RPC Worker panel, etc.) pull pieces off this so they can compose into
+ * one Start request.
  * Launch requests are built on top of the PresetDock draft (unsaved
  * edits included); form fields override the draft per request.
  *
