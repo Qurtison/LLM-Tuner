@@ -439,7 +439,16 @@ export interface UnitOpResponse {
 }
 
 export interface UpgradeStatusResponse {
+    configured: boolean;
     running: boolean;
+    /** Commits on HEAD..origin/master the local checkout is behind. */
+    behind: number;
+    head: string;
+    remote: string;
+    checkedAt: number;
+    checkError: string;
+    /** true when the served numbers are older than the server's check TTL. */
+    stale: boolean;
 }
 
 export interface FilesEntry {

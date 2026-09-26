@@ -31,6 +31,45 @@ async function run(cmd: string[], cwd: string, emit: (line: string) => void, tim
     });
 }
 
+// Behind-check: how far the checked-out llama.cpp is behind origin/<branch>.
+// Read-only git plumbing (fetch + rev-list/rev-parse) so the header chip can
+// poll it cheaply; it never touches the working tree. A failed fetch is not
+// fatal — the compare still runs against whatever origin refs we already have.
+export interface BehindInfo {
+    behind: number;
+    head: string;
+    remote: string;
+    checkedAt: number;
+    error: string;
+}
+
+function capture(cmd: string[], cwd: string, timeoutMs = 60_000): Promise<{ code: number; out: string }> {
+    return new Promise(resolve => {
+        const proc = spawn(cmd[0], cmd.slice(1), { cwd, stdio: ['ignore', 'pipe', 'ignore'] });
+        let out = '';
+        proc.stdout?.on('data', (b: Buffer) => { out += b.toString(); });
+        const timer = setTimeout(() => { proc.kill('SIGKILL'); }, timeoutMs);
+        proc.on('error', () => { clearTimeout(timer); resolve({ code: 1, out: '' }); });
+        proc.on('close', code => { clearTimeout(timer); resolve({ code: code ?? 1, out }); });
+    });
+}
+
+export async function checkBehind(repoDir: string, branch = 'master'): Promise<BehindInfo> {
+    const remote = 'origin/' + branch;
+    const fetch = await capture(['git', 'fetch', '--quiet', 'origin', branch], repoDir);
+    const head = (await capture(['git', 'rev-parse', '--short', 'HEAD'], repoDir)).out.trim();
+    const count = await capture(['git', 'rev-list', '--count', 'HEAD..' + remote], repoDir);
+    const behind = Number.parseInt(count.out.trim(), 10);
+    const failed = !head || !Number.isFinite(behind) || behind < 0;
+    return {
+        behind: failed ? 0 : behind,
+        head,
+        remote,
+        checkedAt: Date.now(),
+        error: failed ? (fetch.code !== 0 ? 'git fetch/rev-list failed in ' + repoDir : 'HEAD..' + remote + ' unknown') : '',
+    };
+}
+
 export async function runUpgrade(repoDir: string, buildDir: string, emit: (line: string) => void): Promise<void> {
     emit('== fetching origin in ' + repoDir + ' ==');
     let code = await run(['git', 'fetch', 'origin'], repoDir, emit);

@@ -668,5 +668,13 @@ The behavior tests (which boot the real server) are the guard.
 - **ChatPanel's 250ms `/api/llama/slots` poll while streaming**: proxies the
   model server's own endpoint; `llama-server` exposes no slots stream to
   subscribe to. Left as is.
-- **`/api/upgrade/status`**: one-shot on mount; the run itself already
-  streams (`/api/upgrade/stream`).
+- **`/api/upgrade/status`**: polled by the header update chip (on load and
+  every 15 min); the run itself already streams (`/api/upgrade/stream`).
+  The response carries a server-side cached behind-check:
+  `{ configured, running, behind, head, remote, checkedAt, checkError, stale }`.
+  The git compare (fetch + `rev-list HEAD..origin/master`) runs at most once
+  per 15 min: the first call awaits it, a stale cache is served immediately
+  while the refresh runs behind it, and `?refresh=1` forces a fresh one
+  (used after a build). A successful run clears the cache, since the tree moved.
+  Unconfigured upgrade: `configured: false`, `behind: 0`, and the stream
+  still returns 400.

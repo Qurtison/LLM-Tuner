@@ -68,6 +68,14 @@ describe('gap routes', () => {
         expect(apply.body.error).toContain('no active preset');
     });
 
+    it('upgrade status reports unconfigured, and the stream refuses', async () => {
+        const status = await json(server.url('/api/upgrade/status'));
+        expect(status.response.status).toBe(200);
+        expect(status.body).toEqual({ configured: false, running: false, behind: 0, head: '', remote: 'origin/master', checkedAt: 0, checkError: '', stale: true });
+        const stream = await json(server.url('/api/upgrade/stream'));
+        expect(stream.response.status).toBe(400);
+        expect(stream.body.error).toBe('upgrade not configured');
+    });
     it('server-paths returns config-driven paths', async () => {
         const resp = await json(server.url('/api/server-paths'));
         expect(resp.body.modelsDir).toContain('models');

@@ -8,6 +8,6 @@ export { default as FileBrowserPanel } from './files/FileBrowserPanel';
 export { default as OverviewPanel } from './overview/OverviewPanel';
 export { default as HistoryPanel } from './history/HistoryPanel';
 export { default as BenchPanel } from './bench/BenchPanel';
-export { default as UpgradePanel } from './upgrade/UpgradePanel';
+export { default as UpdateControl } from './upgrade/UpdateControl';
 export { default as PresetDock } from './presets/PresetDock';
 export { default as PresetBrowserDialog } from './presets/PresetBrowserDialog';

@@ -14,7 +14,7 @@ import { presetBrowser } from './state/presetBrowser';
 import { api } from './api/client';
 import type { ConfigResponse } from '../../shared/contracts';
 import { ChatPanel } from './features';
-import { MonitorPanel, LiveRequestsPanel, HistoryPanel, BenchPanel, OverviewPanel, FileBrowserPanel, UpgradePanel, LogsPanel, PresetDock, PresetBrowserDialog } from './features';
+import { MonitorPanel, LiveRequestsPanel, HistoryPanel, BenchPanel, OverviewPanel, FileBrowserPanel, UpdateControl, LogsPanel, PresetDock, PresetBrowserDialog } from './features';
 import LaunchBar from './features/interactive/LaunchBar';
 import RpcWorkerPanel from './features/interactive/RpcWorkerPanel';
 import { PanelCanvas, PanelVisibilityMenu, registerPanel } from './components/panels';
@@ -27,7 +27,6 @@ registerPanel('monitor', 'Monitor', () => <MonitorPanel />);
 registerPanel('live-requests', 'Live Requests', () => <LiveRequestsPanel />);
 registerPanel('history', 'History', () => <HistoryPanel />);
 registerPanel('bench', 'Bench', () => <BenchPanel />);
-registerPanel('upgrade', 'Upgrade', () => <UpgradePanel />);
 registerPanel('files', 'File Browser', () => <FileBrowserPanel />);
 
 // Compact engine state pill for the header. Hover/focus shows the detail
@@ -208,6 +207,7 @@ export default function App() {
                                 <span>worker {config.worker.enabled ? 'on' : 'off'}</span>
                                 <span>telemetry {config.telemetry.enabled ? 'on' : 'off'}</span>
                                 <span>{config.llama.builds.length} build{config.llama.builds.length === 1 ? '' : 's'}</span>
+                                <UpdateControl />
                             </>
                         )}
                         <span className={connected ? 'text-emerald-500' : 'text-amber-500'}>{connected ? 'connected' : 'connecting'}</span>
