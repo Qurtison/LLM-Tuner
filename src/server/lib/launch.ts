@@ -298,7 +298,28 @@ export function hostFromRpcTarget(target: string): string {
 // localSplit/config.rpcTarget is ever true below -- this only supports a
 // 2-way split (this machine vs. one other target), not a 3-way local-A +
 // local-B + worker split.
+// `-ts` takes a comma-separated list of proportions, one per device:
+// '0.75,1.25', '3,1', ... The preset dock's `list` control stores that as
+// an array, a legacy preset as a joined string, and the old dashboard slider
+// as a single percentage (30 -> 30,70). All three reach us as `unknown`.
+// A plain toFiniteNumber() only understood the last form: Number('0.75,1.25')
+// is NaN, so the flag was silently dropped and the whole model landed on
+// one device (OOM) with no hint in the preview string.
+// Returns undefined for anything unusable, so the caller can skip `-ts`.
+function parseTensorSplit(v: unknown): string | undefined {
+    const parts = (Array.isArray(v) ? v.map(x => String(x)) : typeof v === 'string' ? v.split(',') : [v])
+        .map(s => String(s).trim())
+        .filter(s => s.length > 0);
+    if (parts.length === 0) return undefined;
+    const nums = parts.map(Number);
+    if (nums.some(n => !Number.isFinite(n) || n < 0)) return undefined;
+    // Legacy single value: GPU A's share in percent, the rest to GPU B.
+    if (parts.length === 1) return nums[0] < 100 ? nums[0] + ',' + (100 - nums[0]) : undefined;
+    return parts.join(',');
+}
+
 export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], { rpcPort = 50052, defaultPort = 8080 }: { rpcPort?: number; defaultPort?: number } = {}): { command: string; args: string[] } {
+
     const command = getLlamaServerBinary(builds, config.build as string | undefined);
     const mapModelPath = (p: string): string => p; // raw host path, no container mount to remap into
     const deviceArgs: string[] = [];
@@ -308,10 +329,8 @@ export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], 
         deviceArgs.push('--split-mode', 'layer');
         if (localSplit) deviceArgs.push('-dev', String(config.deviceA) + ',' + String(config.deviceB));
         if (rpcTarget) deviceArgs.push('--rpc', hostFromRpcTarget(rpcTarget) + ':' + rpcPort);
-        const tensorSplit = toFiniteNumber(config.tensorSplit);
-        if (tensorSplit !== undefined && tensorSplit >= 0 && tensorSplit < 100) {
-            deviceArgs.push('-ts', tensorSplit + ',' + (100 - tensorSplit));
-        }
+        const tensorSplit = parseTensorSplit(config.tensorSplit);
+        if (tensorSplit !== undefined) deviceArgs.push('-ts', tensorSplit);
     }
 
     const args = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort });

@@ -73,6 +73,23 @@ test('resolveLaunchCommand: local split injects dev + tensor split', () => {
   expect(args).toEqual(['-m', '/m/x.gguf', '-c', '4096', '-ngl', '32', '--host', '0.0.0.0', '--port', '8080', '--metrics', '--split-mode', 'layer', '-dev', 'cuda,vulkan', '-ts', '30,70']);
 });
 
+test('resolveLaunchCommand: tensor split list (array + string) survives parsing', () => {
+  // The preset dock's `list` control splits on commas and stores an array;
+  // a legacy preset keeps the joined string. Both used to vanish (NaN -> no
+  // -ts), which loaded the model on one device and OOMed.
+  for (const [tensorSplit, want] of [[['0.75', '1.25'], '0.75,1.25'], ['0.75, 1.25', '0.75,1.25'], ['3,1', '3,1']] as [unknown, string][]) {
+    const { args } = resolveLaunchCommand({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, deviceA: 'CUDA0', deviceB: 'VULKAN1', tensorSplit }, BUILDS);
+    expect(args.slice(-2)).toEqual(['-ts', want]);
+  }
+});
+
+test('resolveLaunchCommand: garbage tensor split is dropped, not emitted raw', () => {
+  for (const tensorSplit of ['a,b', '-1,2', '', '100']) {
+    const { args } = resolveLaunchCommand({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, deviceA: 'cuda', deviceB: 'vulkan', tensorSplit }, BUILDS);
+    expect(args).not.toContain('-ts');
+  }
+});
+
 test('resolveLaunchCommand: argString merged after structured args', () => {
   const { args } = resolveLaunchCommand({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, argString: '--temp 0.7' }, BUILDS);
   expect(args).toEqual(['-m', '/m/x.gguf', '-c', '4096', '-ngl', '32', '--host', '0.0.0.0', '--port', '8080', '--metrics', '--temp', '0.7']);
