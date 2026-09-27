@@ -52,6 +52,10 @@ const baseForm: LaunchForm = {
 // into the same form the LaunchBar Start button reads.
 export const launchFormStore = new Value<LaunchForm>(baseForm);
 
+// Set once the form has been seeded from the running launch (a page refresh
+// lands on a server that is already up). After that, user edits win.
+let seededFromRunningLaunch = false;
+
 export function useLaunchForm(): {
     form: LaunchForm;
     set: <K extends keyof LaunchForm>(k: K, v: LaunchForm[K]) => void;
@@ -71,7 +75,7 @@ export function useLaunchForm(): {
     stop: () => Promise<void>;
     previewCommand: () => Promise<void>;
 } {
-    const { config } = useServer();
+    const { config, state } = useServer();
     const { draft } = usePresets();
     const form = useSyncExternalStore(launchFormStore.subscribe, launchFormStore.get, launchFormStore.get);
     const [models, setModels] = useState<ModelEntry[]>([]);
@@ -106,6 +110,26 @@ export function useLaunchForm(): {
         })();
         return () => { dead = true; };
     }, [config]);
+
+    // The running launch config arrives in the first /api/status frame after
+    // a refresh; the router switch (and its fields) are launch-level, so the
+    // form must reflect them or the bar claims single-model on a router launch.
+    useEffect(() => {
+        if (seededFromRunningLaunch) return;
+        const rc = state?.launchConfig?.router;
+        if (!state || state.state === 'stopped' || rc?.enabled !== true) return;
+        seededFromRunningLaunch = true;
+        launchFormStore.update(old => ({
+            ...old,
+            routerEnabled: true,
+            routerMax: old.routerMax || (rc.maxModels !== undefined ? String(rc.maxModels) : ''),
+            routerAutoload: rc.autoload === false ? false : old.routerAutoload,
+            routerStartup: rc.models
+                ? { ...Object.fromEntries(rc.models.filter(m => m.loadOnStartup).map(m => [m.modelPath, true])), ...old.routerStartup }
+                : old.routerStartup,
+            routerIniText: old.routerIniText || rc.iniText || '',
+        }));
+    }, [state]);
 
     const set = <K extends keyof LaunchForm>(k: K, v: LaunchForm[K]) => launchFormStore.update(old => ({ ...old, [k]: v }));
 
