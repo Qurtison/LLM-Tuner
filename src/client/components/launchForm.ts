@@ -71,7 +71,7 @@ export function useLaunchForm(): {
     stop: () => Promise<void>;
     previewCommand: () => Promise<void>;
 } {
-    const { state, config } = useServer();
+    const { config } = useServer();
     const { draft } = usePresets();
     const form = useSyncExternalStore(launchFormStore.subscribe, launchFormStore.get, launchFormStore.get);
     const [models, setModels] = useState<ModelEntry[]>([]);
@@ -80,7 +80,6 @@ export function useLaunchForm(): {
     const [actionError, setActionError] = useState('');
     const [preview, setPreview] = useState('');
     const [previewBusy, setPreviewBusy] = useState(false);
-    const locked = state?.state !== undefined && state.state !== 'stopped';
 
     useEffect(() => {
         let dead = false;

@@ -9,6 +9,8 @@ import { startTestServer, stopTestServer, type TestServer } from './helpers/test
 
 let server: TestServer;
 
+// Smoke tests probe unrelated API shapes; each assertion checks its own fields.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function json(url: string, options?: RequestInit): Promise<{ response: Response; body: any }> {
     // ponytail: API bodies are asserted field-by-field; any keeps the helper
     // generic (matches the pre-TS require() version).
@@ -25,7 +27,7 @@ async function poll<T>(fn: () => Promise<T | null | undefined>, timeout = 10000)
     throw new Error('Timed out polling');
 }
 
-function sse(url: string, predicate: (payload: any) => boolean): Promise<{ response: http.IncomingMessage; payload: any }> {
+function sse(url: string, predicate: (payload: Record<string, unknown>) => boolean): Promise<{ response: http.IncomingMessage; payload: Record<string, unknown> }> {
     return new Promise((resolve, reject) => {
         const req = http.request(url, response => {
             let buffer = '';
@@ -178,7 +180,6 @@ describe('server4 route smoke', () => {
         // lines=0 disables the backfill entirely, so every line received here
         // is provably LIVE -- no dependence on what the ring held before this
         // test ran (a launch clears the ring, so transcript counting flakes).
-        let receivedCount = 0;
         const liveDone = new Promise<void>((resolve, reject) => {
             const req = http.request(server.url('/api/master/logs/stream?lines=0'), response => {
                 contentType = response.headers['content-type'] as string;
@@ -190,7 +191,6 @@ describe('server4 route smoke', () => {
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
                         const text = line.slice(6);
-                        receivedCount += 1;
                         if (text.includes('llama_server: model loaded')) {
                             req.destroy();
                             resolve();

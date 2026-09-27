@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Chart from 'chart.js/auto';
 import { api } from '../../api/client';
 import { getErrorMessage } from '../../api/errors';
 import { useTelemetryLatest } from '../../hooks/useTelemetry';
 import { chartOptions, labelsFromPoints, metricSeries } from '../../lib/charts';
 import { fmtWithUnit } from '../../lib/format';
-import { gpuLabel, stat, toNumber as number, vramParts } from '../../lib/gpu';
+import { gpuLabel, stat, vramParts } from '../../lib/gpu';
 import { loadJson, saveJson } from '../../lib/storage';
 import { onSseLine, useServer } from '../../state/server';
 import type { CompletionEvent, TelemetryRateResponse } from '../../../../shared/contracts';
@@ -82,7 +82,7 @@ function MiniChart({ metric, points, smooth, master, worker, net, masterLabel, w
                 ...(metric.key === 'net' ? [] : [{ label: workerLabel, data: workerSeries(points, metric.key), borderColor: '#ef4444', pointRadius: 0, borderWidth: 1.5, tension: smooth ? 0.35 : 0 }]),
             ];
         chart.update('none');
-    }, [metric.key, points, smooth, tpsPoints, masterLabel, workerLabel]);
+    }, [metric.key, metric.title, points, smooth, tpsPoints, masterLabel, workerLabel]);
     const isTps = TPS_KEYS.has(metric.key);
     const lastTps = tpsPoints.length > 0 ? tpsPoints[tpsPoints.length - 1] : null;
     const value = isTps ? (lastTps ? (metric.key === 'gen_tps' ? lastTps.genTps : lastTps.prefillTps) : null) : metric.key === 'net' ? net : stat(master, metric.key);
@@ -179,7 +179,13 @@ export default function MonitorPanel() {
         return () => { chart.destroy(); if (requestChart.current === chart) requestChart.current = null; };
     }, []);
 
-    const updateOmni = (chart: Chart | null) => {
+    const current = points.at(-1);
+    const master = current?.master ?? null;
+    const worker = current?.worker ?? null;
+    const masterLabel = gpuLabel(master, 'GPU 1');
+    const workerLabel = gpuLabel(worker, 'GPU 2');
+
+    const updateOmni = useCallback((chart: Chart | null) => {
         if (!chart) return;
         chart.data.labels = labels(points);
         chart.data.datasets = [
@@ -191,8 +197,8 @@ export default function MonitorPanel() {
             { label: 'VRAM MiB', data: series(points, 'master', 'vram_used'), borderColor: '#a78bfa', pointRadius: 0 },
         ].map(dataset => ({ ...dataset, tension: smooth ? 0.35 : 0 }));
         chart.update('none');
-    };
-    useEffect(() => { updateOmni(omniChart.current); }, [points, smooth]);
+    }, [points, masterLabel, workerLabel, smooth]);
+    useEffect(() => { updateOmni(omniChart.current); }, [updateOmni]);
     const selectedCompletion = completions.find(completion => completion.runId === selectedRunId) ?? completions[0] ?? null;
     useEffect(() => {
         const samples = selectedCompletion?.metrics ?? [];
@@ -230,11 +236,6 @@ export default function MonitorPanel() {
         setError('');
     }, [telemetry, telemetryError]);
 
-    const current = points.at(-1);
-    const master = current?.master ?? null;
-    const worker = current?.worker ?? null;
-    const masterLabel = gpuLabel(master, 'GPU 1');
-    const workerLabel = gpuLabel(worker, 'GPU 2');
     const net = useMemo(() => { if (points.length < 2) return null; const previous = points.at(-2); const a = current?.net; const b = previous?.net; return a == null || b == null ? null : Math.max(0, (a - b) / 1_048_576); }, [points, current]);
     const reasons = [
         ...((Array.isArray(master?.throttle_reasons) ? master.throttle_reasons : []).filter((reason): reason is string => typeof reason === 'string').map(reason => ({ reason, source: masterLabel }))),

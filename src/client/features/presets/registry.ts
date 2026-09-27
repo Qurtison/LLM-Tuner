@@ -1,70 +1,18 @@
 /*
- * Bridge between the `LaunchConfig` (shared/contracts.ts) and the
- * llama.cpp parameter registry (shared/llama-params.ts). Drives the
- * "preset is a diff" invariant: a Preset only stores LaunchConfig keys
- * that differ from the registry default. Setting a value back to its
- * default deletes the key, so an empty preset means "running defaults".
+ * Preset diffing: which LaunchConfig keys differ from the registry default.
+ * A Preset only stores keys that differ, so setting a value back to its
+ * default deletes the key and an empty preset means "running defaults".
  *
- * ponytail: only fields we can confidently map to a ParamDef are wired
- * here. Bench-only fields (nPrompt, nGen, depths, reps), passthrough
- * strings (argString, extraArgs, rawCommand, rawArgs, rpcTarget,
- * deviceA, deviceB, transport, label) and the spec draft NGL are
- * intentionally skipped from the diff — they stay in LaunchConfig but
- * don't get a "changed from default" badge. Add to LAUNCH_FIELD_TO_PARAM
- * when the registry grows a matching id.
+ * The field -> ParamDef bridge itself lives in shared/launch-params.ts,
+ * because the launch resolver renders the same fields to flags and the two
+ * must not disagree about what a field means. This module is the preset
+ * editor's use of it.
  */
 import { PARAM_BY_ID, type ParamDef, type ParamGroup } from '../../../../shared/llama-params';
+import { LAUNCH_FIELD_TO_PARAM, type ParamId } from '../../../../shared/launch-params';
 import type { LaunchConfig } from '../../../../shared/contracts';
 
-export type ParamId = string;
-
-const LAUNCH_FIELD_TO_PARAM: Record<keyof LaunchConfig, ParamId | undefined> = {
-    modelPath: 'model',
-    model: 'model',
-    ctx: 'ctx_size',
-    ngl: 'n_gpu_layers',
-    port: 'port',
-    build: undefined,
-    rawCommand: undefined,
-    rawArgs: undefined,
-    rpcTarget: undefined,
-    fa: 'flash_attn',
-    cacheK: 'cache_type_k',
-    cacheV: 'cache_type_v',
-    nPrompt: undefined,
-    nGen: undefined,
-    depths: undefined,
-    reps: undefined,
-    devices: 'device',
-    splitMode: 'split_mode',
-    tensorSplit: 'tensor_split',
-    extraArgs: undefined,
-    specType: 'spec_type',
-    specDraftNMax: 'spec_n_max',
-    specDraftNMin: 'spec_n_min',
-    specDraftModel: 'model',
-    specNgramSizeN: 'spec_ngram_size_n',
-    specNgramSizeM: 'spec_ngram_size_m',
-    specNgramMinHits: 'spec_ngram_min_hits',
-    specDraftNgl: undefined,
-    preserveThinking: 'reasoning_preserve',
-    reasoningPreserve: 'reasoning_preserve',
-    chatTemplateFile: 'chat_template',
-    jinja: 'jinja',
-    loadMode: 'load_mode',
-    verbosity: 'verbosity',
-    argString: undefined,
-    temp: 'temperature',
-    deviceA: undefined,
-    deviceB: undefined,
-    transport: undefined,
-    label: undefined,
-    paramOverrides: undefined,
-    // Structured, not a flat knob: the router block is edited as a unit (see
-    // RouterFields) and has no single registry param behind it.
-    router: undefined,
-};
-
+export type { ParamId };
 export interface OverrideEntry {
     field: keyof LaunchConfig | null;
     paramId: ParamId;
@@ -106,6 +54,15 @@ for (const field of Object.keys(LAUNCH_FIELD_TO_PARAM) as (keyof LaunchConfig)[]
 
 export function fieldForParamId(id: ParamId): keyof LaunchConfig | null {
     return PARAM_TO_FIELD.get(id) ?? null;
+}
+
+// What the preset editor should DISPLAY for a param. An unset toggle shows the
+// state the launch will actually use -- llama.cpp's own default, which for
+// --jinja/--slots/--cache-prompt/... is ON. Rendering those unchecked said the
+// opposite of what the launch does. Non-toggles keep showing an empty field:
+// their default is a value to type, not a state to display.
+export function displayValue(def: ParamDef, raw: unknown): unknown {
+    return raw === undefined && def.control === 'toggle' ? def.default : raw;
 }
 
 export function paramForField(field: keyof LaunchConfig): ParamDef | undefined {

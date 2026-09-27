@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import { overridesFromConfig, configWithOverrides, paramForField } from '../src/client/features/presets/registry';
+import { displayValue, overridesFromConfig, configWithOverrides, paramForField } from '../src/client/features/presets/registry';
 import { PARAM_BY_ID } from '../shared/llama-params';
 import type { LaunchConfig } from '../shared/contracts';
 
@@ -27,6 +27,63 @@ test('overridesFromConfig: value equal to default is dropped (invariant)', () =>
     // ponytail: registry defaults are runtime-typed unknown; ctx_size's is a number.
     const config: LaunchConfig = { ctx: def.default as number };
     expect(overridesFromConfig(config)).toEqual([]);
+});
+
+// The directive this guards: an option llama.cpp enables BY DEFAULT must not
+// be recorded as a change unless the user actually changed it. It failed while
+// a toggle's default was the WORD "enabled" -- a string can never equal the
+// boolean a preset carries, so `jinja: true` (llama.cpp's own default) landed
+// in every preset as a modification, and a default-ON flag could be switched
+// off by a preset that never meant to touch it.
+test('a default-ON toggle at its default is not a change', () => {
+    const def = PARAM_BY_ID['no_jinja'];
+    expect(def.control).toBe('toggle');
+    expect(def.default).toBe(true);
+    expect(overridesFromConfig({ jinja: true } as LaunchConfig)).toEqual([]);
+});
+
+test('a default-ON toggle switched off IS a change', () => {
+    const overrides = overridesFromConfig({ jinja: false } as LaunchConfig);
+    expect(overrides).toHaveLength(1);
+    expect(overrides[0].field).toBe('jinja');
+    expect(overrides[0].value).toBe(false);
+});
+
+test('every toggle default is a real boolean, not a word', () => {
+    // llama.cpp writes "(default: enabled)" in --help; the generator normalises
+    // it and keeps the word as defaultLabel for display.
+    const wordy = Object.values(PARAM_BY_ID)
+        .filter(def => def.control === 'toggle' && typeof def.default === 'string')
+        .filter(def => /^(enabled|disabled|true|false|on|off|yes|no)$/i.test(def.default as string))
+        .map(def => `${def.id}=${String(def.default)}`);
+    expect(wordy).toEqual([]);
+});
+
+test('no canned-model loader is exposed as a preset knob', () => {
+    // --fim-qwen-*-default, --gpt-oss-*-default, --vision-gemma-*-default and
+    // friends download and load a canned model. The dashboard picks the model
+    // itself, so these are filtered out of the registry entirely.
+    const canned = Object.values(PARAM_BY_ID)
+        .filter(def => /can download weights/i.test(def.help ?? ''))
+        .map(def => def.id);
+    expect(canned).toEqual([]);
+});
+
+test('displayValue: an unset toggle shows the state it will launch with', () => {
+    // --jinja is ON unless disabled, so an untouched toggle must read ON.
+    expect(displayValue(PARAM_BY_ID['no_jinja'], undefined)).toBe(true);
+    // A default-OFF toggle still reads off.
+    expect(displayValue(PARAM_BY_ID['metrics'], undefined)).toBe(false);
+    // An explicit value always wins over the default.
+    expect(displayValue(PARAM_BY_ID['no_jinja'], false)).toBe(false);
+    expect(displayValue(PARAM_BY_ID['metrics'], true)).toBe(true);
+});
+
+test('displayValue: non-toggles keep showing an empty field', () => {
+    // Their default is a value to type, not a state to display: prefilling the
+    // field would make it look edited.
+    expect(displayValue(PARAM_BY_ID['ctx_size'], undefined)).toBeUndefined();
+    expect(displayValue(PARAM_BY_ID['ctx_size'], 8192)).toBe(8192);
 });
 
 test('overridesFromConfig: value differing from default is kept', () => {

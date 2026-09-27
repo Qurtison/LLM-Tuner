@@ -12,6 +12,13 @@
 import { tokenizeCommand } from './tokenize';
 import { PARAM_BY_ID, type ParamDef } from '../../../shared/llama-params';
 import type { BuildEntry, LaunchConfig, RouterModelConfig } from '../../../shared/contracts';
+import {
+    appendLaunchArgs,
+    LAUNCH_BAG_ALIASES,
+    toFiniteNumber,
+    toNonEmptyString,
+} from '../../../shared/launch-params';
+import { isExplicitOff, offSpelling } from '../../../shared/flag-polarity';
 import * as path from 'node:path';
 import {
     argsToIniEntries,
@@ -72,7 +79,14 @@ function appendParamOverrideArgs(args: string[], overrides: unknown): void {
         if (!def || !Array.isArray(def.flags) || def.flags.length === 0) continue;
         if (value === undefined || value === null || value === '') continue;
         if (def.control === 'toggle') {
-            if (value === true || value === 'true') args.push(def.flags[0]);
+            if (value === true || value === 'true') { args.push(def.flags[0]); continue; }
+            // An explicit false emits the disabling spelling, so an option that
+            // defaults to enabled can actually be turned off. Unset/absent
+            // still emits nothing and leaves llama-server's default alone.
+            if (isExplicitOff(value)) {
+                const off = offSpelling(def.flags);
+                if (off) args.push(off);
+            }
             continue;
         }
         const text = Array.isArray(value) ? value.map(String).join(',') : String(value);
@@ -81,43 +95,22 @@ function appendParamOverrideArgs(args: string[], overrides: unknown): void {
     }
 }
 
-// Coerce a UI/API value to a finite number, or undefined when it's missing,
-// empty, or not numeric. Number.isNaN() alone is NOT sufficient: it doesn't
-// coerce, so '' and 'abc' sail through it, and an empty string would emit a
-// flag with no value (e.g. `--top-k` "").
-export function toFiniteNumber(v: unknown): number | undefined {
-    if (v === null || v === undefined) return undefined;
-    if (typeof v === 'boolean') return undefined;
-    if (typeof v === 'string' && v.trim() === '') return undefined;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : undefined;
-}
-
-// Coerce to a non-empty trimmed string, or undefined. Preserves "0" (unlike
-// `v || undefined`, which would drop a legitimate zero).
-export function toNonEmptyString(v: unknown): string | undefined {
-    if (v === null || v === undefined) return undefined;
-    const s = String(v).trim();
-    return s.length > 0 ? s : undefined;
-}
+// The coercers moved to shared/launch-params.ts so the shared emission table
+// and the server agree on what "set" means. Re-exported because callers
+// (router.ts, index.ts, services/llama.ts) reach them through this module.
+export { toFiniteNumber, toNonEmptyString };
 
 // Legacy/mismatched presets may hold KNOWN params in the overrides bag
 // (e.g. ctx_size instead of ctx). Promote them to real fields before the
 // required-knob validation so `-c`/`-ngl` etc. render once, from fields.
-const BAG_ID_TO_FIELD: Record<string, string> = {
-    ctx_size: 'ctx', n_gpu_layers: 'ngl', flash_attn: 'fa',
-    cache_type_k: 'cacheK', cache_type_v: 'cacheV', temperature: 'temp',
-    port: 'port', jinja: 'jinja', load_mode: 'loadMode', verbosity: 'verbosity',
-    chat_template: 'chatTemplateFile', spec_type: 'specType',
-    reasoning_preserve: 'reasoningPreserve',
-};
-
+// The alias table is the input contract and lives in shared/launch-params.ts,
+// next to the field -> registry id map it has to agree with.
 function promoteBagToFields(config: LaunchInput): LaunchInput {
     const bag = config.paramOverrides;
     if (!bag || typeof bag !== 'object') return config;
     const overrides = bag as Record<string, unknown>;
     const promoted: string[] = [];
-    for (const [id, field] of Object.entries(BAG_ID_TO_FIELD)) {
+    for (const [id, field] of Object.entries(LAUNCH_BAG_ALIASES)) {
         if (overrides[id] === undefined || config[field] !== undefined) continue;
         config[field] = overrides[id];
         promoted.push(id);
@@ -233,11 +226,12 @@ export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, 
     if (!router) args.push('--host', '0.0.0.0', '--port', String(port));
     args.push('--metrics');
 
-    if (config.fa) args.push('-fa', 'on');
-    const cacheK = toNonEmptyString(config.cacheK);
-    if (cacheK) args.push('--cache-type-k', cacheK);
-    const cacheV = toNonEmptyString(config.cacheV);
-    if (cacheV) args.push('--cache-type-v', cacheV);
+    // Every remaining knob is a row in shared/launch-params.ts, rendered in
+    // table order. The two blocks the table deliberately does not cover are
+    // written out here: the speculative-decoding expansion (one flag per
+    // --spec-type token) and the device args injected by the caller.
+    appendLaunchArgs(args, 'pre-spec', config);
+
     const specType = toNonEmptyString(config.specType);
     if (specType) {
         args.push('--spec-type', specType);
@@ -262,38 +256,10 @@ export function buildLlamaArgs(config: LaunchInput, { mapModelPath, deviceArgs, 
         }
         args.push('-np', '1');
     }
-    const specDraftNgl = toFiniteNumber(config.specDraftNgl);
-    if (specDraftNgl !== undefined) args.push('--spec-draft-ngl', String(specDraftNgl));
-    const preserveThinking = !!config.preserveThinking;
-    const reasoningPreserve = !!config.reasoningPreserve;
-    if (preserveThinking) {
-        args.push('--chat-template-kwargs', JSON.stringify({ preserve_thinking: true }));
-    }
-    if (preserveThinking || reasoningPreserve) {
-        args.push('--reasoning-preserve');
-    }
+
+    appendLaunchArgs(args, 'post-spec', config);
     args.push(...deviceArgs);
-    const temp = toFiniteNumber(config.temp);
-    if (temp !== undefined) args.push('--temp', String(temp));
-    const topK = toFiniteNumber(config.topK);
-    if (topK !== undefined) args.push('--top-k', String(topK));
-    const topP = toFiniteNumber(config.topP);
-    if (topP !== undefined) args.push('--top-p', String(topP));
-    const minP = toFiniteNumber(config.minP);
-    if (minP !== undefined) args.push('--min-p', String(minP));
-    const presencePenalty = toFiniteNumber(config.presencePenalty);
-    if (presencePenalty !== undefined) args.push('--presence-penalty', String(presencePenalty));
-    const repeatPenalty = toFiniteNumber(config.repeatPenalty);
-    if (repeatPenalty !== undefined) args.push('--repeat-penalty', String(repeatPenalty));
-    const nCpuMoe = toFiniteNumber(config.nCpuMoe);
-    if (nCpuMoe !== undefined) args.push('--n-cpu-moe', String(nCpuMoe));
-    const chatTemplateFile = toNonEmptyString(config.chatTemplateFile);
-    if (config.jinja || chatTemplateFile) args.push('--jinja');
-    if (chatTemplateFile) args.push('--chat-template-file', chatTemplateFile);
-    const loadMode = toNonEmptyString(config.loadMode);
-    if (loadMode) args.push('-lm', loadMode);
-    const verbosity = toFiniteNumber(config.verbosity);
-    if (verbosity !== undefined) args.push('-lv', String(verbosity));
+    appendLaunchArgs(args, 'post-device', config);
     appendParamOverrideArgs(args, config.paramOverrides);
     const argString = toNonEmptyString(config.argString);
     if (argString) {

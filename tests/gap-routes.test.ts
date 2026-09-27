@@ -7,6 +7,8 @@ import { startTestServer, stopTestServer, type TestServer } from './helpers/test
 
 let server: TestServer;
 
+// Route smoke tests check unrelated response shapes field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function json(url: string, options?: RequestInit): Promise<{ response: Response; body: any }> {
     // ponytail: API bodies are asserted field-by-field; any keeps the helper
     // generic (matches the pre-TS require() version).

@@ -30,7 +30,6 @@ export interface PresetsSnapshot {
     error: string;
 }
 
-type Listener = () => void;
 
 function defaultDraft(): LaunchConfig {
     return {};

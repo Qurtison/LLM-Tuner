@@ -55,7 +55,7 @@ function run(args: string[], timeoutMs = 30_000): Promise<UnitCommandResult> {
 
 function shQuote(s: string): string {
     if (!s) return "''";
-    if (/^[A-Za-z0-9._\/:-]+$/.test(s)) return s;
+    if (/^[A-Za-z0-9._/:-]+$/.test(s)) return s;
     return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 

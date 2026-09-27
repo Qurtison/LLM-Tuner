@@ -7,13 +7,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
 import * as http from 'node:http';
 import { startTestServer, type TestServer } from './helpers/test-server';
 
-function postJson(url: string, body: unknown): Promise<{ status: number | undefined; body: any }> {
+function postJson(url: string, body: unknown): Promise<{ status: number | undefined }> {
     return new Promise((resolve, reject) => {
         const data = JSON.stringify(body);
         const req = http.request(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, res => {
             let raw = '';
             res.on('data', chunk => { raw += chunk; });
-            res.on('end', () => { try { resolve({ status: res.statusCode, body: JSON.parse(raw) }); } catch (err) { reject(err); } });
+            res.on('end', () => { try { JSON.parse(raw); resolve({ status: res.statusCode }); } catch (err) { reject(err); } });
         });
         req.on('error', reject);
         req.write(data);

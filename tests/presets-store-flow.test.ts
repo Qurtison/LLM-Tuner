@@ -53,7 +53,7 @@ describe('presetsStore dialog-edit flow', () => {
 
         await presetsStore.refresh();
         presetsStore.setParam('threads', 8);
-        let snap = presetsStore.get();
+        const snap = presetsStore.get();
         expect(snap.draft.paramOverrides?.threads).toBe(8);
         expect(snap.isDirty).toBe(true);
         const entries = overridesFromConfig(snap.draft);
@@ -141,7 +141,7 @@ describe('intInputValid (int fields reject decimals, no silent truncation)', () 
     });
 
     it('toInput shows the effective default for unset numeric rows', async () => {
-        const { toInput } = await import('../src/client/features/presets/PresetBrowserDialog');
+        const { toInput } = await import('../src/client/features/presets/browserInput');
         const { PARAM_BY_ID } = await import('../shared/llama-params');
         expect(toInput(undefined, 'float', PARAM_BY_ID['top_p'])).toBe('0.95');
         expect(toInput(undefined, 'float', PARAM_BY_ID['min_p'])).toBe('0.05');

@@ -44,7 +44,8 @@ export default function HfSearchPanel() {
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
         };
         window.addEventListener('keydown', onKeyDown);
-        return () => { window.removeEventListener('keydown', onKeyDown); openerRef.current?.focus(); };
+        const opener = openerRef.current;
+        return () => { window.removeEventListener('keydown', onKeyDown); opener?.focus(); };
     }, [open]);
 
     useEffect(() => {
@@ -69,7 +70,7 @@ export default function HfSearchPanel() {
         try {
             const response = await fetch('/api/hf/readme?repo=' + encodeURIComponent(model.id), { headers: { Accept: 'text/markdown' }, signal: controller.signal });
             const text = await response.text();
-            if (!response.ok) { let message = text; try { message = (JSON.parse(text) as HfError).error; } catch {} throw new Error(message || 'README fetch failed.'); }
+            if (!response.ok) { let message = text; try { message = (JSON.parse(text) as HfError).error; } catch { /* Keep the raw response if it is not JSON. */ } throw new Error(message || 'README fetch failed.'); }
             setReadme(text);
         } catch (err) {
             if ((err as Error).name === 'AbortError') return; // superseded by a newer selection

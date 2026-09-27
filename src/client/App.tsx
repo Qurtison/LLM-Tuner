@@ -17,7 +17,8 @@ import { ChatPanel } from './features';
 import { MonitorPanel, LiveRequestsPanel, HistoryPanel, BenchPanel, OverviewPanel, FileBrowserPanel, UpdateControl, LogsPanel, PresetDock, PresetBrowserDialog } from './features';
 import LaunchBar from './features/interactive/LaunchBar';
 import RpcWorkerPanel from './features/interactive/RpcWorkerPanel';
-import { PanelCanvas, PanelVisibilityMenu, registerPanel } from './components/panels';
+import { PanelCanvas, PanelVisibilityMenu } from './components/panels';
+import { registerPanel } from './components/panelState';
 
 registerPanel('chat', 'Chat', () => <ChatPanel />);
 registerPanel('preset-dock', 'Preset Inspector', () => <PresetDock />);

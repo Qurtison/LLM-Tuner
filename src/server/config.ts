@@ -1,21 +1,10 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { ConfigResponse } from '../../shared/contracts';
 
 export interface Build { id: string; label: string; path: string }
 export interface TransportPreset { id: string; label: string }
-export interface DashboardConfig {
-    server: { host: string; port: number; corsOrigins: string[]; maxBodyBytes: number };
-    paths: { modelDirectories: string[]; huggingFaceCache: string; logsDirectory: string };
-    llama: { builds: Build[]; defaultPort: number; defaultHost: string; rpcPort: number };
-    telemetry: { enabled: boolean; host: string; port: number; pollMs: number; providers: string[]; source: 'monitor' | 'builtin' };
-    processes: { cleanupManagedPortsOnStart: boolean; stopGraceMs: number };
-    service: { unitName: string; unitPath: string; enableOnApply: boolean; manageViaSystemd: boolean };
-    upgrade: { repoDir: string; buildDir: string; enabled: boolean };
-    worker: { sshHost: string; rpcTarget: string; workDirectory: string; startCommand: string; stopCommand: string; statusCommand: string; logsCommand: string; transportPresets: TransportPreset[] };
-    uiDefaults: { contextSize: number; gpuLayers: number; tensorSplit: number; temperature: number };
-    launch: { modelPath: string; modelName: string; build: string; deviceA: string; deviceB: string; splitMode: string; ctx: number; ngl: number; port: number; fa: boolean; cacheK: string; cacheV: string; specType: string; specDraftNMax: number; reasoningPreserve: boolean; jinja: boolean; temp: number; tensorSplit: number; extraArgs: string; chatTemplateFile: string; chatTemplateKwargs: string };
-}
 
 export class ConfigError extends Error {
     issues: string[];
@@ -30,102 +19,291 @@ export class ConfigError extends Error {
 type Source = 'default' | 'file' | 'env';
 type Raw = Record<string, unknown>;
 
-const defaults = {
-    server: { host: '127.0.0.1', port: 3000, corsOrigins: [], maxBodyBytes: 10 * 1024 * 1024 },
-    paths: { modelDirectories: ['./models'], huggingFaceCache: null as string | null, logsDirectory: './logs' },
-    llama: { builds: [], defaultPort: 8080, defaultHost: '127.0.0.1', rpcPort: 50052 },
-    telemetry: { enabled: true, host: '127.0.0.1', port: 8081, pollMs: 1000, providers: ['nvidia', 'amd', 'linux'], source: 'builtin' },
-    processes: { cleanupManagedPortsOnStart: false, stopGraceMs: 3000 },
-    service: { unitName: 'llama-dashboard-server.service', unitPath: '', enableOnApply: false, manageViaSystemd: false },
-    upgrade: { repoDir: '', buildDir: '', enabled: false },
-    worker: { sshHost: '', rpcTarget: '', workDirectory: '', startCommand: 'docker compose -f docker-compose.worker.yml up -d', stopCommand: 'docker compose -f docker-compose.worker.yml down', statusCommand: 'docker compose -f docker-compose.worker.yml ps --filter status=running -q', logsCommand: 'docker compose -f docker-compose.worker.yml logs --tail=50', transportPresets: [] },
-    uiDefaults: { contextSize: 4096, gpuLayers: 0, tensorSplit: 50, temperature: 0.8 },
-    launch: { modelPath: '', modelName: '', build: '', deviceA: '', deviceB: '', splitMode: 'none', ctx: 110000, ngl: 999, port: 8080, fa: true, cacheK: 'q8_0', cacheV: 'q8_0', specType: '', specDraftNMax: 2, reasoningPreserve: false, jinja: false, temp: 0.8, tensorSplit: 50, extraArgs: '', chatTemplateFile: '', chatTemplateKwargs: '' }
+// --- THE SCHEMA, WRITTEN ONCE --------------------------------------------
+// One table is the whole config: it produces the defaults, the set of keys a
+// file may set, the validation, and the DashboardConfig type. Adding a setting
+// used to mean four edits in four parallel structures (the interface, the
+// defaults, the `shape` key list, and validate()), and missing the `shape` one
+// silently rejected a valid file. There is no fourth structure to miss now.
+
+/** Validates one value. Push zero or more human-readable problems. */
+type Check = (value: unknown, field: string, issues: string[]) => void;
+/** Validates a whole group, for rules that span sibling fields. */
+type GroupCheck = (value: Raw, field: string, issues: string[]) => void;
+
+interface Leaf<T> { readonly value: T; readonly check?: Check }
+interface Group<G = GroupSpec> { readonly group: G; readonly check?: GroupCheck }
+type GroupSpec = { readonly [key: string]: Node };
+type Node = Leaf<unknown> | Group;
+
+type InferNode<N> =
+    N extends { group: infer G } ? { [K in keyof G]: InferNode<G[K]> }
+        : N extends { value: infer V } ? V
+            : never;
+
+function leaf<T>(value: T, check?: Check): Leaf<T> { return { value, check }; }
+function group<G extends GroupSpec>(spec: G, check?: GroupCheck): Group<G> { return { group: spec, check }; }
+
+// --- checks ----------------------------------------------------------------
+// The messages are the contract: they are all a rejected user ever sees.
+
+const nonEmpty: Check = (value, field, issues) => {
+    if (typeof value !== 'string' || value.trim() === '') issues.push(`${field} must be a non-empty string`);
 };
 
-const shape: Record<string, unknown> = {
-    server: { host: 0, port: 0, corsOrigins: 0, maxBodyBytes: 0 },
-    paths: { modelDirectories: 0, huggingFaceCache: 0, logsDirectory: 0 },
-    llama: { builds: 0, defaultPort: 0, defaultHost: 0, rpcPort: 0 },
-    telemetry: { enabled: 0, host: 0, port: 0, pollMs: 0, providers: 0, source: 0 },
-    processes: { cleanupManagedPortsOnStart: 0, stopGraceMs: 0 },
-    service: { unitName: 0, unitPath: 0, enableOnApply: 0, manageViaSystemd: 0 },
-    upgrade: { repoDir: 0, buildDir: 0, enabled: 0 },
-    worker: { sshHost: 0, rpcTarget: 0, workDirectory: 0, startCommand: 0, stopCommand: 0, statusCommand: 0, logsCommand: 0, transportPresets: 0 },
-    uiDefaults: { contextSize: 0, gpuLayers: 0, tensorSplit: 0, temperature: 0 },
-    launch: { modelPath: 0, modelName: 0, build: 0, deviceA: 0, deviceB: 0, splitMode: 0, ctx: 0, ngl: 0, port: 0, fa: 0, cacheK: 0, cacheV: 0, specType: 0, specDraftNMax: 0, reasoningPreserve: 0, jinja: 0, temp: 0, tensorSplit: 0, extraArgs: 0, chatTemplateFile: 0, chatTemplateKwargs: 0 }
+const aString: Check = (value, field, issues) => {
+    if (typeof value !== 'string') issues.push(`${field} must be a string`);
 };
+
+const aBoolean: Check = (value, field, issues) => {
+    if (typeof value !== 'boolean') issues.push(`${field} must be a boolean`);
+};
+
+const intBetween = (min: number, max: number): Check => (value, field, issues) => {
+    if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+        issues.push(`${field} must be an integer between ${min} and ${max}`);
+    }
+};
+
+const numBetween = (min: number, max: number): Check => (value, field, issues) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+        issues.push(`${field} must be a number between ${min} and ${max}`);
+    }
+};
+
+const numAbove = (min: number): Check => (value, field, issues) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= min) {
+        issues.push(`${field} must be a number greater than ${min}`);
+    }
+};
+
+const stringArray: Check = (value, field, issues) => {
+    if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim())) {
+        issues.push(`${field} must be an array of non-empty strings`);
+    }
+};
+
+/** A string that may be left empty, but not set to something meaningless. */
+const stringWhenProvided: Check = (value, field, issues) => {
+    if (value !== '' && (typeof value !== 'string' || value.trim() === '')) {
+        issues.push(`${field} must be a non-empty string when provided`);
+    }
+};
+
+/** null means "not configured"; anything else has to be a real path. */
+const nullableNonEmpty: Check = (value, field, issues) => {
+    if (value !== null) nonEmpty(value, field, issues);
+};
+
+const PROVIDERS = ['nvidia', 'amd', 'linux'] as const;
+
+const providerList: Check = (value, field, issues) => {
+    if (!Array.isArray(value) || !value.every(v => typeof v === 'string' && (PROVIDERS as readonly string[]).includes(v))) {
+        issues.push(`${field} must contain only nvidia, amd, or linux`);
+    }
+};
+
+const oneOf = (allowed: readonly string[]): Check => (value, field, issues) => {
+    if (typeof value !== 'string' || !allowed.includes(value)) {
+        issues.push(`${field} must be "monitor" or "builtin"`);
+    }
+};
+
+/** A list of `{ id, label }` records, rejecting unknown keys inside each. */
+const recordArray = (keys: readonly string[]): Check => (value, field, issues) => {
+    if (!Array.isArray(value)) {
+        issues.push(`${field} must be an array`);
+        return;
+    }
+    const allowed: Raw = Object.fromEntries(keys.map(k => [k, 0]));
+    value.forEach((entry, index) => {
+        const at = `${field}.${index}`;
+        if (!isObject(entry)) {
+            issues.push(`${at} must be an object`);
+            return;
+        }
+        checkUnknown(entry, allowed, at, issues);
+        for (const key of keys) nonEmpty(entry[key], `${at}.${key}`, issues);
+    });
+};
+
+const WORKER_COMMANDS = ['startCommand', 'stopCommand', 'statusCommand', 'logsCommand'] as const;
+
+/** All four worker commands or none: a half-configured worker cannot start. */
+const workerCommandsTogether: GroupCheck = (value, _field, issues) => {
+    const commands = WORKER_COMMANDS.map(key => value[key]);
+    const set = commands.filter(v => typeof v === 'string' && v !== '');
+    if (set.length !== 0 && set.length !== WORKER_COMMANDS.length) {
+        issues.push('worker command section requires all four commands when any command is non-empty');
+    }
+};
+
+// --- the table -------------------------------------------------------------
+
+const PORT = intBetween(1, 65535);
+const ANY_INT = intBetween(1, Number.MAX_SAFE_INTEGER);
+
+const CONFIG_SPEC = group({
+    server: group({
+        host: leaf('127.0.0.1', nonEmpty),
+        port: leaf(3000, PORT),
+        corsOrigins: leaf<string[]>([], stringArray),
+        maxBodyBytes: leaf(10 * 1024 * 1024, ANY_INT),
+    }),
+    paths: group({
+        modelDirectories: leaf(['./models'], stringArray),
+        // SAFETY: the null default is a sentinel meaning "derive this from the
+        // environment". loadConfig replaces it with a real path before the
+        // config is returned, so no caller can observe the null.
+        huggingFaceCache: leaf<string>(null as unknown as string, nullableNonEmpty),
+        logsDirectory: leaf('./logs', nonEmpty),
+    }),
+    llama: group({
+        builds: leaf<Build[]>([], recordArray(['id', 'label', 'path'])),
+        defaultPort: leaf(8080, PORT),
+        defaultHost: leaf('127.0.0.1', nonEmpty),
+        rpcPort: leaf(50052, PORT),
+    }),
+    telemetry: group({
+        enabled: leaf(true, aBoolean),
+        host: leaf('127.0.0.1', nonEmpty),
+        port: leaf(8081, PORT),
+        pollMs: leaf(1000, intBetween(50, 60000)),
+        providers: leaf<string[]>([...PROVIDERS], providerList),
+        source: leaf<'monitor' | 'builtin'>('builtin', oneOf(['monitor', 'builtin'])),
+    }),
+    processes: group({
+        cleanupManagedPortsOnStart: leaf(false, aBoolean),
+        stopGraceMs: leaf(3000, ANY_INT),
+    }),
+    service: group({
+        unitName: leaf('llama-dashboard-server.service', aString),
+        unitPath: leaf('', aString),
+        enableOnApply: leaf(false, aBoolean),
+        manageViaSystemd: leaf(false, aBoolean),
+    }),
+    upgrade: group({
+        repoDir: leaf('', aString),
+        buildDir: leaf('', aString),
+        enabled: leaf(false, aBoolean),
+    }),
+    worker: group({
+        sshHost: leaf('', aString),
+        rpcTarget: leaf('', aString),
+        workDirectory: leaf('', aString),
+        startCommand: leaf('docker compose -f docker-compose.worker.yml up -d', aString),
+        stopCommand: leaf('docker compose -f docker-compose.worker.yml down', aString),
+        statusCommand: leaf('docker compose -f docker-compose.worker.yml ps --filter status=running -q', aString),
+        logsCommand: leaf('docker compose -f docker-compose.worker.yml logs --tail=50', aString),
+        transportPresets: leaf<TransportPreset[]>([], recordArray(['id', 'label'])),
+    }, workerCommandsTogether),
+    uiDefaults: group({
+        contextSize: leaf(4096, ANY_INT),
+        gpuLayers: leaf(0, intBetween(0, Number.MAX_SAFE_INTEGER)),
+        tensorSplit: leaf(50, numBetween(0, 100)),
+        temperature: leaf(0.8, numAbove(0)),
+    }),
+    launch: group({
+        modelPath: leaf('', stringWhenProvided),
+        modelName: leaf('', stringWhenProvided),
+        build: leaf('', stringWhenProvided),
+        deviceA: leaf('', stringWhenProvided),
+        deviceB: leaf('', stringWhenProvided),
+        splitMode: leaf('none', stringWhenProvided),
+        ctx: leaf(110000, ANY_INT),
+        ngl: leaf(999, intBetween(0, Number.MAX_SAFE_INTEGER)),
+        port: leaf(8080, PORT),
+        fa: leaf(true, aBoolean),
+        cacheK: leaf('q8_0', stringWhenProvided),
+        cacheV: leaf('q8_0', stringWhenProvided),
+        specType: leaf('', stringWhenProvided),
+        specDraftNMax: leaf(2, intBetween(0, Number.MAX_SAFE_INTEGER)),
+        reasoningPreserve: leaf(false, aBoolean),
+        jinja: leaf(false, aBoolean),
+        temp: leaf(0.8, numAbove(0)),
+        tensorSplit: leaf(50, numBetween(0, 100)),
+        extraArgs: leaf('', stringWhenProvided),
+        chatTemplateFile: leaf('', stringWhenProvided),
+        chatTemplateKwargs: leaf('', stringWhenProvided),
+    }),
+});
+
+/** The resolved config, described by the table above. */
+export type DashboardConfig = InferNode<typeof CONFIG_SPEC>;
+
+// --- deriving the rest from the table --------------------------------------
+
+function isGroup(node: Node): node is Group { return typeof node === 'object' && node !== null && 'group' in node; }
 
 function isObject(value: unknown): value is Raw {
     return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function clone<T>(value: T): T {
-    return JSON.parse(JSON.stringify(value));
+/** The key list a config file is allowed to set. A miss here is a rejected file. */
+function shapeOf(spec: GroupSpec): Raw {
+    const out: Raw = {};
+    for (const [key, node] of Object.entries(spec)) out[key] = isGroup(node) ? shapeOf(node.group) : 0;
+    return out;
 }
 
-function checkUnknown(value: unknown, allowed: Record<string, unknown>, prefix: string, issues: string[]): void {
+/** The built-in defaults, in table order, which is also the reported order. */
+function defaultsOf(spec: GroupSpec): Raw {
+    const out: Raw = {};
+    for (const [key, node] of Object.entries(spec)) out[key] = isGroup(node) ? defaultsOf(node.group) : (node as Leaf<unknown>).value;
+    return out;
+}
+
+/** A fresh copy of the defaults, since each load merges into its own. */
+function freshDefaults(): Raw { return structuredClone(defaults); }
+
+function checkUnknown(value: unknown, allowed: Raw, prefix: string, issues: string[]): void {
     if (!isObject(value)) return;
     for (const key of Object.keys(value)) {
         const name = prefix ? prefix + '.' + key : key;
-        if (!(key in allowed)) {
+        if (!Object.hasOwn(allowed, key)) {
             issues.push('unknown key: ' + name);
         } else if (isObject(allowed[key])) {
-            checkUnknown(value[key], allowed[key] as Raw, name, issues);
+            checkUnknown(value[key], allowed[key], name, issues);
         }
     }
 }
 
-function merge(target: Raw, source: Raw): void {
-    for (const [key, value] of Object.entries(source)) {
-        if (isObject(value) && isObject(target[key])) merge(target[key] as Raw, value);
-        else target[key] = value;
-    }
-}
+const EMPTY: Raw = {};
 
-function nonEmpty(value: unknown, field: string, issues: string[]): value is string {
-    if (typeof value !== 'string' || value.trim() === '') {
-        issues.push(field + ' must be a non-empty string');
-        return false;
+function validateSpec(spec: GroupSpec, value: Raw, prefix: string, issues: string[]): void {
+    for (const [key, node] of Object.entries(spec)) {
+        const field = prefix ? `${prefix}.${key}` : key;
+        if (isGroup(node)) {
+            const child = (value as Raw)[key];
+            // A group must be an object. If the file set one to a scalar, every
+            // leaf still reports its own problem -- reading a field off a scalar
+            // yields undefined -- which is both the pre-existing behaviour and the
+            // only thing standing between a bad file and a server that starts
+            // with `config.server` set to a string.
+            const group = isObject(child) ? child : EMPTY;
+            validateSpec(node.group, group, field, issues);
+            node.check?.(group, field, issues);
+        } else {
+            (node as Leaf<unknown>).check?.((value as Raw)[key], field, issues);
+        }
     }
-    return true;
-}
-
-function integer(value: unknown, field: string, min: number, max: number, issues: string[]): void {
-    if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) issues.push(field + ' must be an integer between ' + min + ' and ' + max);
 }
 
 function validate(raw: Raw, issues: string[]): void {
-    const s = raw.server as Raw; const p = raw.paths as Raw; const l = raw.llama as Raw;
-    const t = raw.telemetry as Raw; const pr = raw.processes as Raw; const svc = raw.service as Raw; const upg = raw.upgrade as Raw; const w = raw.worker as Raw; const u = raw.uiDefaults as Raw; const launch = raw.launch as Raw;
-    const hostChecks: [string, unknown][] = [['server.host', s.host], ['paths.logsDirectory', p.logsDirectory], ['llama.defaultHost', l.defaultHost], ['telemetry.host', t.host]];
-    for (const [field, value] of hostChecks) nonEmpty(value, field, issues);
-    if (p.huggingFaceCache !== null) nonEmpty(p.huggingFaceCache, 'paths.huggingFaceCache', issues);
-    for (const [field, value] of [['worker.sshHost', w.sshHost], ['worker.rpcTarget', w.rpcTarget], ['worker.workDirectory', w.workDirectory], ['worker.startCommand', w.startCommand], ['worker.stopCommand', w.stopCommand], ['worker.statusCommand', w.statusCommand], ['worker.logsCommand', w.logsCommand]]) if (typeof value !== 'string') issues.push(field + ' must be a string');
-    for (const [field, value] of [['server.corsOrigins', s.corsOrigins], ['paths.modelDirectories', p.modelDirectories]]) {
-        if (!Array.isArray(value) || !value.every(item => typeof item === 'string' && item.trim())) issues.push(field + ' must be an array of non-empty strings');
+    validateSpec(CONFIG_SPEC.group, raw, '', issues);
+}
+
+const shape = shapeOf(CONFIG_SPEC.group);
+const defaults = defaultsOf(CONFIG_SPEC.group);
+
+// Unknown keys are reported by checkUnknown, but must never reach the merge:
+// assigning __proto__ or constructor into ordinary objects can mutate their prototype.
+function merge(target: Raw, source: Raw): void {
+    for (const [key, value] of Object.entries(source)) {
+        if (!Object.hasOwn(target, key)) continue;
+        if (isObject(value) && isObject(target[key])) merge(target[key] as Raw, value);
+        else target[key] = value;
     }
-    for (const [field, value] of [['telemetry.enabled', t.enabled], ['processes.cleanupManagedPortsOnStart', pr.cleanupManagedPortsOnStart]]) if (typeof value !== 'boolean') issues.push(field + ' must be a boolean');
-    integer(s.port, 'server.port', 1, 65535, issues); integer(l.defaultPort, 'llama.defaultPort', 1, 65535, issues); integer(l.rpcPort, 'llama.rpcPort', 1, 65535, issues); integer(t.port, 'telemetry.port', 1, 65535, issues);
-    integer(s.maxBodyBytes, 'server.maxBodyBytes', 1, Number.MAX_SAFE_INTEGER, issues); integer(t.pollMs, 'telemetry.pollMs', 50, 60000, issues); integer(pr.stopGraceMs, 'processes.stopGraceMs', 1, Number.MAX_SAFE_INTEGER, issues);
-    for (const [field, value] of [['service.unitName', svc.unitName], ['service.unitPath', svc.unitPath], ['upgrade.repoDir', upg.repoDir], ['upgrade.buildDir', upg.buildDir]]) if (typeof value !== 'string') issues.push(field + ' must be a string');
-    if (typeof svc.enableOnApply !== 'boolean') issues.push('service.enableOnApply must be a boolean');
-    if (typeof svc.manageViaSystemd !== 'boolean') issues.push('service.manageViaSystemd must be a boolean');
-    if (typeof upg.enabled !== 'boolean') issues.push('upgrade.enabled must be a boolean'); integer(u.contextSize, 'uiDefaults.contextSize', 1, Number.MAX_SAFE_INTEGER, issues); integer(u.gpuLayers, 'uiDefaults.gpuLayers', 0, Number.MAX_SAFE_INTEGER, issues);
-    for (const field of ['modelPath', 'modelName', 'build', 'deviceA', 'deviceB', 'cacheK', 'cacheV', 'specType', 'extraArgs', 'chatTemplateFile', 'chatTemplateKwargs']) if (launch[field] !== '' && (typeof launch[field] !== 'string' || launch[field].trim() === '')) issues.push('launch.' + field + ' must be a non-empty string when provided');
-    integer(launch.ctx, 'launch.ctx', 1, Number.MAX_SAFE_INTEGER, issues); integer(launch.ngl, 'launch.ngl', 0, Number.MAX_SAFE_INTEGER, issues); integer(launch.port, 'launch.port', 1, 65535, issues); integer(launch.specDraftNMax, 'launch.specDraftNMax', 0, Number.MAX_SAFE_INTEGER, issues);
-    for (const field of ['fa', 'reasoningPreserve', 'jinja']) if (typeof launch[field] !== 'boolean') issues.push('launch.' + field + ' must be a boolean');
-    if (launch.splitMode !== '' && (typeof launch.splitMode !== 'string' || launch.splitMode.trim() === '')) issues.push('launch.splitMode must be a non-empty string when provided');
-    if (typeof launch.tensorSplit !== 'number' || !Number.isFinite(launch.tensorSplit) || launch.tensorSplit < 0 || launch.tensorSplit > 100) issues.push('launch.tensorSplit must be a number between 0 and 100');
-    if (typeof launch.temp !== 'number' || !Number.isFinite(launch.temp) || launch.temp <= 0) issues.push('launch.temp must be a number greater than 0');
-    if (typeof u.tensorSplit !== 'number' || !Number.isFinite(u.tensorSplit) || u.tensorSplit < 0 || u.tensorSplit > 100) issues.push('uiDefaults.tensorSplit must be a number between 0 and 100');
-    if (typeof u.temperature !== 'number' || !Number.isFinite(u.temperature) || u.temperature <= 0) issues.push('uiDefaults.temperature must be a number greater than 0');
-    if (!Array.isArray(t.providers) || !t.providers.every(v => typeof v === 'string' && ['nvidia', 'amd', 'linux'].includes(v))) issues.push('telemetry.providers must contain only nvidia, amd, or linux');
-    if (t.source !== 'monitor' && t.source !== 'builtin') issues.push('telemetry.source must be "monitor" or "builtin"');
-    if (!Array.isArray(l.builds)) issues.push('llama.builds must be an array'); else l.builds.forEach((b, i) => { if (!isObject(b)) issues.push('llama.builds.' + i + ' must be an object'); else { checkUnknown(b, { id: 0, label: 0, path: 0 }, 'llama.builds.' + i, issues); nonEmpty(b.id, 'llama.builds.' + i + '.id', issues); nonEmpty(b.label, 'llama.builds.' + i + '.label', issues); nonEmpty(b.path, 'llama.builds.' + i + '.path', issues); } });
-    if (!Array.isArray(w.transportPresets)) issues.push('worker.transportPresets must be an array'); else w.transportPresets.forEach((preset, i) => { if (!isObject(preset)) issues.push('worker.transportPresets.' + i + ' must be an object'); else { checkUnknown(preset, { id: 0, label: 0 }, 'worker.transportPresets.' + i, issues); nonEmpty(preset.id, 'worker.transportPresets.' + i + '.id', issues); nonEmpty(preset.label, 'worker.transportPresets.' + i + '.label', issues); } });
-    const commands = [w.startCommand, w.stopCommand, w.statusCommand, w.logsCommand] as unknown[];
-    if (commands.some(v => typeof v === 'string' && v !== '') && !commands.every(v => typeof v === 'string' && v !== '')) issues.push('worker command section requires all four commands when any command is non-empty');
 }
 
 function resolvePath(value: string, base: string): string { return path.isAbsolute(value) ? value : path.resolve(base, value); }
@@ -136,58 +314,136 @@ export async function loadConfig(opts: { appRoot: string; env?: Record<string, s
     const log = opts.log || console.log;
     const appRoot = path.resolve(opts.appRoot);
     const configured = env.DASHBOARD_CONFIG;
-    const candidates = configured ? [path.resolve(appRoot, configured)] : [path.join(appRoot, 'config/dashboard.json'), path.join(appRoot, 'dashboard.config.json')];
-    let filePath: string | undefined;
     const newFile = path.join(appRoot, 'config/dashboard.json');
     const legacyFile = path.join(appRoot, 'dashboard.config.json');
+
+    let filePath: string | undefined;
     if (configured) {
-        if (!fs.existsSync(candidates[0])) throw new ConfigError(['DASHBOARD_CONFIG file not found: ' + candidates[0]]);
-        filePath = candidates[0];
-    } else filePath = candidates.find(fs.existsSync);
-    if (fs.existsSync(newFile) && fs.existsSync(legacyFile)) log('[config] legacy dashboard.config.json ignored; using config/dashboard.json');
-    const raw = clone(defaults) as Raw;
+        const resolved = path.resolve(appRoot, configured);
+        if (!fs.existsSync(resolved)) throw new ConfigError(['DASHBOARD_CONFIG file not found: ' + resolved]);
+        filePath = resolved;
+    } else {
+        filePath = [newFile, legacyFile].find(candidate => fs.existsSync(candidate));
+    }
+    if (fs.existsSync(newFile) && fs.existsSync(legacyFile)) {
+        log('[config] legacy dashboard.config.json ignored; using config/dashboard.json');
+    }
+
+    const raw = freshDefaults();
     const sources: Record<string, Source> = {};
     let fileBase = appRoot;
+
     if (filePath) {
         fileBase = path.dirname(filePath);
         let parsed: unknown;
-        try { parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { throw new ConfigError(['config file invalid: ' + (error as Error).message]); }
+        try {
+            parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        } catch (error) {
+            throw new ConfigError(['config file invalid: ' + (error as Error).message]);
+        }
         if (!isObject(parsed)) throw new ConfigError(['config file must contain an object']);
-        const legacy = filePath.endsWith('dashboard.config.json') && !configured;
+
+        const legacy = filePath === legacyFile && !configured;
         if (legacy) {
+            // The old file is a different shape entirely, so it is translated
+            // rather than validated: unknown keys there are simply not ours.
             const mapped: Raw = {};
-            if (Array.isArray(parsed.llamaServerBuilds)) mapped.llama = { builds: parsed.llamaServerBuilds };
-            else if (typeof parsed.llamaServerBinary === 'string') mapped.llama = { builds: [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary }] };
+            if (Array.isArray(parsed.llamaServerBuilds)) {
+                mapped.llama = { builds: parsed.llamaServerBuilds };
+            } else if (typeof parsed.llamaServerBinary === 'string') {
+                mapped.llama = { builds: [{ id: 'default', label: 'Default', path: parsed.llamaServerBinary }] };
+            }
             merge(raw, mapped);
             if (mapped.llama) sources['llama.builds'] = 'file';
         } else {
-            const issues: string[] = []; checkUnknown(parsed, shape, '', issues); merge(raw, parsed); validate(raw, issues); if (issues.length) throw new ConfigError(issues);
-            function mark(value: unknown, prefix = ''): void { if (!isObject(value)) { sources[prefix] = 'file'; return; } for (const [key, child] of Object.entries(value)) mark(child, prefix ? prefix + '.' + key : key); }
+            const issues: string[] = [];
+            checkUnknown(parsed, shape, '', issues);
+            merge(raw, parsed);
+            validate(raw, issues);
+            if (issues.length) throw new ConfigError(issues);
+            // Every key the file set is reported as coming from the file.
+            const mark = (value: unknown, prefix = ''): void => {
+                if (!isObject(value)) { sources[prefix] = 'file'; return; }
+                for (const [key, child] of Object.entries(value)) mark(child, prefix ? prefix + '.' + key : key);
+            };
             mark(parsed);
         }
+    } else {
+        const issues: string[] = [];
+        validate(raw, issues);
+        if (issues.length) throw new ConfigError(issues);
     }
-    if (!filePath || (filePath.endsWith('dashboard.config.json') && !configured)) { const issues: string[] = []; validate(raw, issues); if (issues.length) throw new ConfigError(issues); }
+
     const envIssues: string[] = [];
-    if (env.DASHBOARD_HOST !== undefined) { raw.server = raw.server as Raw; (raw.server as Raw).host = env.DASHBOARD_HOST; sources['server.host'] = 'env'; }
+    if (env.DASHBOARD_HOST !== undefined) { (raw.server as Raw).host = env.DASHBOARD_HOST; sources['server.host'] = 'env'; }
     if (env.DASHBOARD_LOGS_DIR !== undefined) { (raw.paths as Raw).logsDirectory = env.DASHBOARD_LOGS_DIR; sources['paths.logsDirectory'] = 'env'; }
-    if (env.DASHBOARD_PORT !== undefined) { const port = Number(env.DASHBOARD_PORT); if (!Number.isInteger(port) || port < 1 || port > 65535) envIssues.push('DASHBOARD_PORT must be an integer between 1 and 65535'); else { (raw.server as Raw).port = port; sources['server.port'] = 'env'; } }
-    validate(raw, envIssues); if (envIssues.length) throw new ConfigError(envIssues);
+    if (env.DASHBOARD_PORT !== undefined) {
+        const port = Number(env.DASHBOARD_PORT);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+            envIssues.push('DASHBOARD_PORT must be an integer between 1 and 65535');
+        } else {
+            (raw.server as Raw).port = port;
+            sources['server.port'] = 'env';
+        }
+    }
+    validate(raw, envIssues);
+    if (envIssues.length) throw new ConfigError(envIssues);
+
+    // SAFETY: raw is a fresh copy of the spec's defaults with the parsed file
+    // and the environment merged over it, and validate() has just confirmed every
+    // leaf matches the check the spec declares for it. The spec is the only
+    // description of the shape, so this is its own type by construction.
     const cfg = raw as unknown as DashboardConfig;
     cfg.paths.modelDirectories = cfg.paths.modelDirectories.map(v => resolvePath(v, fileBase));
     cfg.paths.logsDirectory = resolvePath(cfg.paths.logsDirectory, fileBase);
-    const cacheValue = env.HF_HOME || env.HUGGINGFACE_HUB_CACHE || cfg.paths.huggingFaceCache || path.join(os.homedir(), '.cache', 'huggingface', 'hub');
-    if (env.HF_HOME || env.HUGGINGFACE_HUB_CACHE) sources['paths.huggingFaceCache'] = 'env';
+
+    // The HF cache is the one setting the environment can fill in on its own.
+    const cacheFromEnv = env.HF_HOME || env.HUGGINGFACE_HUB_CACHE;
+    const cacheValue = cacheFromEnv || cfg.paths.huggingFaceCache || path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+    if (cacheFromEnv) sources['paths.huggingFaceCache'] = 'env';
     else if (!cfg.paths.huggingFaceCache) sources['paths.huggingFaceCache'] = 'default';
     cfg.paths.huggingFaceCache = resolvePath(cacheValue, fileBase);
+
     cfg.llama.builds = cfg.llama.builds.map(build => ({ ...build, path: resolvePath(build.path, fileBase) }));
+
     log('[config] source: built-in defaults' + (filePath ? ', file: ' + filePath : ''));
-    function print(value: unknown, prefix = ''): void { if (Array.isArray(value) || !isObject(value)) { log('[config] ' + prefix + ' = ' + (typeof value === 'string' ? value : JSON.stringify(value)) + ' (' + sourceFor(sources, prefix) + ')'); return; } for (const [key, child] of Object.entries(value)) print(child, prefix ? prefix + '.' + key : key); }
+    const print = (value: unknown, prefix = ''): void => {
+        if (Array.isArray(value) || !isObject(value)) {
+            const shown = typeof value === 'string' ? value : JSON.stringify(value);
+            log('[config] ' + prefix + ' = ' + shown + ' (' + sourceFor(sources, prefix) + ')');
+            return;
+        }
+        for (const [key, child] of Object.entries(value)) print(child, prefix ? prefix + '.' + key : key);
+    };
     print(cfg);
     return cfg;
 }
 
-export function publicConfig(cfg: DashboardConfig): unknown {
+/**
+ * The client-facing projection of the config. Typed as ConfigResponse so the
+ * wire shape is checked in both directions instead of being `unknown` here
+ * and a guess in the browser.
+ */
+export function publicConfig(cfg: DashboardConfig): ConfigResponse {
     const worker = cfg.worker;
+    // modelPath is a host path; the browser gets the basename only.
     const { modelPath, ...launch } = cfg.launch;
-    return { uiDefaults: cfg.uiDefaults, launch: { ...launch, modelName: modelPath ? path.basename(modelPath) : '' }, llama: { defaultPort: cfg.llama.defaultPort, defaultHost: cfg.llama.defaultHost, rpcPort: cfg.llama.rpcPort, builds: cfg.llama.builds.map(({ id, label }) => ({ id, label })) }, worker: { enabled: !!worker.sshHost && [worker.startCommand, worker.stopCommand, worker.statusCommand, worker.logsCommand].every(Boolean), sshHost: worker.sshHost, rpcTarget: worker.rpcTarget, transportPresets: worker.transportPresets }, telemetry: { enabled: cfg.telemetry.enabled, pollMs: cfg.telemetry.pollMs, providers: cfg.telemetry.providers } };
+    return {
+        uiDefaults: cfg.uiDefaults,
+        launch: { ...launch, modelName: modelPath ? path.basename(modelPath) : '' },
+        llama: {
+            defaultPort: cfg.llama.defaultPort,
+            defaultHost: cfg.llama.defaultHost,
+            rpcPort: cfg.llama.rpcPort,
+            // The binary path is host-local, so the client only ever sees labels.
+            builds: cfg.llama.builds.map(({ id, label }) => ({ id, label })),
+        },
+        worker: {
+            enabled: !!worker.sshHost && [worker.startCommand, worker.stopCommand, worker.statusCommand, worker.logsCommand].every(Boolean),
+            sshHost: worker.sshHost,
+            rpcTarget: worker.rpcTarget,
+            transportPresets: worker.transportPresets,
+        },
+        telemetry: { enabled: cfg.telemetry.enabled, pollMs: cfg.telemetry.pollMs, providers: cfg.telemetry.providers },
+    };
 }

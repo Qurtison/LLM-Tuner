@@ -1,37 +1,37 @@
-# llama-params snapshot (248 params)
+# llama-params snapshot (244 params)
 
-Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server --help` on 2026-08-27T21:39:18.429Z
+Generated from `llama.cpp/build/bin/llama-server` on 2026-09-27T03:14:48.512Z
 
 ## By scope
-- server: 195
+- server: 194
 - request: 44
-- archive: 9
+- archive: 6
 
 ## By group
 - speed: 15
 - memory: 16
 - context: 14
 - sampling: 36
-- model: 57
+- model: 61
 - devices: 8
-- speculative: 34
+- speculative: 36
 - server: 21
 - agents: 4
-- multimodal: 16
+- multimodal: 9
 - chat: 10
 - logging: 8
-- archive: 9
+- archive: 6
 
 ## Params
 | id | label | flags | group | scope | control | default | help |
 |---|---|---|---|---|---|---|---|
+| no_cont_batching | Cont Batching | -cb, --cont-batching, -nocb, --no-cont-batching | speed | server | toggle | true | whether to enable continuous batching (a.k.a dynamic batchin |
 | cpu_mask | CPU Mask | -C, --cpu-mask | speed | server | text |  | CPU affinity mask: arbitrarily long hex. |
 | cpu_mask_batch | CPU Mask Batch | -Cb, --cpu-mask-batch | speed | server | text |  | CPU affinity mask: arbitrarily long hex. |
 | cpu_range | CPU Range | -Cr, --cpu-range | speed | server | text |  | range of CPUs for affinity. |
 | cpu_range_batch | CPU Range Batch | -Crb, --cpu-range-batch | speed | server | text |  | ranges of CPUs for affinity. |
 | cpu_strict | CPU Strict | --cpu-strict | speed | server | enum | 0 | use strict CPU placement |
 | cpu_strict_batch | CPU Strict Batch | --cpu-strict-batch | speed | server | enum |  | use strict CPU placement |
-| no_cont_batching | No Cont Batching | -cb, --cont-batching, -nocb, --no-cont-batching | speed | server | toggle | enabled | whether to enable continuous batching (a.k.a dynamic batchin |
 | parallel | Parallel | -np, --parallel | speed | server | int | -1 | number of server slots |
 | poll | Poll | --poll | speed | server | text |  | use polling level to wait for work (0 - no polling, default: |
 | poll_batch | Poll Batch | --poll-batch | speed | server | enum |  | use polling to wait for work |
@@ -72,7 +72,7 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | yarn_orig_ctx | YARN Orig CTX | --yarn-orig-ctx | context | server | int | 0 | YaRN: original context size of model |
 | adaptive_decay | Adaptive Decay | --adaptive-decay | sampling | request | float | 0.9 | adaptive-p: decay rate for target adaptation over time. |
 | adaptive_target | Adaptive Target | --adaptive-target | sampling | request | int | -1 | adaptive-p: select tokens near this probability (valid range |
-| backend_sampling | Backend Sampling | -bs, --backend-sampling | sampling | request | toggle | disabled | enable backend sampling (experimental) |
+| backend_sampling | Backend Sampling | -bs, --backend-sampling | sampling | request | toggle | false | enable backend sampling (experimental) |
 | cache_reuse | Cache Reuse | --cache-reuse | sampling | request | int | 0 | min chunk size to attempt reusing from the cache via KV shif |
 | dry_allowed_length | Dry Allowed Length | --dry-allowed-length | sampling | request | int | 2 | set allowed length for DRY sampling |
 | dry_base | Dry Base | --dry-base | sampling | request | float | 1.75 | set DRY sampling base value |
@@ -106,63 +106,67 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | typical_p | Typical P | --typical, --typical-p | sampling | request | float | 1 | locally typical sampling, parameter p |
 | xtc_probability | Xtc Probability | --xtc-probability | sampling | request | float | 0 | xtc probability |
 | xtc_threshold | Xtc Threshold | --xtc-threshold | sampling | request | float | 0.1 | xtc threshold |
+| no_agent | Agent | -ag, --agent, -no-ag, --no-agent | model | server | toggle | false | whether to enable CORS proxy and all built-in tools - do not |
 | alias | Alias | -a, --alias | model | server | text |  | set model name aliases, comma-separated (to be used by API) |
+| no_cache_idle_slots | Cache Idle Slots | --cache-idle-slots, --no-cache-idle-slots | model | server | toggle | true | save idle slots to the prompt cache on new task, and clear t |
 | cache_list | Cache List | -cl, --cache-list | model | server | text |  | show list of models in cache |
+| no_cache_prompt | Cache Prompt | --cache-prompt, --no-cache-prompt | model | request | toggle | true | whether to enable prompt caching |
 | completion_bash | Completion Bash | --completion-bash | model | server | toggle |  | print source-able bash completion script for llama.cpp |
+| no_context_shift | Context Shift | --context-shift, --no-context-shift | model | server | toggle | false | whether to use context shift on infinite text generation |
 | control_vector | Control Vector | --control-vector | model | server | text |  | add a control vector note: use comma-separated values to add |
 | control_vector_layer_range | Control Vector Layer Range | --control-vector-layer-range | model | server | text |  | layer range to apply the control vector(s) to, start and end |
 | control_vector_scaled | Control Vector Scaled | --control-vector-scaled | model | server | text |  | add a control vector with user defined scaling SCALE note: u |
+| no_cors_credentials | Cors Credentials | --cors-credentials, --no-cors-credentials | model | server | toggle | true | whether to allow credentials for CORS note: if this is enabl |
 | docker_repo | Docker Repo | -dr, --docker-repo | model | server | text | unused | Docker Hub model repository. |
-| embeddings | Embeddings | --embedding, --embeddings | model | server | toggle | disabled | restrict to only support embedding use case; use only with d |
+| embeddings | Embeddings | --embedding, --embeddings | model | server | toggle | false | restrict to only support embedding use case; use only with d |
+| no_escape | Escape | -e, --escape, --no-escape | model | server | toggle | true | whether to process escapes sequences (\n, \r, \t, \', \", \\ |
 | flash_attn | Flash Attn | -fa, --flash-attn | model | server | enum |  | set Flash Attention use ('on', 'off', or 'auto', default: 'a |
-| gpt_oss_120b_default | Gpt Oss 120b Default | --gpt-oss-120b-default | model | server | toggle |  | use gpt-oss-120b (note: can download weights from the intern |
-| gpt_oss_20b_default | Gpt Oss 20b Default | --gpt-oss-20b-default | model | server | toggle |  | use gpt-oss-20b (note: can download weights from the interne |
 | hf_file | HF File | -hff, --hf-file | model | server | path | unused | Hugging Face model file. |
 | hf_repo | HF Repo | -hf, -hfr, --hf-repo | model | server | text | unused | Hugging Face model repository; quant is optional, case-insen |
 | hf_repo_draft | HF Repo Draft | --spec-draft-hf, -hfd, -hfrd, --hf-repo-draft | model | server | text | unused | Same as --hf-repo, but for the draft model |
 | hf_token | HF Token | -hft, --hf-token | model | server | text | value from HF_TOKEN environment variable | Hugging Face access token |
+| no_jinja | JINJA | --jinja, --no-jinja | model | server | toggle | true | whether to use jinja template engine for chat |
+| no_kv_offload | KV Offload | -kvo, --kv-offload, -nkvo, --no-kv-offload | model | server | toggle | true | whether to enable KV cache offloading |
+| no_kv_unified | KV Unified | -kvu, --kv-unified, -no-kvu, --no-kv-unified | model | server | text | enabled if number of slots is auto | use single unified KV buffer shared across all sequences |
+| kv_unified_per_slot | KV Unified Per Slot | --kv-unified-per-slot | model | server | text | unset | context limit per parallel slot . |
+| lazy_mode | Lazy Mode | -lzm, --lazy-mode | model | server | enum | auto | on-demand reading of certain tensors, for example per-layer  |
+| no_log_jsonl | Log Jsonl | --log-jsonl, --no-log-jsonl | model | server | toggle | false | Log as JSONL (one JSON object per line) to stdout, this also |
+| no_log_prefix | Log Prefix | --log-prefix, --no-log-prefix | model | server | text |  | Enable prefix in log messages |
+| no_log_timestamps | Log Timestamps | --log-timestamps, --no-log-timestamps | model | server | text |  | Enable timestamps in log messages |
 | lookup_cache_dynamic | Lookup Cache Dynamic | -lcd, --lookup-cache-dynamic | model | server | path |  | path to dynamic lookup cache to use for lookup decoding (upd |
 | lookup_cache_static | Lookup Cache Static | -lcs, --lookup-cache-static | model | server | path |  | path to static lookup cache to use for lookup decoding (not  |
 | lora | LORA | --lora | model | server | path |  | path to LoRA adapter (use comma-separated values to load mul |
-| lora_init_without_apply | LORA Init Without Apply | --lora-init-without-apply | model | server | toggle | disabled | load LoRA adapters without applying them (apply later via PO |
+| lora_init_without_apply | LORA Init Without Apply | --lora-init-without-apply | model | server | toggle | false | load LoRA adapters without applying them (apply later via PO |
 | lora_scaled | LORA Scaled | --lora-scaled | model | server | path |  | path to LoRA adapter with user defined scaling (format: FNAM |
+| no_mmproj_auto | MMPROJ Auto | --mmproj-auto, --no-mmproj, --no-mmproj-auto | model | server | toggle | true | whether to use multimodal projector file (if available), use |
+| no_mmproj_offload | MMPROJ Offload | --mmproj-offload, --no-mmproj-offload | model | server | toggle | true | whether to enable GPU offloading for multimodal projector |
 | model | Model | -m, --model | model | server | path |  | model path to load |
 | model_url | Model URL | -mu, --model-url | model | server | text | unused | model download url |
-| no_agent | No Agent | -ag, --agent, -no-ag, --no-agent | model | server | toggle | disabled | whether to enable CORS proxy and all built-in tools - do not |
-| no_cache_idle_slots | No Cache Idle Slots | --cache-idle-slots, --no-cache-idle-slots | model | server | toggle | enabled | save idle slots to the prompt cache on new task, and clear t |
-| no_cache_prompt | No Cache Prompt | --cache-prompt, --no-cache-prompt | model | request | toggle | enabled | whether to enable prompt caching |
-| no_context_shift | No Context Shift | --context-shift, --no-context-shift | model | server | toggle | disabled | whether to use context shift on infinite text generation |
-| no_cors_credentials | No Cors Credentials | --cors-credentials, --no-cors-credentials | model | server | toggle | enabled | whether to allow credentials for CORS note: if this is enabl |
-| no_escape | No Escape | -e, --escape, --no-escape | model | server | toggle | true | whether to process escapes sequences (\n, \r, \t, \', \", \\ |
-| no_jinja | No JINJA | --jinja, --no-jinja | model | server | toggle | enabled | whether to use jinja template engine for chat |
-| no_kv_offload | No KV Offload | -kvo, --kv-offload, -nkvo, --no-kv-offload | model | server | toggle | enabled | whether to enable KV cache offloading |
-| no_kv_unified | No KV Unified | -kvu, --kv-unified, -no-kvu, --no-kv-unified | model | server | text | enabled if number of slots is auto | use single unified KV buffer shared across all sequences |
-| no_log_prefix | No Log Prefix | --log-prefix, --no-log-prefix | model | server | text |  | Enable prefix in log messages |
-| no_log_timestamps | No Log Timestamps | --log-timestamps, --no-log-timestamps | model | server | text |  | Enable timestamps in log messages |
-| no_mmproj_auto | No MMPROJ Auto | --mmproj-auto, --no-mmproj, --no-mmproj-auto | model | server | toggle | enabled | whether to use multimodal projector file (if available), use |
-| no_mmproj_offload | No MMPROJ Offload | --mmproj-offload, --no-mmproj-offload | model | server | toggle | enabled | whether to enable GPU offloading for multimodal projector |
-| no_models_autoload | No Models Autoload | --models-autoload, --no-models-autoload | model | server | toggle | enabled | for router server, whether to automatically load models |
-| no_op_offload | No Op Offload | --op-offload, --no-op-offload | model | server | toggle | true | whether to offload host tensor operations to device |
-| no_perf | No Perf | --perf, --no-perf | model | server | toggle | false | whether to enable internal libllama performance timings |
-| no_prefill_assistant | No Prefill Assistant | --prefill-assistant, --no-prefill-assistant | model | server | text | prefill enabled | whether to prefill the assistant's response if the last mess |
-| no_repack | No Repack | --repack, -nr, --no-repack | model | server | toggle | enabled | whether to enable weight repacking |
-| no_slots | No Slots | --slots, --no-slots | model | server | toggle | enabled | expose slots monitoring endpoint |
-| no_warmup | No Warmup | --warmup, --no-warmup | model | server | toggle | enabled | whether to perform warmup with an empty run |
-| no_webui | No Webui | --ui, --webui, --no-ui, --no-webui | model | server | toggle | enabled | whether to enable the Web UI |
-| no_webui_mcp_proxy | No Webui MCP Proxy | --ui-mcp-proxy, --webui-mcp-proxy, --no-ui-mcp-proxy, --no-webui-mcp-proxy | model | server | toggle | disabled | experimental: whether to enable MCP CORS proxy - do not enab |
+| no_models_autoload | Models Autoload | --models-autoload, --no-models-autoload | model | server | toggle | true | for router server, whether to automatically load models |
+| n_cpu_ffn | N CPU Ffn | -ncffn, --n-cpu-ffn | model | server | text |  | keep the dense FFN weights of the first N layers in the CPU  |
+| no_op_offload | Op Offload | --op-offload, --no-op-offload | model | server | toggle | true | whether to offload host tensor operations to device |
 | override_kv | Override KV | --override-kv | model | server | text |  | advanced option to override model metadata by key. |
+| no_perf | Perf | --perf, --no-perf | model | server | toggle | false | whether to enable internal libllama performance timings |
+| no_prefill_assistant | Prefill Assistant | --prefill-assistant, --no-prefill-assistant | model | server | text | prefill enabled | whether to prefill the assistant's response if the last mess |
+| no_repack | Repack | --repack, -nr, --no-repack | model | server | toggle | true | whether to enable weight repacking |
 | reverse_prompt | Reverse Prompt | -r, --reverse-prompt | model | server | text |  | halt generation at PROMPT, return control in interactive mod |
+| rpc | Rpc | --rpc | model | server | list |  | comma-separated list of RPC servers (host:port) |
 | sleep_idle_seconds | Sleep Idle Seconds | --sleep-idle-seconds | model | server | int | -1 | number of seconds of idleness after which the server will sl |
 | slot_prompt_similarity | Slot Prompt Similarity | -sps, --slot-prompt-similarity | model | server | float | 0.1 | how much the prompt of a request must match the prompt of a  |
-| spm_infill | Spm Infill | --spm-infill | model | server | toggle | disabled | use Suffix/Prefix/Middle pattern for infill (instead of Pref |
+| no_slots | Slots | --slots, --no-slots | model | server | toggle | true | expose slots monitoring endpoint |
+| spm_infill | Spm Infill | --spm-infill | model | server | toggle | false | use Suffix/Prefix/Middle pattern for infill (instead of Pref |
 | swa_checkpoints | Swa Checkpoints | -ctxcp, --ctx-checkpoints, --swa-checkpoints | model | server | int | 32 | max number of context checkpoints to create per slot [(more  |
 | tags | Tags | --tags | model | server | text |  | set model tags, comma-separated (informational, not used for |
 | usage | Usage | -h, --help, --usage | model | server | text |  | print usage and exit |
 | version | Version | --version | model | server | toggle |  | show version and build info |
-| vision_gemma_12b_default | Vision Gemma 12b Default | --vision-gemma-12b-default | model | server | toggle |  | use Gemma 3 12B QAT (note: can download weights from the int |
-| vision_gemma_4b_default | Vision Gemma 4b Default | --vision-gemma-4b-default | model | server | toggle |  | use Gemma 3 4B QAT (note: can download weights from the inte |
+| video_ffmpeg_dir | Video Ffmpeg Dir | --video-ffmpeg-dir | model | server | path | search in PATH | path to the directory containing ffmpeg and ffprobe |
+| video_fps | Video Fps | --video-fps | model | server | int | 4 | target video frame rate |
+| video_timestamp_interval | Video Timestamp Interval | --video-timestamp-interval | model | server | int | 5000 | interval in milliseconds between text timestamps |
+| no_warmup | Warmup | --warmup, --no-warmup | model | server | toggle | true | whether to perform warmup with an empty run |
+| no_webui | Webui | --ui, --webui, --no-ui, --no-webui | model | server | toggle | true | whether to enable the Web UI |
 | webui_config | Webui Config | --ui-config, --webui-config | model | server | text |  | JSON that provides default UI settings (overrides UI default |
 | webui_config_file | Webui Config File | --ui-config-file, --webui-config-file | model | server | path |  | JSON file that provides default UI settings (overrides UI de |
+| no_webui_mcp_proxy | Webui MCP Proxy | --ui-mcp-proxy, --webui-mcp-proxy, --no-ui-mcp-proxy, --no-webui-mcp-proxy | model | server | toggle | false | experimental: whether to enable MCP CORS proxy - do not enab |
 | device | Device | -dev, --device | devices | server | list |  | comma-separated list of devices to use for offloading (none  |
 | device_draft | Device Draft | --spec-draft-device, -devd, --device-draft | devices | server | list |  | comma-separated list of devices to use for offloading the dr |
 | n_gpu_layers | GPU layers | -ngl, --gpu-layers, --n-gpu-layers | devices | server | enum | auto | max. |
@@ -181,13 +185,13 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | draft_p_split | Draft P Split | --spec-draft-p-split, --draft-p-split | speculative | server | float | 0.1 | speculative decoding split probability |
 | model_draft | Model Draft | --spec-draft-model, -md, --model-draft | speculative | server | text | unused | draft model for speculative decoding |
 | n_cpu_moe_draft | N CPU Moe Draft | --spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft | speculative | server | text |  | keep the Mixture of Experts (MoE) weights of the first N lay |
-| no_spec_draft_backend_sampling | No Spec Draft Backend Sampling | --spec-draft-backend-sampling, --no-spec-draft-backend-sampling | speculative | server | toggle | enabled | offload draft sampling to the backend |
 | override_tensor_draft | Override Tensor Draft | --spec-draft-override-tensor, -otd, --override-tensor-draft | speculative | server | text |  | override tensor buffer type for draft model |
 | poll_batch_draft | Poll Batch Draft | --spec-draft-poll-batch, --poll-batch-draft | speculative | server | enum |  | Use polling to wait for draft model work |
 | poll_draft | Poll Draft | --spec-draft-poll, --poll-draft | speculative | server | enum |  | Use polling to wait for draft model work |
 | prio_batch_draft | Prio Batch Draft | --spec-draft-prio-batch, --prio-batch-draft | speculative | server | int | 0 | set draft process/thread priority : 0-normal, 1-medium, 2-hi |
 | prio_draft | Prio Draft | --spec-draft-prio, --prio-draft | speculative | server | int | 0 | set draft process/thread priority : 0-normal, 1-medium, 2-hi |
 | spec_default | Spec Default | --spec-default | speculative | server | toggle |  | enable default speculative decoding config |
+| no_spec_draft_backend_sampling | Spec Draft Backend Sampling | --spec-draft-backend-sampling, --no-spec-draft-backend-sampling | speculative | server | toggle | true | offload draft sampling to the backend |
 | spec_draft_n_max | Spec Draft N Max | --spec-draft-n-max | speculative | server | int | 3 | number of tokens to draft for speculative decoding |
 | spec_draft_n_min | Spec Draft N Min | --spec-draft-n-min | speculative | server | int | 0 | minimum number of draft tokens to use for speculative decodi |
 | spec_ngram_map_k_min_hits | Spec Ngram Map K Min Hits | --spec-ngram-map-k-min-hits | speculative | server | int | 1 | minimum hits for ngram-map-k speculative decoding |
@@ -202,6 +206,8 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | spec_ngram_simple_min_hits | Spec Ngram Simple Min Hits | --spec-ngram-simple-min-hits | speculative | server | int | 1 | minimum hits for ngram-simple speculative decoding |
 | spec_ngram_simple_size_m | Spec Ngram Simple Size M | --spec-ngram-simple-size-m | speculative | server | int | 48 | ngram size M for ngram-simple speculative decoding, length o |
 | spec_ngram_simple_size_n | Spec Ngram Simple Size N | --spec-ngram-simple-size-n | speculative | server | int | 12 | ngram size N for ngram-simple speculative decoding, length o |
+| spec_synth_len | Spec Synth Len | --spec-synth-len | speculative | server | text |  | target mean synthetic acceptance length, including the targe |
+| spec_synth_rates | Spec Synth Rates | --spec-synth-rates | speculative | server | text |  | comma-separated unconditional per-position synthetic accepta |
 | spec_type | Spec Type | --spec-type | speculative | server | list | none | comma-separated list of types of speculative decoding to use |
 | threads_batch_draft | Threads Batch Draft | --spec-draft-threads-batch, -tbd, --threads-batch-draft | speculative | server | text |  | number of threads to use during batch and prompt processing |
 | threads_draft | Threads Draft | --spec-draft-threads, -td, --threads-draft | speculative | server | text |  | number of threads to use during generation |
@@ -211,16 +217,16 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | cors_headers | Cors Headers | --cors-headers | server | server | list | * | comma-separated list of allowed headers for CORS |
 | cors_methods | Cors Methods | --cors-methods | server | server | list | GET | comma-separated list of allowed methods for CORS |
 | cors_origins | Cors Origins | --cors-origins | server | server | list | * | comma-separated list of allowed origins for CORS if set to s |
-| host | Host | --host | server | server | text | 127.0.0.1 | ip address to listen, or bind to an UNIX socket if the addre |
+| host | Host | --host | server | server | text | 127.0.0.1 | IP addresses to listen on, comma-separated, or UNIX socket p |
 | media_path | Media Path | --media-path | server | server | path | disabled | directory for loading local media files; files can be access |
-| metrics | Metrics | --metrics | server | server | toggle | disabled | enable prometheus compatible metrics endpoint |
+| metrics | Metrics | --metrics | server | server | toggle | false | enable prometheus compatible metrics endpoint |
 | models_dir | Models Dir | --models-dir | server | server | path | disabled | directory containing models for the router server |
 | models_max | Models Max | --models-max | server | server | int | 4 | for router server, maximum number of models to load simultan |
 | models_preset | Models Preset | --models-preset | server | server | path | disabled | path to INI file containing model presets for the router ser |
 | path | Path | --path | server | server | path |  | path to serve static files from |
 | port | Port | --port | server | server | int | 8080 | port to listen |
-| props | Props | --props | server | server | toggle | disabled | enable changing global properties via POST /props |
-| reuse_port | Reuse Port | --reuse-port | server | server | toggle | disabled | allow multiple sockets to bind to the same port |
+| props | Props | --props | server | server | toggle | false | enable changing global properties via POST /props |
+| reuse_port | Reuse Port | --reuse-port | server | server | toggle | false | allow multiple sockets to bind to the same port |
 | slot_save_path | Slot Save Path | --slot-save-path | server | server | path | disabled | path to save slot kv cache |
 | sse_ping_interval | Sse Ping Interval | --sse-ping-interval | server | server | text |  | server SSE ping interval in seconds (-1 = disabled, default: |
 | ssl_cert_file | SSL Cert File | --ssl-cert-file | server | server | path |  | path to file a PEM-encoded SSL certificate |
@@ -230,14 +236,7 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | mcp_servers_json | MCP Servers Json | --mcp-servers-json | agents | server | enum | none | experimental: inline JSON with MCP server definitions (Curso |
 | tools | Tools | --tools | agents | server | text | no tools | experimental: whether to enable built-in tools for AI agents |
 | tools_runtime | Tools Runtime | --tools-runtime | agents | server | enum | none | experimental: run tools in a separate runtime environment av |
-| embd_gemma_default | Embd Gemma Default | --embd-gemma-default | multimodal | server | toggle |  | use default EmbeddingGemma model (note: can download weights |
 | embd_normalize | Embd Normalize | --embd-normalize | multimodal | server | int | 2 | normalisation for embeddings (-1=none, 0=max absolute int16, |
-| fim_qwen_1 | FIM Qwen 1 | --fim-qwen-1 | multimodal | server | text |  | use default Qwen 2.5 Coder 1.5B (note: can download weights  |
-| fim_qwen_14b_spec | FIM Qwen 14b Spec | --fim-qwen-14b-spec | multimodal | server | toggle |  | use Qwen 2.5 Coder 14B + 0.5B draft for speculative decoding |
-| fim_qwen_30b_default | FIM Qwen 30b Default | --fim-qwen-30b-default | multimodal | server | toggle |  | use default Qwen 3 Coder 30B A3B Instruct (note: can downloa |
-| fim_qwen_3b_default | FIM Qwen 3b Default | --fim-qwen-3b-default | multimodal | server | toggle |  | use default Qwen 2.5 Coder 3B (note: can download weights fr |
-| fim_qwen_7b_default | FIM Qwen 7b Default | --fim-qwen-7b-default | multimodal | server | toggle |  | use default Qwen 2.5 Coder 7B (note: can download weights fr |
-| fim_qwen_7b_spec | FIM Qwen 7b Spec | --fim-qwen-7b-spec | multimodal | server | toggle |  | use Qwen 2.5 Coder 7B + 0.5B draft for speculative decoding  |
 | image_max_tokens | Image Max Tokens | --image-max-tokens | multimodal | server | text | read from model | maximum number of tokens each image can take, only used by v |
 | image_min_tokens | Image Min Tokens | --image-min-tokens | multimodal | server | text | read from model | minimum number of tokens each image can take, only used by v |
 | mmproj | MMPROJ | -mm, --mmproj | multimodal | server | path |  | path to a multimodal projector file. |
@@ -245,17 +244,17 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | mmproj_url | MMPROJ URL | -mmu, --mmproj-url | multimodal | server | text |  | URL to a multimodal projector file. |
 | mtmd_batch_max_tokens | Mtmd Batch Max Tokens | --mtmd-batch-max-tokens | multimodal | server | int | 1024 | maximum number of image tokens per batch when encoding image |
 | pooling | Pooling | --pooling | multimodal | server | enum |  | pooling type for embeddings, use model default if unspecifie |
-| reranking | Reranking | --rerank, --reranking | multimodal | server | toggle | disabled | enable reranking endpoint on server |
+| reranking | Reranking | --rerank, --reranking | multimodal | server | toggle | false | enable reranking endpoint on server |
 | chat_template | Chat Template | --chat-template | chat | server | text | template taken from model's metadata | set custom jinja chat template if suffix/prefix are specifie |
 | chat_template_file | Chat Template File | --chat-template-file | chat | server | path | template taken from model's metadata | set custom jinja chat template file if suffix/prefix are spe |
 | chat_template_kwargs | Chat Template Kwargs | --chat-template-kwargs | chat | request | text |  | sets additional params for the json template parser, must be |
-| no_skip_chat_parsing | No Skip Chat Parsing | --skip-chat-parsing, --no-skip-chat-parsing | chat | server | toggle | disabled | force a pure content parser, even if a Jinja template is spe |
 | reasoning | Reasoning | -rea, --reasoning | chat | request | enum |  | Use reasoning/thinking in the chat ('on', 'off', or 'auto',  |
 | reasoning_budget | Reasoning Budget | --reasoning-budget | chat | request | int | -1 | token budget for thinking: -1 for unrestricted, 0 for immedi |
 | reasoning_budget_message | Reasoning Budget Message | --reasoning-budget-message | chat | request | enum | none | message injected before the end-of-thinking tag when reasoni |
 | reasoning_effort | Reasoning Effort | --reasoning-effort | chat | request | text | default | reasoning effort level given to the chat template: 'default' |
 | reasoning_format | Reasoning Format | --reasoning-format | chat | request | enum | auto | controls whether thought tags are allowed and/or extracted f |
 | no_reasoning_preserve | Reasoning Preserve | --reasoning-preserve, --no-reasoning-preserve | chat | server | toggle | false | preserve reasoning trace in the full history, not just the l |
+| no_skip_chat_parsing | Skip Chat Parsing | --skip-chat-parsing, --no-skip-chat-parsing | chat | server | toggle | false | force a pure content parser, even if a Jinja template is spe |
 | log_colors | Log Colors | --log-colors | logging | server | enum |  | Set colored logging ('on', 'off', or 'auto', default: 'auto' |
 | log_disable | Log Disable | --log-disable | logging | server | toggle |  | Log disable |
 | log_file | Log File | --log-file | logging | server | path |  | Log to file |
@@ -267,9 +266,6 @@ Generated from `/home/james/projects/LLM-Tuner/llama.cpp/build/bin/llama-server 
 | defrag_thold | Defrag Thold | -dt, --defrag-thold | archive | archive | text |  | KV cache defragmentation threshold (DEPRECATED) |
 | draft_max | Draft Max | --draft, --draft-n, --draft-max | archive | archive | text |  | the argument has been removed. |
 | draft_n_min | Draft N Min | --draft-min, --draft-n-min | archive | archive | text |  | the argument has been removed. |
-| mlock | Mlock | --mlock | archive | archive | toggle |  | DEPRECATED in favor of `--load-mode`: force system to keep m |
-| no_direct_io | No Direct Io | -dio, --direct-io, -ndio, --no-direct-io | archive | archive | text |  | DEPRECATED in favor of `--load-mode`: use DirectIO if availa |
-| no_mmap | No Mmap | --mmap, --no-mmap | archive | archive | text |  | DEPRECATED in favor of `--load-mode`: whether to memory-map  |
 | spec_ngram_min_hits | Spec Ngram Min Hits | --spec-ngram-min-hits | archive | archive | text |  | the argument has been removed. |
 | spec_ngram_size_m | Spec Ngram Size M | --spec-ngram-size-m | archive | archive | text |  | the argument has been removed. |
 | spec_ngram_size_n | Spec Ngram Size N | --spec-ngram-size-n | archive | archive | text |  | the argument has been removed. |

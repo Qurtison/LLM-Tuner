@@ -8,7 +8,7 @@ import { SseLogPrefixes } from '../../../shared/contracts';
 import type { ServerCtx } from './types';
 import * as launch from '../lib/launch';
 import * as tokenize from '../lib/tokenize';
-import * as fatalLogs from '../lib/fatallogs';
+import { parseLogLine, type DraftPatch, type LogEvent, type TimingPatch } from '../lib/logparse';
 import * as unitMod from './unit';
 import type { UnitStatus } from './unit';
 
@@ -604,89 +604,123 @@ export class LlamaService {
 
     private handleLine(line: string): void {
         this.pushLog(line);
-        if (line.includes('load_model: loading model')) {
-            this.ctx.state.serverState = 'loading';
-            this.ctx.broadcast();
-        } else if (line.includes('llama_server: model loaded')) {
-            this.ctx.state.serverState = 'ready';
-            if (this.ctx.state.loadStartTime > 0) {
-                this.ctx.state.finalLoadTime = Math.round(((Date.now() - this.ctx.state.loadStartTime) / 1000) * 10) / 10;
-                this.ctx.state.loadStartTime = 0;
-            }
-            this.ctx.broadcast();
-        } else if (line.includes('launch_slot_:') && line.includes('processing task')) {
-            this.progress = {};
-            this.onActivity?.();
-        } else if (line.includes('prompt processing, n_tokens =')) {
-            const tokens = line.match(/n_tokens =\s*(\d+)/);
-            const progress = line.match(/progress = (0\.\d+|1\.00)/);
-            const tps = line.match(/(\d+\.?\d*)\s*tokens per second/);
-            if (progress) {
-                const tokenCount = tokens ? tokens[1] : '0';
-                const rate = tps ? tps[1] : '0';
-                this.progress = {
-                    prefillTps: parseFloat(rate) || undefined,
-                    prefillProgress: parseFloat(progress[1]),
-                    prefillTokens: parseInt(tokenCount, 10) || undefined,
-                };
-                this.ctx.broadcast(SseLogPrefixes.PREFILL_PROGRESS + ':' + progress[1] + ':' + rate + ':' + tokenCount);
-                this.onActivity?.();
-            }
-        } else if (line.includes('print_timing:')) {
-            const generated = line.match(/n_gen\s*=\s*(\d+)/) || line.match(/n_decoded\s*=\s*(\d+)/);
-            const rollingRate = line.match(/tg_3s\s*=\s*(\d+\.?\d*)\s*t\/s/) || line.match(/tg\s*=\s*(\d+\.?\d*)\s*t\/s/);
-            if (generated && rollingRate) {
-                this.progress = { genTps: parseFloat(rollingRate[1]) || undefined, genTokens: parseInt(generated[1], 10) || undefined };
-                this.ctx.broadcast(SseLogPrefixes.GEN_PROGRESS + ':' + rollingRate[1] + ':' + generated[1]);
-                this.onActivity?.();
-            }
-            const idTask = line.match(/id\s+(\d+)\s*\|\s*task\s+(\d+)/);
-            if (idTask) {
-                const taskId = idTask[2];
-                const segment = line.split('|').pop()!.trim();
-                if (segment.startsWith('prompt eval time') || segment.startsWith('eval time')) {
-                    const m = segment.match(/=\s*([\d.]+)\s*ms\s*\/\s*(\d+)\s*tokens[^)]*?([\d.]+)\s*tokens per second/);
-                    if (m) {
-                        const old = this.taskTimings.get(taskId) || {};
-                        // Cap: aborted/killed tasks never reach the 'total
-                        // time' branch that deletes their entry.
-                        if (this.taskTimings.size >= 256) this.taskTimings.delete(this.taskTimings.keys().next().value as string);
-                        this.taskTimings.set(taskId, segment.startsWith('prompt') ? { ...old, promptMs: parseFloat(m[1]), promptTokens: parseInt(m[2], 10), promptTps: parseFloat(m[3]) } : { ...old, genMs: parseFloat(m[1]), genTokens: parseInt(m[2], 10), genTps: parseFloat(m[3]) });
-                    }
-                } else if (segment.startsWith('total time')) {
-                    const m = segment.match(/=\s*([\d.]+)\s*ms/);
-                    const timing = this.taskTimings.get(taskId) || {};
-                    this.taskTimings.delete(taskId);
-                    if (m) {
-                        const samples = this.takeSamples?.() || [];
-                        const completedAt = Date.now();
-                        const pending: Pending = { timing: { ...timing, wallTimeS: (parseFloat(m[1]) / 1000).toFixed(2) }, samples, completedAt, config: this.ctx.state.currentLaunchConfig, launchCommand: this.ctx.state.currentLaunchCommand, timer: undefined as never };
-                        pending.timer = setTimeout(() => { this.pendingCompletions.delete(taskId); this.complete(pending.timing, pending.samples, pending.completedAt, { config: pending.config, launchCommand: pending.launchCommand }); }, 500);
-                        pending.timer.unref();
-                        this.pendingCompletions.set(taskId, pending);
-                        this.rememberCompleted(taskId);
-                    }
-                } else if (segment.startsWith('draft acceptance')) {
-                    const m = segment.match(/=\s*([\d.]+)\s*\(\s*(\d+)\s*accepted\s*\/\s*(\d+)\s*generated\s*\)(?:\s*,\s*mean len\s*=\s*([\d.]+))?/);
-                    const pending = this.pendingCompletions.get(taskId);
-                    if (m && pending) {
-                        clearTimeout(pending.timer); this.pendingCompletions.delete(taskId);
-                        Object.assign(pending.timing, { draftAcceptRate: parseFloat(m[1]), draftAccepted: parseInt(m[2], 10), draftGenerated: parseInt(m[3], 10), draftMeanLen: m[4] != null ? parseFloat(m[4]) : null });
-                        this.complete(pending.timing, pending.samples, pending.completedAt, { config: pending.config, launchCommand: pending.launchCommand });
-                    }
+        for (const event of parseLogLine(line)) this.applyLogEvent(event);
+    }
+
+    // Applies one parsed event to launch state. Parsing lives in
+    // lib/logparse (pure, unit-tested); this is the only place that touches
+    // the process and shared state.
+    private applyLogEvent(event: LogEvent): void {
+        switch (event.kind) {
+            case 'loading':
+                this.ctx.state.serverState = 'loading';
+                this.ctx.broadcast();
+                return;
+            case 'ready':
+                this.ctx.state.serverState = 'ready';
+                if (this.ctx.state.loadStartTime > 0) {
+                    this.ctx.state.finalLoadTime = Math.round(((Date.now() - this.ctx.state.loadStartTime) / 1000) * 10) / 10;
+                    this.ctx.state.loadStartTime = 0;
                 }
-            }
-        } else if (line.includes('stop processing: n_tokens =')) {
-            const m = line.match(/task\s+(\d+)/);
-            if (m) { const taskId = m[1]; const live = { ...this.progress }; const config = this.ctx.state.currentLaunchConfig; const command = this.ctx.state.currentLaunchCommand; setTimeout(() => { if (this.pendingCompletions.has(taskId) || this.recentlyCompleted.has(taskId) || (!live.genTokens && !live.prefillTokens)) return; this.rememberCompleted(taskId); this.complete({ promptTokens: live.prefillTokens ?? null, promptTps: live.prefillTps ?? null, genTokens: live.genTokens ?? null, genTps: live.genTps ?? null, aborted: true }, this.takeSamples?.() || [], Date.now(), { config, launchCommand: command }); }, 400).unref(); }
-        } else if (fatalLogs.isFatalLogLine(line)) {
-            this.ctx.state.serverState = 'stopped';
-            this.killProcess();
-            const message = line.includes('failed to fit params')
-                ? 'Failed to allocate VRAM: Reduce n_gpu_layers or use a smaller model.'
-                : 'Process error: ' + line.trim().slice(-200);
-            this.ctx.broadcast('', message);
+                this.ctx.broadcast();
+                return;
+            case 'task-start':
+                this.progress = {};
+                this.onActivity?.();
+                return;
+            case 'prefill':
+                this.progress = { prefillTps: event.prefillTps, prefillProgress: event.prefillProgress, prefillTokens: event.prefillTokens };
+                this.ctx.broadcast(event.frame);
+                this.onActivity?.();
+                return;
+            case 'gen':
+                this.progress = { genTps: event.genTps, genTokens: event.genTokens };
+                this.ctx.broadcast(event.frame);
+                this.onActivity?.();
+                return;
+            case 'task-timing':
+                this.recordTaskTiming(event.taskId, event.patch);
+                return;
+            case 'task-total':
+                this.scheduleTimedCompletion(event.taskId, event.wallTimeS);
+                return;
+            case 'task-draft':
+                this.finishFromDraft(event.taskId, event.patch);
+                return;
+            case 'task-aborted':
+                this.scheduleAbortedCompletion(event.taskId);
+                return;
+            case 'fatal':
+                this.ctx.state.serverState = 'stopped';
+                this.killProcess();
+                this.ctx.broadcast('', event.message);
+                return;
         }
+    }
+
+    // Merge one `prompt eval time` / `eval time` segment into the task's
+    // accumulated timings.
+    private recordTaskTiming(taskId: string, patch: TimingPatch): void {
+        const old = this.taskTimings.get(taskId) || {};
+        // Cap: aborted/killed tasks never reach the 'total time' branch that
+        // deletes their entry.
+        if (this.taskTimings.size >= 256) this.taskTimings.delete(this.taskTimings.keys().next().value as string);
+        this.taskTimings.set(taskId, { ...old, ...patch });
+    }
+
+    // A `total time` segment closes the task. The row is held briefly so a
+    // trailing `draft acceptance` line can amend the timings before it is
+    // written.
+    private scheduleTimedCompletion(taskId: string, wallTimeS: string | undefined): void {
+        const timing = this.taskTimings.get(taskId) || {};
+        this.taskTimings.delete(taskId);
+        if (wallTimeS === undefined) return;
+        const samples = this.takeSamples?.() || [];
+        const completedAt = Date.now();
+        const pending: Pending = {
+            timing: { ...timing, wallTimeS },
+            samples,
+            completedAt,
+            config: this.ctx.state.currentLaunchConfig,
+            launchCommand: this.ctx.state.currentLaunchCommand,
+            timer: undefined as never,
+        };
+        pending.timer = setTimeout(() => {
+            this.pendingCompletions.delete(taskId);
+            this.complete(pending.timing, pending.samples, pending.completedAt, { config: pending.config, launchCommand: pending.launchCommand });
+        }, 500);
+        pending.timer.unref();
+        this.pendingCompletions.set(taskId, pending);
+        this.rememberCompleted(taskId);
+    }
+
+    // A `draft acceptance` segment amends a completion still holding for its
+    // 500ms timer, and writes the row early.
+    private finishFromDraft(taskId: string, patch: DraftPatch): void {
+        const pending = this.pendingCompletions.get(taskId);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pendingCompletions.delete(taskId);
+        Object.assign(pending.timing, patch);
+        this.complete(pending.timing, pending.samples, pending.completedAt, { config: pending.config, launchCommand: pending.launchCommand });
+    }
+
+    // `stop processing` without a matching `total time` means the request was
+    // aborted: record it as such, unless a normal completion already landed.
+    private scheduleAbortedCompletion(taskId: string): void {
+        const live = { ...this.progress };
+        const config = this.ctx.state.currentLaunchConfig;
+        const command = this.ctx.state.currentLaunchCommand;
+        setTimeout(() => {
+            if (this.pendingCompletions.has(taskId) || this.recentlyCompleted.has(taskId) || (!live.genTokens && !live.prefillTokens)) return;
+            this.rememberCompleted(taskId);
+            this.complete(
+                { promptTokens: live.prefillTokens ?? null, promptTps: live.prefillTps ?? null, genTokens: live.genTokens ?? null, genTps: live.genTps ?? null, aborted: true },
+                this.takeSamples?.() || [],
+                Date.now(),
+                { config, launchCommand: command },
+            );
+        }, 400).unref();
     }
 
     private rememberCompleted(taskId: string): void {
@@ -723,7 +757,7 @@ export class LlamaService {
 function shellQuoteArg(arg: string): string {
     const s = String(arg);
     if (s.length === 0) return "''";
-    if (/^[A-Za-z0-9._\/:-]+$/.test(s)) return s;
+    if (/^[A-Za-z0-9._/:-]+$/.test(s)) return s;
     return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 

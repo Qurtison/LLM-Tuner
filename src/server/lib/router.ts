@@ -27,6 +27,7 @@ import { PARAM_BY_ID, type ParamDef } from '../../../shared/llama-params';
 import type { LaunchInput, } from './launch';
 import { toFiniteNumber, toNonEmptyString } from './launch';
 import type { RouterConfig, RouterModelConfig } from '../../../shared/contracts';
+import { negativeSpellings } from '../../../shared/flag-polarity';
 
 // --- flag <-> INI key -------------------------------------------------------
 
@@ -140,6 +141,12 @@ export function argsToIniEntries(args: string[]): IniEntry[] {
         } else {
             value = 'true';
         }
+        // A DISABLING spelling means "off": `--no-jinja` is `jinja = false`.
+        // iniKeyForFlag() resolves the canonical key from the PARAM, not from
+        // this token, so for a param that has a positive spelling the key never
+        // carries the `no-` prefix the check below looks for -- without this,
+        // `--no-jinja` became `jinja = true`, the opposite of the intent.
+        if (negativeSpellings(def.flags).includes(token)) value = 'false';
         if (key.startsWith('no-')) { key = key.slice(3); value = 'false'; }
         if (!byKey.has(key)) order.push(key);
         byKey.set(key, value);

@@ -1,7 +1,9 @@
 import type { TelemetrySample } from '../../../shared/contracts';
 import type { ServerCtx, TelemetryStats } from './types';
 import { collectStats } from './hwmon';
-
+// This module used to carry its own third copy of toFiniteNumber. It comes from
+// shared/launch-params.ts now, beside the launch resolver that must agree with it.
+import { toFiniteNumber } from '../../../shared/launch-params';
 export interface LiveProgress {
     prefillTps?: number;
     prefillProgress?: number;
@@ -22,12 +24,6 @@ const ACTIVITY_TIMEOUT_MS = 3000;
 const MAX_SAMPLES_PER_REQUEST = 300;
 const MAX_RECENT_REQUEST_SAMPLES = 30;
 
-function toFiniteNumber(value: unknown): number | undefined {
-    if (value === null || value === undefined || typeof value === 'boolean') return undefined;
-    if (typeof value === 'string' && value.trim() === '') return undefined;
-    const number = Number(value);
-    return Number.isFinite(number) ? number : undefined;
-}
 
 export class TelemetryService {
     private readonly ctx: ServerCtx;

@@ -150,8 +150,20 @@ test('buildLlamaArgs: no_reasoning_preserve=true emits --reasoning-preserve with
   expect(args[i + 1]).toBeUndefined();
 });
 
-test('buildLlamaArgs: no_reasoning_preserve=false emits no flag (llama.cpp default)', () => {
+// An EXPLICIT false emits the disabling spelling. Before this, "off" meant
+// "emit nothing", which silently failed for options llama.cpp enables by
+// default (--jinja, --slots, --no-reasoning-preserve's counterpart, ...).
+test('buildLlamaArgs: no_reasoning_preserve=false emits the disabling spelling', () => {
   const args = buildLlamaArgs({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32, paramOverrides: { no_reasoning_preserve: false } }, { mapModelPath: p => p, deviceArgs: [] });
+  expect(args).toContain('--no-reasoning-preserve');
+  expect(args).not.toContain('--reasoning-preserve');
+});
+
+// Absent is still different from false: nothing is emitted and llama.cpp's own
+// default stands. This is the half that keeps a preset from fighting a default
+// it never mentioned.
+test('buildLlamaArgs: an unset toggle emits neither spelling', () => {
+  const args = buildLlamaArgs({ modelPath: '/m/x.gguf', ctx: 4096, ngl: 32 }, { mapModelPath: p => p, deviceArgs: [] });
   expect(args).not.toContain('--reasoning-preserve');
   expect(args).not.toContain('--no-reasoning-preserve');
 });
@@ -198,6 +210,32 @@ test('router mode: modelsDir falls back to server config, then to router.modelsD
 test('router mode: no models dir anywhere is an error, not a broken launch', () => {
   expect(() => resolveLaunchCommand({ router: { enabled: true } }, BUILDS, { appRoot: '/app' }))
     .toThrow(/needs a models directory/);
+});
+
+// Regression: the router INI is unforgiving (one unrecognized key aborts the
+// whole router), and its keys are resolved from the PARAM's canonical long
+// flag -- not from the token actually emitted. So a disabling spelling has to
+// be turned into `<key> = false` by hand, or `jinja: false` silently becomes
+// `jinja = true`, the exact opposite.
+test('router mode: a disabling spelling becomes <key> = false in the INI', () => {
+  const { ini } = resolveLaunchCommand(
+    { jinja: false, router: { enabled: true } },
+    BUILDS,
+    ROUTER_OPTS,
+  );
+  expect(ini).toContain('jinja = false');
+  expect(ini).not.toContain('jinja = true');
+  // The key is the canonical name: no `no-` prefix leaks into the INI.
+  expect(ini).not.toContain('no-jinja');
+});
+
+test('router mode: an enabling spelling still becomes <key> = true', () => {
+  const { ini } = resolveLaunchCommand(
+    { jinja: true, router: { enabled: true } },
+    BUILDS,
+    ROUTER_OPTS,
+  );
+  expect(ini).toContain('jinja = true');
 });
 
 test('router mode: maxModels and autoload reach the router command line', () => {

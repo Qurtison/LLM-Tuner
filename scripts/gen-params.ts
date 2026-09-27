@@ -14,6 +14,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { positiveSpellings } from "../shared/flag-polarity";
 
 const execFileAsync = promisify(execFile);
 const HELP_DESC_COLUMN = 40;
@@ -92,7 +93,9 @@ export function extractFlags(flagPart: string): string[] {
   // one flag per comma-segment; ignore value placeholders like "lo-hi" or "<N>"
   return flagPart
     .split(",")
-    .map((s) => s.trim().match(/^--?[\w-]+/)?.[0])
+    // `.` is part of a flag name: --fim-qwen-1.5b-default truncated to
+    // --fim-qwen-1 without it, inventing a flag the binary rejects.
+    .map((s) => s.trim().match(/^--?[\w.-]+/)?.[0])
     .filter((s): s is string => Boolean(s));
 }
 
@@ -103,6 +106,40 @@ export function extractEnv(desc: string): string | undefined {
 
 const DEFAULT_LITERALS = new Set(["disabled", "enabled", "auto", "none", "all", "true", "false"]);
 
+
+// llama.cpp states a toggle's default as a WORD in --help ("(default:
+// enabled)") and toValue() leaves it a string. The client decides "did the user
+// change this?" by comparing a preset's value against `default`, so a string
+// default never matches a boolean: `jinja: true` -- llama.cpp's own default --
+// was recorded as a change, and a default-ON option could then be switched off
+// by a preset that never meant to touch it. Normalise to a boolean, and keep
+// the word as the display label so the editor still reads "default enabled".
+const TOGGLE_DEFAULT_WORDS = new Map<string, boolean>([
+  ["enabled", true], ["on", true], ["yes", true], ["true", true],
+  ["disabled", false], ["off", false], ["no", false], ["false", false],
+]);
+
+export function normaliseToggleDefault(
+  control: Control,
+  value: unknown,
+  label: string | undefined,
+): { value: unknown; label?: string } {
+  if (control !== "toggle" || typeof value !== "string") return { value, label };
+  const word = TOGGLE_DEFAULT_WORDS.get(value.toLowerCase());
+  if (word === undefined) return { value, label };
+  return { value: word, label: label ?? value };
+}
+
+// Flags that download and load a CANNED model with default settings
+// (--fim-qwen-7b-default, --gpt-oss-20b-default, --vision-gemma-4b-default,
+// ...). They are not preset knobs: the dashboard always picks the model
+// itself (-m, or --models-dir in router mode), so a preset that toggled one
+// would silently override that choice -- and download gigabytes doing it.
+const CANNED_MODEL_RE = /can download weights/i;
+
+export function isCannedModelLoader(raw: RawEntry): boolean {
+  return CANNED_MODEL_RE.test(raw.description);
+}
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function toValue(s: string): unknown {
@@ -161,7 +198,7 @@ export function extractAllowedValues(desc: string, flagPart: string): string[] |
     return braces[1].split(/[,|]/).map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
   }
   // 3) flag placeholder: --foo <a|b|c>  or  --foo {a,b,c}  or  --foo [on|off|auto]
-  const placeholder = flagPart.match(/[<\[\{](\s*[\w\-|,\s]+)\s*[>\]\}]/);
+  const placeholder = flagPart.match(/[<[{](\s*[\w\-|,\s]+)\s*[>\]}]/);
   if (placeholder) {
     const list = placeholder[1].split(/[|,]/).map((s) => s.trim()).filter(Boolean);
     if (list.length >= 2) return list;
@@ -324,17 +361,31 @@ export function buildParam(raw: RawEntry): ParamDef | undefined {
   if (flags.length === 0) return undefined;
   const longFlag = [...flags].reverse().find((f) => f.startsWith("--")) ?? flags.at(-1)!;
   const id = toId(longFlag);
+  // The id comes from the LAST long spelling, which for an on/off pair is the
+  // disabling one -- so a `no_`-prefixed id is an artifact of llama.cpp's
+  // `--no-...` alias, not the option's meaning (the emission table treats ON as
+  // the POSITIVE spelling). Label such a param after its positive spelling, or
+  // the editor shows "No Slots" for a toggle that EXPOSES slots. A
+  // negative-only option such as `--no-host` has no positive spelling and keeps
+  // its own name.
+  const positiveLong = [...positiveSpellings(flags)].reverse().find((f) => f.startsWith("--"));
+  const labelId = id.startsWith("no_") && positiveLong ? toId(positiveLong) : id;
   const env = extractEnv(raw.description);
   const def = extractDefault(raw.description);
   const allowed = extractAllowedValues(raw.description, raw.flags);
   // a flag takes a value iff there's a placeholder after the last flag token
   // ("--foo N", "--foo FNAME", "--foo <x|y>", "--foo {a,b}") or the line wrapped
   const tail = raw.flags.replace(/^.*?(?:--?[\w-]+\s*)+/, "").trim();
-  const takesValue = /^[<\[]/.test(tail) || /^{\w/.test(tail) || /^[A-Z][A-Z0-9_]*$/.test(tail) || (tail.length > 0 && !/^-/.test(tail));
+  const takesValue = /^[<[]/.test(tail) || /^{\w/.test(tail) || /^[A-Z][A-Z0-9_]*$/.test(tail) || (tail.length > 0 && !/^-/.test(tail));
   const override = CONTROL_OVERRIDES[id];
   const control = override?.control ?? inferControl(id, raw.description, raw.flags, allowed, def.value, takesValue);
-  const defaultValue = override && override.default !== undefined ? override.default : def.value;
-  const defaultLabel = override ? override.defaultLabel ?? def.label : def.label;
+  const normalised = normaliseToggleDefault(
+    control,
+    override && override.default !== undefined ? override.default : def.value,
+    override ? override.defaultLabel ?? def.label : def.label,
+  );
+  const defaultValue = normalised.value;
+  const defaultLabel = normalised.label;
   const help = cleanHelp(raw.description) || raw.description.slice(0, 120);
 
   const scope = inferScope(id, raw.description, raw.section);
@@ -344,7 +395,7 @@ export function buildParam(raw: RawEntry): ParamDef | undefined {
 
   const param: ParamDef = {
     id,
-    label: toLabel(id),
+    label: toLabel(labelId),
     flags,
     ...(env ? { env } : {}),
     group,
@@ -425,7 +476,9 @@ function emitSnapshot(out: string, defs: ParamDef[], binary: string): Promise<vo
   const lines: string[] = [
     `# llama-params snapshot (${defs.length} params)`,
     ``,
-    `Generated from \`${binary} --help\` on ${new Date().toISOString()}`,
+    // Repo-relative, so the committed snapshot does not carry one machine's
+    // absolute path (and does not churn when regenerated elsewhere).
+    `Generated from \`${path.relative(process.cwd(), binary)}\` on ${new Date().toISOString()}`,
     ``,
     `## By scope`,
     ...Object.entries(scopes).map(([k, v]) => `- ${k}: ${v}`),
@@ -465,13 +518,16 @@ async function run(): Promise<void> {
 
   const seen = new Set<string>();
   const defs: ParamDef[] = [];
+  let skippedCanned = 0;
   for (const r of raws) {
+    if (isCannedModelLoader(r)) { skippedCanned++; continue; }
     const p = buildParam(r);
     if (!p) continue;
     if (seen.has(p.id)) continue;
     seen.add(p.id);
     defs.push(p);
   }
+  console.log(`[gen-params] skipped ${skippedCanned} canned-model loader flags`);
   defs.sort((a, b) => GROUP_ORDER.indexOf(a.group) - GROUP_ORDER.indexOf(b.group) || a.label.localeCompare(b.label));
 
   await fs.mkdir(path.dirname(out), { recursive: true });
@@ -570,6 +626,28 @@ function runSelfCheck(): void {
   // extractFlags
   assert(JSON.stringify(extractFlags("-t,    --threads N")) === '["-t","--threads"]', "extractFlags multi");
   assert(JSON.stringify(extractFlags("-kvo, --kv-offload, -nkvo, --no-kv-offload")) === '["-kvo","--kv-offload","-nkvo","--no-kv-offload"]', "extractFlags quad");
+  // A dotted flag name must survive extraction whole: --fim-qwen-1.5b-default
+  // used to truncate to --fim-qwen-1, inventing a flag the binary rejects.
+  assert(
+    JSON.stringify(extractFlags("--fim-qwen-1.5b-default")) === '["--fim-qwen-1.5b-default"]',
+    "extractFlags keeps the dotted name",
+  );
+
+  // normaliseToggleDefault: a word default becomes a real boolean, and the
+  // word survives as the display label.
+  assert(normaliseToggleDefault("toggle", "enabled", undefined).value === true, "enabled -> true");
+  assert(normaliseToggleDefault("toggle", "disabled", undefined).value === false, "disabled -> false");
+  assert(normaliseToggleDefault("toggle", "enabled", undefined).label === "enabled", "word kept as label");
+  assert(normaliseToggleDefault("toggle", "enabled", "template default").label === "template default", "existing label wins");
+  assert(normaliseToggleDefault("toggle", true, undefined).value === true, "boolean untouched");
+  // Non-toggles are left alone: "disabled" is not a boolean for a path param.
+  assert(normaliseToggleDefault("path", "disabled", undefined).value === "disabled", "non-toggle untouched");
+
+  // isCannedModelLoader: the shared help phrase, not a flag-name pattern.
+  const canned = { flags: "--fim-qwen-7b-default", description: "use default Qwen 2.5 Coder 7B (note: can download weights from the internet)", section: "multimodal", primaryFlag: "--fim-qwen-7b-default" };
+  assert(isCannedModelLoader(canned), "canned loader detected");
+  const knob = { flags: "--temp N", description: "temperature (default: 0.80)", section: "sampling params", primaryFlag: "--temp" };
+  assert(!isCannedModelLoader(knob), "ordinary knob not filtered");
 
   console.log("[gen-params] self-check ok");
 }

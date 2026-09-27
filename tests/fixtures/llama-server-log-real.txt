@@ -1,0 +1,34 @@
+# Real llama-server stdout/stderr, captured for logparse tests.
+#
+# Source: llama.cpp 0.5.0-dev (build 1, commit 9588757), CPU-only build,
+# model MiniCPM5-2B-Q4_K_M, launched with:
+#   llama-server -m <model> -c 8192 -ngl 0 --metrics --spec-type ngram-simple \
+#                --spec-draft-n-max 4 -np 1
+# Two requests were issued: a ~2463-token summarization prompt (no speculation)
+# and a repetitive continuation prompt (ngram speculation, so a draft
+# acceptance line is present).
+#
+# Lines are verbatim, INCLUDING the log-wrapper prefix (timestamp, level,
+# process). The parser matches on substrings, so the wrapper is irrelevant to
+# it -- but keeping it means these tests fail if a marker ever keys on the
+# line START rather than a substring.
+# 'graphs reused' is included on purpose: it is emitted by the same
+# print_timings() call as the timing lines and must parse to NO events.
+#
+# ONLY the model path in the load_model line was generalized (from a host
+# absolute path to /models/...) -- the repo forbids machine-specific values.
+# Every other byte is verbatim.
+# --- startup ---
+0.00.003.689 I srv    load_model: loading model '/models/MiniCPM5-2B-Q4_K_M.gguf'
+0.01.897.463 I srv  llama_server: model loaded
+# --- request 1: no speculation (prefill progress + full timing chain) ---
+0.20.170.640 I slot launch_slot_: id  3 | task 0 | processing task, is_child = 0
+0.27.980.699 I slot print_timing: id  3 | task 0 | prompt processing, n_tokens =   2048, progress = 0.83, t =   7.81 s / 262.23 tokens per second
+0.34.188.557 I slot print_timing: id  3 | task 0 | n_gen =    100, tg =  24.30 t/s, tg_3s =  24.55 t/s
+0.34.399.312 I slot print_timing: id  3 | task 0 | prompt eval time =    9944.17 ms /  2463 tokens (    4.04 ms per token,   247.68 tokens per second)
+0.34.399.319 I slot print_timing: id  3 | task 0 |        eval time =    4284.46 ms /   105 tokens (   41.20 ms per token,    24.27 tokens per second)
+0.34.399.320 I slot print_timing: id  3 | task 0 |       total time =   14228.63 ms /  2568 tokens
+0.34.399.324 I slot print_timing: id  3 | task 0 |    graphs reused =        103
+0.34.399.410 I slot      release: id  3 | task 0 | stop processing: n_tokens = 2567, truncated = 0
+# --- request 2: ngram speculation (draft acceptance) ---
+0.16.332.751 I slot print_timing: id  0 | task 0 | draft acceptance = 0.10000 (    5 accepted /    50 generated), mean len =  3.50

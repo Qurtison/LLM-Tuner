@@ -9,7 +9,7 @@
  * Filter chips: All | Modified | Archive. Search matches label, flags,
  * env var, and help text — case-insensitive substring.
  */
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { usePresets } from '../../hooks/usePresets';
 import { useModels } from '../../hooks/useModels';
 import { presetBrowser } from '../../state/presetBrowser';
@@ -22,8 +22,8 @@ import {
     type ParamScope,
 } from '../../../../shared/llama-params';
 import type { LaunchConfig, ModelEntry } from '../../../../shared/contracts';
-import { fieldForParamId, overridesFromConfig, numericInputValid, GROUP_LABELS } from './registry';
-
+import { displayValue, fieldForParamId, overridesFromConfig, numericInputValid, GROUP_LABELS } from './registry';
+import { toInput } from './browserInput';
 type Filter = 'all' | 'modified' | 'archive';
 
 interface BrowserRow {
@@ -52,7 +52,8 @@ function fieldForDef(def: ParamDef, draft: LaunchConfig): { field: keyof LaunchC
     // Map via the param registry, NOT draft keys — an unset-but-mapped
     // param (e.g. ctx on a fresh preset) must still write its field.
     const field = fieldForParamId(def.id);
-    return { field, value: field ? draft[field] : (draft.paramOverrides?.[def.id]) };
+    const raw = field ? draft[field] : (draft.paramOverrides?.[def.id]);
+    return { field, value: displayValue(def, raw) };
 }
 
 interface BrowserDialogProps {
@@ -117,7 +118,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
         return m;
     }, [filter, modifiedIds, query, draft]);
 
-    const currentGroupRows = rowsByGroup.get(activeGroup) ?? [];
+    const currentGroupRows = useMemo(() => rowsByGroup.get(activeGroup) ?? [], [rowsByGroup, activeGroup]);
     const totalVisible = useMemo(() => {
         let n = 0;
         for (const list of rowsByGroup.values()) n += list.length;
@@ -178,7 +179,7 @@ export default function PresetBrowserDialog({ onClose }: BrowserDialogProps) {
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-    }, [open, onClose, activeGroup, focusedId, currentGroupRows, rowsByGroup, visibleGroups, setValue]);
+    }, [open, onClose, activeGroup, focusedId, currentGroupRows, rowsByGroup, visibleGroups, setValue, setParam]);
 
     if (!open) return null;
 
@@ -300,12 +301,12 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     const latest = useRef(draftVal);
     const touched = useRef(false);
 
-    useEffect(() => { setDraftVal(toInput(currentValue, def.control, def)); }, [currentValue, def.control]);
+    useEffect(() => { setDraftVal(toInput(currentValue, def.control, def)); }, [currentValue, def]);
     useEffect(() => { latest.current = draftVal; }, [draftVal]);
 
     // Commit an explicit raw value: setState in the same tick is async, so
     // parsing draftVal inside the change handler would commit the OLD value.
-    const commitRowValue = (raw: string | boolean) => {
+    const commitRowValue = useCallback((raw: string | boolean) => {
         const s = String(raw);
         if ((def.control === 'int' || def.control === 'float') && !numericInputValid(def.control, s)) {
             // decimal/garbage in an int field, non-numeric in a float field:
@@ -319,7 +320,9 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
         } else {
             onChange(next);
         }
-    };
+    }, [def, currentValue, field, onChange]);
+    const commitOnUnmount = useRef(commitRowValue);
+    useEffect(() => { commitOnUnmount.current = commitRowValue; }, [commitRowValue]);
     const commitValue = (raw: string | boolean) => {
         touched.current = true;
         commitRowValue(raw);
@@ -329,7 +332,7 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
     // the user actually typed, or every browsed row would become an
     // "override" of its own current value.
     useEffect(() => () => {
-        if (touched.current) commitRowValue(latest.current);
+        if (touched.current) commitOnUnmount.current(latest.current);
     }, []);
     const trackValue = (v: string | boolean) => {
         if (v !== toInput(currentValue, def.control, def)) touched.current = true;
@@ -358,19 +361,6 @@ function BrowserRow({ row, models, isFocused, onFocus, onChange }: { row: Browse
             </div>
         </li>
     );
-}
-
-export function toInput(value: unknown, control: string, def?: ParamDef): string | boolean {
-    if (control === 'toggle') return Boolean(value);
-    if (value === undefined || value === null) {
-        // No override: show the effective default so a numeric row never
-        // reads as empty. Typing the default back commits as a no-op and
-        // the box keeps showing the value instead of clearing.
-        if ((control === 'int' || control === 'float') && def && def.default !== undefined) return String(def.default);
-        return '';
-    }
-    if (Array.isArray(value)) return value.join(', ');
-    return String(value);
 }
 
 function parseInput(raw: string | boolean, control: string): unknown {
