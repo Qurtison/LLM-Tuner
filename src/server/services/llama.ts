@@ -138,6 +138,54 @@ export function journalSinceFor(st: UnitStatus): string | null {
     return parsed.toISOString();
 }
 
+/**
+ * A per-stream line splitter. Callers must hold one per stream (stdout,
+ * stderr): a shared buffer lets a partial line on one stream splice onto the
+ * other stream's bytes at the await boundary, corrupting or losing lines.
+ * A runaway line with no newline is truncated so the buffer cannot grow without
+ * bound. `flush()` emits a trailing line that never got its newline.
+ * Exported for tests.
+ */
+export function createLineFeeder(onLine: (line: string) => void, onTail?: (line: string) => void): { feed: (text: string) => void; flush: () => void } {
+    let buffer = '';
+    return {
+        feed(text: string): void {
+            buffer += text;
+            const lines = buffer.split(/\r\n|\r|\n/);
+            buffer = lines.pop() || '';
+            if (buffer.length > 1_000_000) buffer = buffer.slice(-4096);
+            for (const line of lines) onLine(line);
+        },
+        flush(): void {
+            if (!buffer) return;
+            const rest = buffer;
+            buffer = '';
+            (onTail || onLine)(rest);
+        },
+    };
+}
+
+/**
+ * Wire a journalctl -f process's two pipes into `onLine`, one line feeder per
+ * stream. Extracted from LlamaService.startJournalFollow so the wiring itself
+ * (not just the splitter) is testable against a fake process.
+ *
+ * `onTail` receives a final fragment that never got its newline when the
+ * process closes: it is a truncated line, not an event, so it is logged
+ * rather than parsed.
+ */
+export function attachJournalStreams(
+    proc: { stdout: NodeJS.ReadableStream | null; stderr: NodeJS.ReadableStream | null; on: (ev: string, cb: () => void) => void },
+    onLine: (line: string) => void,
+    onTail: (line: string) => void = onLine,
+): void {
+    const out = createLineFeeder(onLine, onTail);
+    const err = createLineFeeder(onLine, onTail);
+    proc.stdout?.on('data', (c: Buffer) => out.feed(c.toString()));
+    proc.stderr?.on('data', (c: Buffer) => err.feed(c.toString()));
+    proc.on('close', () => { out.flush(); err.flush(); });
+}
+
 
 export class LlamaService {
     private ctx: ServerCtx;
@@ -455,18 +503,15 @@ export class LlamaService {
         if (this.journal) return;
         const proc = unitMod.logFollowProcess(this.unitName(), 200, since);
         this.journal = proc;
-        let buffer = '';
-        const feed = (chunk: Buffer): void => {
-            buffer += chunk.toString();
-            const lines = buffer.split(/\r\n|\r|\n/);
-            buffer = lines.pop() || '';
-            if (buffer.length > 1_000_000) buffer = buffer.slice(-4096);
-            for (const line of lines) {
-                this.handleLine(line);
-            }
-        };
-        proc.stdout?.on('data', feed);
-        proc.stderr?.on('data', feed);
+        // One feeder per stream: journalctl interleaves stdout and stderr, and
+        // a single shared buffer let a partial line on one stream splice onto
+        // the other stream's bytes. The close-time tail is a truncated line, so
+        // it is logged, not parsed — same as the native path.
+        attachJournalStreams(
+            proc,
+            line => { this.handleLine(line); },
+            tail => { this.pushLog(tail); },
+        );
         proc.on('error', () => { this.journal = null; });
         proc.on('close', () => { this.journal = null; });
     }
@@ -565,19 +610,16 @@ export class LlamaService {
         const consume = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
             const reader = stream.getReader();
             const decoder = new TextDecoder();
-            let logLineBuffer = '';
+            // A trailing line that never got its newline is a truncated
+            // fragment, not an event: log it, do not parse it.
+            const feeder = createLineFeeder(line => { this.handleLine(line); }, tail => { this.pushLog(tail); });
             try {
                 while (true) {
                     const result = await reader.read();
                     if (result.done) break;
-                    const text = decoder.decode(result.value, { stream: true });
-                    logLineBuffer += text;
-                    const lines = logLineBuffer.split(/\r\n|\r|\n/);
-                    logLineBuffer = lines.pop() || '';
-                    if (logLineBuffer.length > 1_000_000) logLineBuffer = logLineBuffer.slice(-4096);
-                    for (const line of lines) this.handleLine(line);
+                    feeder.feed(decoder.decode(result.value, { stream: true }));
                 }
-                if (logLineBuffer.length) this.pushLog(logLineBuffer);
+                feeder.flush();
             } catch (error) {
                 console.error('Llama process log error:', error);
             }

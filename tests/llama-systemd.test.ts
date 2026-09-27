@@ -7,7 +7,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { writeUnitFile } from '../src/server/services/unit';
-import { writeLaunchScriptFile, loadLastLaunch, persistLastLaunch, probeLlama, journalSinceFor } from '../src/server/services/llama';
+import { writeLaunchScriptFile, loadLastLaunch, persistLastLaunch, probeLlama, journalSinceFor, attachJournalStreams } from '../src/server/services/llama';
 
 let tmp: string;
 beforeAll(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'llm-tuner-')); });
@@ -83,4 +83,76 @@ test('journalSinceFor falls back to catch-up rather than losing the logs', () =>
     const base = { activeState: 'active', subState: 'running', pid: 1, restarts: 0, result: '' };
     expect(journalSinceFor({ ...base, since: null })).toBeNull();
     expect(journalSinceFor({ ...base, since: 'not a timestamp' })).toBeNull();
+});
+
+// A stand-in for `journalctl -f`: two independently-fed pipes and a close
+// event, which is all attachJournalStreams touches.
+function fakeJournal() {
+    type Cb = (arg?: Buffer) => void;
+    const pipe = () => {
+        const subs = new Map<string, Cb[]>();
+        return {
+            on(ev: string, cb: Cb) {
+                const list = subs.get(ev) || [];
+                list.push(cb);
+                subs.set(ev, list);
+            },
+            write(text: string) {
+                for (const cb of subs.get('data') || []) cb(Buffer.from(text));
+            },
+        };
+    };
+    const stdout = pipe();
+    const stderr = pipe();
+    const closeSubs: Cb[] = [];
+    return {
+        stdout,
+        stderr,
+        on(ev: string, cb: Cb) { if (ev === 'close') closeSubs.push(cb); },
+        write(which: 'stdout' | 'stderr', text: string) {
+            (which === 'stdout' ? stdout : stderr).write(text);
+        },
+        close() { for (const cb of closeSubs) cb(); },
+    };
+}
+
+// The actual fix, tested at the wiring level: journalctl writes the unit's
+// stdout and stderr to two pipes and chunk boundaries land anywhere inside a
+// line. Wiring both pipes to one feeder would splice a partial line onto the
+// other stream's bytes, so this drives the real attachment with a fake proc.
+test('journal pipes get one buffer each: interleaved chunks do not merge', () => {
+    const lines: string[] = [];
+    const proc = fakeJournal();
+    attachJournalStreams(proc as never, l => lines.push(l));
+
+    proc.write('stdout', 'llama: loading model ');   // no newline yet
+    proc.write('stderr', 'CUDA out of memory\n');     // complete line, other pipe
+    proc.write('stdout', 'shard 1/3\nload_tensors: ');// completes line 1, starts line 2
+    proc.write('stderr', 'ggml_backend_');            // partial stderr line
+    proc.write('stdout', 'done\n');
+    proc.write('stderr', 'buffer flushed\n');         // completes the stderr line
+
+    expect(lines).toEqual([
+        'CUDA out of memory',
+        'llama: loading model shard 1/3',
+        'load_tensors: done',
+        'ggml_backend_buffer flushed',
+    ]);
+});
+
+test('a final fragment with no newline is logged as a tail on close', () => {
+    const lines: string[] = [];
+    const tails: string[] = [];
+    const proc = fakeJournal();
+    attachJournalStreams(proc as never, l => lines.push(l), t => tails.push(t));
+
+    proc.write('stdout', 'complete\ntruncated frag');
+    proc.write('stderr', 'also truncated');
+    expect(lines).toEqual(['complete']);
+    expect(tails).toEqual([]);
+
+    proc.close();
+    // Truncated fragments, per stream, as tails — not parsed as events.
+    expect(tails).toEqual(['truncated frag', 'also truncated']);
+    expect(lines).toEqual(['complete']);
 });
