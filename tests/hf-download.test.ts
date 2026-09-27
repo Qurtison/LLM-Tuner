@@ -207,6 +207,27 @@ describe('transfer', () => {
         expect(await fs.readdir(path.join(tempDir, FOLDER))).toEqual(['model-Q4_K_M.gguf']);
     });
 
+    test('a failing output stream fails the task instead of finalizing a short file', async () => {
+        const folder = path.join(tempDir, FOLDER);
+        await fs.mkdir(folder, { recursive: true });
+        // A directory where the .part goes makes the output stream's open() fail
+        // with EISDIR. That failure arrives as an async 'error' event rather than
+        // a throw, so it is only ever noticed by the transfer checking for it --
+        // which is exactly the handling the other tests never reach.
+        await fs.mkdir(path.join(folder, 'model-Q4_K_M.gguf.part'));
+
+        const svc = service({ maxAttempts: 2, retryBaseMs: 10 });
+        svc.rememberListing(await svc.listRepo(REPO));
+        const task = svc.start(REPO, ['model-Q4_K_M.gguf']);
+        const done = await settled(svc, task.id);
+
+        expect(done.status).toBe('failed');
+        expect(done.error).toMatch(/is a directory|EISDIR/i);
+        // The point of the check: no renamed file left looking like a finished
+        // download. finalize() must never run on a .part we failed to write.
+        expect(await fs.readdir(folder)).toEqual(['model-Q4_K_M.gguf.part']);
+    });
+
     test('downloads every selected file in order', async () => {
         const svc = service();
         svc.rememberListing(await svc.listRepo(REPO));

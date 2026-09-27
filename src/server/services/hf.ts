@@ -381,13 +381,31 @@ export class HfDownloadService {
     }
 
     private async stream(task: HfDownloadTask, file: HfRepoFile, controller: AbortController, existing: number, partPath: string, finalPath: string, markByte: () => void): Promise<void> {
+        const response = await this.open(task, file, controller, existing);
+        // validate() publishes the total on the task as a side effect.
+        const { resumed } = await this.validate(response, task, file, existing, partPath);
+        // A cancel mid-body returns false: there is nothing to finalize, and
+        // the .part is left as-is so the next attempt resumes from it.
+        if (!await this.writeBody(response, task, partPath, resumed, existing, markByte)) return;
+        await this.finalize(task, partPath, finalPath);
+    }
+
+    /** Issues the GET, carrying a Range header when a .part is on disk. */
+    private async open(task: HfDownloadTask, file: HfRepoFile, controller: AbortController, existing: number): Promise<Response> {
         const headers: Record<string, string> = {};
         if (existing > 0) headers.Range = 'bytes=' + existing + '-';
-        const response = await fetch(
+        return fetch(
             `${this.origin}/${task.repo}/resolve/main/${file.path.split('/').map(encodeURIComponent).join('/')}`,
             { headers, signal: controller.signal, redirect: 'follow' },
         );
+    }
 
+    /**
+     * Turns the response into the two facts the writer needs -- whether the
+     * resume was honoured, and how many bytes the file is in total -- or
+     * throws. Drops a .part the server refused to resume from.
+     */
+    private async validate(response: Response, task: HfDownloadTask, file: HfRepoFile, existing: number, partPath: string): Promise<{ resumed: boolean; total: number }> {
         if (response.status === 416) {
             // Range past the end: the part is complete or corrupt. Start over.
             await fs.rm(partPath, { force: true });
@@ -415,7 +433,15 @@ export class HfDownloadService {
         // only the remaining slice.
         const total = resumed ? existing + length : file.size;
         task.total = total || file.size;
+        return { resumed, total };
+    }
 
+    /**
+     * Copies the body to the .part, honouring write backpressure and throttling
+     * progress to EMIT_INTERVAL_MS. Resolves false when the task was cancelled
+     * part way through.
+     */
+    private async writeBody(response: Response, task: HfDownloadTask, partPath: string, resumed: boolean, existing: number, markByte: () => void): Promise<boolean> {
         const out = createWriteStream(partPath, { flags: resumed ? 'a' : 'w' });
         // A write stream signals failure as an 'error' event, which nothing
         // awaits: without a permanent listener a failed open or a full disk
@@ -429,14 +455,14 @@ export class HfDownloadService {
         const baseBytes = received;
 
         try {
-            const reader = response.body.getReader();
+            const reader = response.body!.getReader();
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) break;
                 if (!value) continue;
                 if (isCancelled(task)) {
                     await reader.cancel().catch(() => {});
-                    return;
+                    return false;
                 }
                 received += value.byteLength;
                 markByte();
@@ -460,8 +486,16 @@ export class HfDownloadService {
         } finally {
             await new Promise<void>(resolve => { out.end(resolve); });
         }
+        // Checked AFTER the close, not before it: a write can fail while the
+        // stream is draining buffered chunks in out.end(), and that error only
+        // arrives on the 'error' event. Testing inside the try block let those
+        // through and returned true, so a short .part reached finalize().
         if (writeError) throw writeError;
+        return true;
+    }
 
+    /** Size-checks the .part, then promotes it to the final name in one rename. */
+    private async finalize(task: HfDownloadTask, partPath: string, finalPath: string): Promise<void> {
         const written = (await this.sizeOf(partPath)) ?? 0;
         if (written < task.total) throw new Error('stream ended early (' + written + ' of ' + task.total + ' bytes)');
         await fs.rename(partPath, finalPath);
