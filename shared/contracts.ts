@@ -84,6 +84,17 @@ export interface RouterConfig {
     // fails instead of loading it. Unset = autoload (the llama-server default).
     autoload?: boolean;
     models?: RouterModelConfig[];
+    // A hand-written preset INI. When set, it is used verbatim and nothing is
+    // generated from the launch config: the text is the source of truth for
+    // per-model settings. Clear it to go back to generating one.
+    iniText?: string;
+}
+
+// A problem found in a hand-edited router preset INI, with the line it is on.
+export interface IniWarning {
+    line: number;
+    key: string;
+    message: string;
 }
 
 
@@ -337,6 +348,10 @@ export interface PreviewCommandResponse {
     // via --models-preset, holding every per-model knob. Absent in
     // single-model mode.
     ini?: string;
+    // Problems found in `ini`: keys the router does not recognize (it refuses
+    // to start on those) and keys the router controls (silently overwritten).
+    // Empty when the preset is clean, or absent in single-model mode.
+    iniWarnings?: IniWarning[];
     error?: string;
 }
 

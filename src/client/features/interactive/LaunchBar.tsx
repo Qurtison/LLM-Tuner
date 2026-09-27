@@ -16,7 +16,7 @@ import { useServer } from '../../state/server';
 export default function LaunchBar() {
     const { state } = useServer();
     const { presets, active, setActive } = usePresets();
-    const { form, set, models, builds, actionError, preview, ini, previewBusy, previewCommand, start, stop } = useLaunchForm();
+    const { form, set, models, builds, actionError, preview, ini, iniWarnings, previewBusy, previewCommand, start, stop } = useLaunchForm();
     const locked = state?.state !== undefined && state.state !== 'stopped';
     const stopDisabled = state?.state === 'stopped';
     const routerOn = form.routerEnabled;
@@ -88,6 +88,43 @@ export default function LaunchBar() {
                             already resident when the router starts. The preset&apos;s ctx, GPU layers,
                             cache and sampling settings apply to all of them.
                         </p>
+                        <div className="border-t border-neutral-800 pt-2">
+                            <div className="mb-1 flex items-center justify-between gap-2">
+                                <span className="text-xs text-neutral-400">Model preset (router.ini)</span>
+                                {form.routerIniText.trim() !== '' && (
+                                    <button type="button" onClick={() => set('routerIniText', '')} className="text-[10px] text-neutral-500 underline hover:text-neutral-300">
+                                        use generated
+                                    </button>
+                                )}
+                            </div>
+                            <textarea
+                                aria-label="Router model preset"
+                                value={form.routerIniText}
+                                onChange={e => set('routerIniText', e.target.value)}
+                                spellCheck={false}
+                                rows={8}
+                                placeholder={'Empty — generated from the preset.\nClick Preview below to see it.'}
+                                className={fieldClass + ' font-mono text-[11px]'}
+                            />
+                            {form.routerIniText.trim() === '' ? (
+                                <p className="mt-1 text-[10px] leading-snug text-neutral-500">
+                                    Leaving this empty generates the preset from the selected preset&apos;s settings.
+                                    Typing here takes over completely — the generated one is not merged in.
+                                </p>
+                            ) : iniWarnings.length === 0 ? (
+                                <p className="mt-1 text-[10px] text-emerald-500">Every key is a valid llama-server option.</p>
+                            ) : (
+                                <ul className="mt-1 space-y-0.5 text-[10px] text-amber-400">
+                                    {iniWarnings.map((w, i) => (
+                                        <li key={i}>line {w.line}: <span className="font-mono">{w.key}</span> {w.message}</li>
+                                    ))}
+                                </ul>
+                            )}
+                            <p className="mt-1 text-[10px] leading-snug text-neutral-500">
+                                Host, port and the model path are set by the router itself and belong on the
+                                command line, not in here — the router overwrites them.
+                            </p>
+                        </div>
                     </>
                 )}
             </fieldset>
@@ -100,11 +137,11 @@ export default function LaunchBar() {
             {ini && (
                 <>
                     <p className="mt-2 text-[10px] text-neutral-500">
-                        Model preset written next to launch.sh (generated/router.ini) and passed via
-                        --models-preset. In router mode this is where the preset&apos;s per-model settings
-                        go, so the command line above looks deceptively empty.
+                        {form.routerIniText.trim() !== ''
+                            ? <>Effective preset — your edited text, written to generated/router.ini and passed via --models-preset.</>
+                            : <>Generated from the selected preset and written to generated/router.ini, passed via --models-preset. In router mode this is where the per-model settings go, so the command line above looks deceptively empty.</>}
                     </p>
-                    <textarea readOnly aria-label="Generated router model preset" value={ini} className={fieldClass + ' mt-1 font-mono text-[11px]'} rows={12} />
+                    <textarea readOnly aria-label="Effective router model preset" value={ini} className={fieldClass + ' mt-1 font-mono text-[11px]'} rows={12} />
                 </>
             )}
         </div>

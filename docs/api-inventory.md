@@ -235,7 +235,7 @@ Conditional behavior is stated with its condition.
 - **Query params:** none
 - **Request body JSON shape:** launch config object (same shape as `/api/start`'s config body — see `buildLlamaArgs` for full field list at lines 390–504)
 - **Validation applied:** JSON parse error → 400 `{ error: "Invalid JSON" }` (line 1855)
-- **Response shape:** `application/json`: On success: `{ command: string, ini?: string }` (line 1859). `ini` appears only in router mode (launch config `router.enabled: true`) and holds the generated model preset that the command line passes via `--models-preset`; in that mode the per-model knobs live there rather than on the command line. On error: `{ command: '', error: string }` (line 1862)
+- **Response shape:** `application/json`: On success: `{ command: string, ini?: string, iniWarnings?: IniWarning[] }` (line 1859). `ini` appears only in router mode (launch config `router.enabled: true`) and holds the model preset the command line passes via `--models-preset` — generated from the launch config, or the user's own text when `router.iniText` is set. `iniWarnings` lists problems in it (`{ line, key, message }`), empty when clean; see Router mode below. On error: `{ command: '', error: string }` (line 1862)
 - **Status codes:** 200 always
 - **Side effects:** Calls `resolveLaunchCommand(body)` (lines 522–546); does NOT spawn anything
 
@@ -755,3 +755,27 @@ load-on-startup = true
   section, since no discovered model matches the name.
 - A model whose settings all match `[*]` and that has no `load-on-startup` gets
   no section at all.
+
+### Hand-written presets (`router.iniText`)
+
+`router.iniText` replaces the generated preset entirely: when set, the text is
+written to `generated/router.ini` verbatim (untrimmed) and nothing is generated
+from the launch config. The generated entries are *not* merged in, because
+merging would quietly reinstate the values the user just deleted. A blank or
+whitespace-only value means "not supplied" and falls back to generating.
+
+Because the preset is hand-editable, it is also validated
+(`shared/router-ini.ts`, used by both the route and the client editor as you
+type). Each problem is reported with its line number:
+
+- **Unknown key** — `is not a llama-server option; the router will refuse to
+  start`. One of these is fatal, not degraded: the router aborts before serving.
+- **Router-controlled key** (`host`, `port`, `alias`, `model`, `mmproj`,
+  `models-dir`, `models-preset`, `models-max`, `models-autoload`) — the router
+  accepts the line and then overwrites it. These are real llama flags and would
+  otherwise pass as valid, so they are checked before the known-key test.
+- **Unparseable line** — no `=`.
+
+Keys are matched leniently (`ctx_size`, `CTX-SIZE` and `ctx-size` are the same
+key) and a param's negative form is accepted, since the router normalises
+`no-x = true` into `x = false`.

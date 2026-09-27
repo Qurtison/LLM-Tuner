@@ -72,7 +72,6 @@ const ROUTER_CONTROLLED_PARAMS = new Set([
     'host', 'port', 'api_key', 'alias', 'model', 'mmproj',
     'models_dir', 'models_preset', 'models_max', 'no_models_autoload',
 ]);
-
 export type IniEntry = { key: string; value: string };
 
 function looksLikeFlag(token: unknown): boolean {

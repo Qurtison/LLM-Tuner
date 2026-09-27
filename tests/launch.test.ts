@@ -10,6 +10,7 @@ import {
   hostFromRpcTarget,
 } from '../src/server/lib/launch';
 import { argsToIniEntries, routerModelId } from '../src/server/lib/router';
+import { validateRouterIni } from '../shared/router-ini';
 import { PARAM_BY_ID } from '../shared/llama-params';
 
 const BUILDS = [
@@ -358,4 +359,101 @@ test('router mode: maxModels defaults to 1, and 0 still means unlimited', () => 
   expect(cap()).toBe('1');
   expect(cap(0)).toBe('0');
   expect(cap(2)).toBe('2');
+});
+
+// --- HAND-WRITTEN PRESET ---
+// ponytail: documents current behavior — a supplied iniText is used verbatim,
+// and is never merged with the generated entries.
+
+test('hand-written preset: used verbatim instead of the generated one', () => {
+  const iniText = 'version = 1\n\n[*]\nctx-size = 4096\n\n[gemma-4-12b-it-UD-Q4_K_XL]\nload-on-startup = true\n';
+  const { ini, args } = resolveLaunchCommand(
+    { ctx: 262144, ngl: 999, paramOverrides: { cache_type_k: 'q4_0' }, router: { enabled: true, iniText } },
+    BUILDS,
+    ROUTER_OPTS,
+  );
+  expect(ini).toBe(iniText);
+  // Nothing from the launch config leaks in: the user's text stands alone.
+  expect(ini).not.toContain('gpu-layers');
+  expect(ini).not.toContain('cache-type-k');
+  // The command line is unaffected either way.
+  expect(args).toContain('--models-preset');
+  expect(args).toContain('/app/generated/router.ini');
+});
+
+test('hand-written preset: blank or whitespace falls back to generating one', () => {
+  for (const iniText of ['', '   \n  ']) {
+    const { ini } = resolveLaunchCommand(
+      { ctx: 4096, ngl: 99, router: { enabled: true, iniText } },
+      BUILDS,
+      ROUTER_OPTS,
+    );
+    expect(ini).toContain('ctx-size = 4096');
+    expect(ini).toContain('gpu-layers = 99');
+  }
+});
+
+test('validateRouterIni: a clean generated preset reports nothing', () => {
+  const { ini } = resolveLaunchCommand(
+    { ctx: 262144, ngl: 999, paramOverrides: { cache_type_k: 'q4_0', metrics: true }, router: { enabled: true } },
+    BUILDS,
+    ROUTER_OPTS,
+  );
+  expect(validateRouterIni(ini as string)).toEqual([]);
+});
+
+test('validateRouterIni: an unknown key is reported with its line', () => {
+  const warnings = validateRouterIni('version = 1\n\n[*]\nthis-is-not-a-real-key = 5\n');
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0].line).toBe(4);
+  expect(warnings[0].key).toBe('this-is-not-a-real-key');
+  expect(warnings[0].message).toContain('refuse to start');
+});
+
+test('validateRouterIni: router-controlled keys start but get overwritten', () => {
+  for (const key of ['host', 'port', 'models-max', 'alias']) {
+    const warnings = validateRouterIni(`[*]\n${key} = 1\n`);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].message).toContain('overwritten');
+  }
+});
+
+test('validateRouterIni: accepts the shapes people actually type', () => {
+  // Underscores, mixed case, comments, section headers and preset-only keys.
+  const warnings = validateRouterIni([
+    '; a comment',
+    '# another',
+    'version = 1',
+    '[*]',
+    'ctx_size = 4096',
+    'CTX-SIZE = 8192',
+    'reasoning-preserve = true',
+    'cache-type-k = q4_0',
+    'load-on-startup = true',
+    'stop-timeout = 30',
+  ].join('\n'));
+  expect(warnings).toEqual([]);
+});
+
+test('validateRouterIni: a stray line with no = is reported', () => {
+  const warnings = validateRouterIni('[*]\nctx-size 4096\n');
+  expect(warnings).toHaveLength(1);
+  expect(warnings[0].line).toBe(2);
+  expect(warnings[0].message).toContain('key = value');
+});
+
+test('validateRouterIni: every generated key survives its own validator', () => {
+  // The generator and the validator must agree, or the editor would flag a
+  // preset the dashboard just produced.
+  const { ini } = resolveLaunchCommand(
+    {
+      ctx: 262144, ngl: 999, specType: 'draft-mtp,ngram-mod', cacheK: 'q4_0', cacheV: 'q4_0',
+      paramOverrides: { cache_type_k_draft: 'q4_0', no_reasoning_preserve: true, metrics: true, top_k: 20, min_p: 0 },
+      tensorSplit: '0.75,1.25', deviceA: 'CUDA0', deviceB: 'VULKAN1', temp: 1, reasoningPreserve: true,
+      router: { enabled: true, models: [{ modelPath: '/home/ai/llm/models/a/b.gguf', loadOnStartup: true, ctx: 4096 }] },
+    },
+    BUILDS,
+    ROUTER_OPTS,
+  );
+  expect(validateRouterIni(ini as string)).toEqual([]);
 });

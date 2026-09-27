@@ -17,7 +17,8 @@ import { usePresets } from '../hooks/usePresets';
 import { useDevices } from '../hooks/useDevices';
 import { Value } from '../state/value';
 import { fieldClass } from './Field';
-import type { BuildEntry, LaunchConfig, ModelEntry, PreviewCommandResponse } from '../../../shared/contracts';
+import type { BuildEntry, IniWarning, LaunchConfig, ModelEntry, PreviewCommandResponse } from '../../../shared/contracts';
+import { validateRouterIni } from '../../../shared/router-ini';
 
 export interface LaunchForm {
     modelPath: string;
@@ -37,11 +38,14 @@ export interface LaunchForm {
     // Model path -> load at router startup. Models are discovered from the
     // models dir either way; this only picks which one is already resident.
     routerStartup: Record<string, boolean>;
+    // A hand-written preset INI, edited in the LaunchBar. Empty = generate one
+    // from the preset; non-empty = this text is used verbatim.
+    routerIniText: string;
 }
 
 const baseForm: LaunchForm = {
     modelPath: '', build: '', deviceA: '', deviceB: '', rpcTarget: '', workerSsh: '', transport: 'WiFi', rawCommand: '',
-    routerEnabled: false, routerMax: '', routerAutoload: true, routerStartup: {},
+    routerEnabled: false, routerMax: '', routerAutoload: true, routerStartup: {}, routerIniText: '',
 };
 
 // Shared across panels; exported so non-panel pickers (HF search) can write
@@ -59,6 +63,7 @@ export function useLaunchForm(): {
     preview: string;
     // Router mode only: the generated model preset the launch writes to disk.
     ini: string;
+    iniWarnings: IniWarning[];
     previewBusy: boolean;
     actionError: string;
     setActionError: (s: string) => void;
@@ -112,6 +117,10 @@ export function useLaunchForm(): {
     // preset, since that is where ctx/ngl/cache/sampling live.
     const routerEnabled = form.routerEnabled || presetBase.router?.enabled === true;
     const routerMax = form.routerMax || (presetBase.router?.maxModels !== undefined ? String(presetBase.router.maxModels) : '');
+    const routerIniText = form.routerIniText || presetBase.router?.iniText || '';
+    // Live check of the hand-written preset. The registry is shared with the
+    // server, so this matches what the router will actually accept.
+    const iniWarnings = useMemo(() => (routerIniText ? validateRouterIni(routerIniText) : []), [routerIniText]);
     const request = (): LaunchConfig => ({
         ...presetBase,
         modelPath: form.modelPath || presetBase.modelPath,
@@ -131,6 +140,9 @@ export function useLaunchForm(): {
             models: Object.entries(form.routerStartup)
                 .filter(([, on]) => on)
                 .map(([modelPath]) => ({ modelPath, loadOnStartup: true })),
+            // A hand-written preset is the source of truth when present: the
+            // server uses it verbatim instead of generating one.
+            ...(routerIniText ? { iniText: routerIniText } : {}),
         } : (presetBase.router ? { ...presetBase.router, enabled: false } : undefined),
     });
 
@@ -164,7 +176,7 @@ export function useLaunchForm(): {
         catch (err) { setActionError(err instanceof Error ? err.message : 'Stop failed.'); }
     }
 
-    return { form, set, models, builds, devices, devicesError, request, preview, ini, previewBusy, actionError, setActionError, start, stop, previewCommand };
+    return { form, set, models, builds, devices, devicesError, request, preview, ini, iniWarnings, previewBusy, actionError, setActionError, start, stop, previewCommand };
 }
 
 export { fieldClass };

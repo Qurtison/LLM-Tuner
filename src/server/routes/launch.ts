@@ -1,6 +1,7 @@
 // LAUNCH: preview-command, start, stop (the dashboard-managed model server).
 import { formatCommand, LlamaSpawnError } from '../services/llama';
 import * as launchLib from '../lib/launch';
+import { validateRouterIni } from '../../../shared/router-ini';
 import { jsonBodyOr400, type RouteCtx } from './context';
 
 export async function handle(ctx: RouteCtx, req: Request, url: URL): Promise<Response | null> {
@@ -18,8 +19,14 @@ export async function handle(ctx: RouteCtx, req: Request, url: URL): Promise<Res
                 appRoot: ctx.appRoot,
             });
             // Router mode keeps its per-model tuning in a generated INI, so the
-            // command line alone would hide every knob the launch applies.
-            return ctx.json({ command: formatCommand(command, args), ini });
+            // command line alone would hide every knob the launch applies. The
+            // preset is user-editable, so it is also checked here: one unknown
+            // key stops the router from starting at all.
+            return ctx.json({
+                command: formatCommand(command, args),
+                ini,
+                iniWarnings: ini === undefined ? [] : validateRouterIni(ini),
+            });
         } catch (err) {
             return ctx.json({ command: '', error: (err as Error).message });
         }

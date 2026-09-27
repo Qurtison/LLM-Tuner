@@ -32,6 +32,26 @@ function routerModels(config: LaunchInput): RouterModelConfig[] {
     return router.models.filter((m): m is RouterModelConfig =>
         !!m && typeof m === 'object' && typeof (m as RouterModelConfig).modelPath === 'string');
 }
+
+// A hand-written preset INI from the launch config, if the user supplied one.
+function routerIniText(config: LaunchInput): string | undefined {
+    const router = config.router as { iniText?: unknown } | undefined;
+    const raw = router?.iniText;
+    // Blank means "not supplied", but a supplied preset is passed through
+    // UNTRIMMED: the editor promises the text is used as written, and silently
+    // reflowing someone's file is not its job.
+    if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+    return raw;
+}
+
+// The INI derived from the launch config: the per-model knobs rendered once as
+// args, then rewritten as INI entries. One code path decides what a preset
+// means, so the two launch modes cannot drift apart.
+function buildGeneratedRouterIni(config: LaunchInput, modelsDir: string, opts: { mapModelPath: (p: string) => string; deviceArgs: string[]; defaultPort?: number }): string {
+    const modelArgs = buildLlamaArgs(config, { ...opts, router: true });
+    const globalEntries = argsToIniEntries(modelArgs);
+    return buildRouterIni(globalEntries, buildRouterSections(routerModels(config), modelsDir, globalEntries));
+}
 // The resolver treats the launch config as untrusted input: every field is
 // coerced (toFiniteNumber/toNonEmptyString) before use. Keys are typed
 // `unknown` (not LaunchConfig's own types) because user JSON and tests feed
@@ -387,16 +407,14 @@ export function resolveLaunchCommand(config: LaunchInput, builds: BuildEntry[], 
         const dir = resolveModelsDir(config, modelsDir);
         if (!dir) throw new Error('router mode needs a models directory (set paths.modelDirectories or router.modelsDir)');
         const presetPath = routerIniPathFor(appRoot);
-        // The per-model knobs are rendered once, as args, then rewritten as
-        // INI entries -- one code path decides what a preset means, so the
-        // two launch modes cannot drift apart.
-        const modelArgs = buildLlamaArgs(config, { mapModelPath, deviceArgs, defaultPort, router: true });
-        const globalEntries = argsToIniEntries(modelArgs);
-        const sections = buildRouterSections(routerModels(config), dir, globalEntries);
+        // A hand-written preset wins outright: it is the source of truth for
+        // per-model settings, and merging generated entries back into it would
+        // quietly reinstate the very values the user just deleted.
+        const ini = routerIniText(config) ?? buildGeneratedRouterIni(config, dir, { mapModelPath, deviceArgs, defaultPort });
         return {
             command,
             args: buildRouterArgs(config, { modelsDir: dir, presetPath, defaultPort }),
-            ini: buildRouterIni(globalEntries, sections),
+            ini,
         };
     }
 
