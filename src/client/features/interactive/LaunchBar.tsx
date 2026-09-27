@@ -67,10 +67,9 @@ function RunningSummary({ state, activeName, builds, form, onStop, stopDisabled,
 export default function LaunchBar() {
     const { state } = useServer();
     const { presets, active, setActive } = usePresets();
-    const { form, set, models, builds, actionError, preview, ini, iniWarnings, previewBusy, previewCommand, start, stop } = useLaunchForm();
+    const { form, set, models, builds, actionError, preview, ini, iniWarnings, previewBusy, previewCommand, start, stop, routerOn } = useLaunchForm();
     const locked = state?.state !== undefined && state.state !== 'stopped';
     const stopDisabled = state?.state === 'stopped';
-    const routerOn = form.routerEnabled;
     const btn = 'rounded px-3 py-1.5 text-xs disabled:opacity-50';
     return (
         <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">

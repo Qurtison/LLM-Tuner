@@ -17,31 +17,11 @@ import { usePresets } from '../hooks/usePresets';
 import { useDevices } from '../hooks/useDevices';
 import { Value } from '../state/value';
 import { fieldClass } from './Field';
+import { buildLaunchRequest, effectiveRouterEnabled, effectiveRouterIniText, type LaunchForm } from '../lib/launchRequest';
 import type { BuildEntry, IniWarning, LaunchConfig, ModelEntry, PreviewCommandResponse } from '../../../shared/contracts';
 import { validateRouterIni } from '../../../shared/router-ini';
-
-export interface LaunchForm {
-    modelPath: string;
-    build: string;
-    deviceA: string;
-    deviceB: string;
-    rpcTarget: string;
-    workerSsh: string;
-    transport: string;
-    rawCommand: string;
-    // Router mode (llama-server with --models-dir, no -m). The per-model knobs
-    // still come from the preset; these only describe the router itself.
-    routerEnabled: boolean;
-    // Blank = leave llama-server's default (4) alone.
-    routerMax: string;
-    routerAutoload: boolean;
-    // Model path -> load at router startup. Models are discovered from the
-    // models dir either way; this only picks which one is already resident.
-    routerStartup: Record<string, boolean>;
-    // A hand-written preset INI, edited in the LaunchBar. Empty = generate one
-    // from the preset; non-empty = this text is used verbatim.
-    routerIniText: string;
-}
+// Kept for importers that already pull the type from here.
+export type { LaunchForm } from '../lib/launchRequest';
 
 const baseForm: LaunchForm = {
     modelPath: '', build: '', deviceA: '', deviceB: '', rpcTarget: '', workerSsh: '', transport: 'WiFi', rawCommand: '',
@@ -64,6 +44,8 @@ export function useLaunchForm(): {
     devices: { id: string; description: string }[];
     devicesError: string;
     request: () => LaunchConfig;
+    // Effective router toggle (form OR preset) — what the next launch will do.
+    routerOn: boolean;
     preview: string;
     // Router mode only: the generated model preset the launch writes to disk.
     ini: string;
@@ -134,40 +116,14 @@ export function useLaunchForm(): {
     const set = <K extends keyof LaunchForm>(k: K, v: LaunchForm[K]) => launchFormStore.update(old => ({ ...old, [k]: v }));
 
     const presetBase: LaunchConfig = useMemo(() => draft ?? {}, [draft]);
-    // Router mode is a launch-level switch, but the preset may also carry one
-    // (a preset saved with router settings should not need the toggle re-set).
-    // The form wins when it disagrees; per-model knobs always come from the
-    // preset, since that is where ctx/ngl/cache/sampling live.
-    const routerEnabled = form.routerEnabled || presetBase.router?.enabled === true;
-    const routerMax = form.routerMax || (presetBase.router?.maxModels !== undefined ? String(presetBase.router.maxModels) : '');
-    const routerIniText = form.routerIniText || presetBase.router?.iniText || '';
+    // Precedence (form beats preset, router merge) lives in the pure builder;
+    // see src/client/lib/launchRequest.ts and tests/launch-request.test.ts.
+    const request = () => buildLaunchRequest(form, presetBase);
+    const routerOn = effectiveRouterEnabled(form, presetBase);
     // Live check of the hand-written preset. The registry is shared with the
     // server, so this matches what the router will actually accept.
+    const routerIniText = effectiveRouterIniText(form, presetBase);
     const iniWarnings = useMemo(() => (routerIniText ? validateRouterIni(routerIniText) : []), [routerIniText]);
-    const request = (): LaunchConfig => ({
-        ...presetBase,
-        modelPath: form.modelPath || presetBase.modelPath,
-        build: form.build || presetBase.build || '',
-        // Untouched form fields fall back to the preset instead of wiping it.
-        deviceA: form.deviceA || presetBase.deviceA || '',
-        deviceB: form.deviceB || presetBase.deviceB || '',
-        devices: [form.deviceA || presetBase.deviceA, form.deviceB || presetBase.deviceB].filter(Boolean).join(','),
-        rpcTarget: form.rpcTarget ? (form.workerSsh || presetBase.rpcTarget || '') : '',
-        transport: form.transport,
-        rawCommand: form.rawCommand || presetBase.rawCommand || '',
-        router: routerEnabled ? {
-            ...(presetBase.router || { enabled: true }),
-            enabled: true,
-            ...(routerMax.trim() ? { maxModels: Number(routerMax) } : {}),
-            autoload: form.routerAutoload,
-            models: Object.entries(form.routerStartup)
-                .filter(([, on]) => on)
-                .map(([modelPath]) => ({ modelPath, loadOnStartup: true })),
-            // A hand-written preset is the source of truth when present: the
-            // server uses it verbatim instead of generating one.
-            ...(routerIniText ? { iniText: routerIniText } : {}),
-        } : (presetBase.router ? { ...presetBase.router, enabled: false } : undefined),
-    });
 
     // Router mode: what the launch actually applies lives in the generated INI,
     // so the preview has to show it too or the command looks like it lost every
@@ -199,7 +155,7 @@ export function useLaunchForm(): {
         catch (err) { setActionError(err instanceof Error ? err.message : 'Stop failed.'); }
     }
 
-    return { form, set, models, builds, devices, devicesError, request, preview, ini, iniWarnings, previewBusy, actionError, setActionError, start, stop, previewCommand };
+    return { form, set, models, builds, devices, devicesError, request, routerOn, preview, ini, iniWarnings, previewBusy, actionError, setActionError, start, stop, previewCommand };
 }
 
 export { fieldClass };
